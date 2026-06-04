@@ -97,10 +97,31 @@ class TelegramGate:
                 return ReviewDecision.REJECTED
 
             long_poll = max(0, min(50, int(remaining)))  # 텔레그램 권장 long-poll 상한
-            for update in client.get_updates(offset=offset, timeout=long_poll):
+            try:
+                updates = client.get_updates(offset=offset, timeout=long_poll)
+            except Exception as exc:
+                # 1시간 대기 중의 일시적 네트워크/HTTP 오류로 run이 죽지 않도록 계속 폴링.
+                # (전체 대기는 바깥 타임아웃이 여전히 제한한다)
+                log.warning("telegram.poll_error", stage=review.stage.value, error=str(exc))
+                self._sleep(self.settings.review_poll_interval_sec)
+                continue
+
+            for update in updates:
                 offset = int(update.get("update_id", 0)) + 1
                 cb = update.get("callback_query")
                 if not cb or not str(cb.get("data", "")).startswith(prefix):
+                    continue
+                # 인가 확인: 설정된 검수 채팅에서 온 콜백만 인정(아무나 승인 차단).
+                if not self._is_authorized(cb, chat_id):
+                    log.warning(
+                        "telegram.unauthorized_callback",
+                        stage=review.stage.value,
+                        from_chat=cb.get("message", {}).get("chat", {}).get("id"),
+                    )
+                    try:
+                        client.answer_callback(cb.get("id", ""))
+                    except Exception:
+                        pass
                     continue
                 decision = _decision_from_callback(cb["data"], prefix)
                 # 사람이 이미 결정했으므로 UI 호출 전에 먼저 영속화(분실 방지).
@@ -116,6 +137,21 @@ class TelegramGate:
                 return decision
 
             self._sleep(self.settings.review_poll_interval_sec)
+
+    @staticmethod
+    def _is_authorized(cb: dict, chat_id: str) -> bool:
+        """콜백이 설정된 검수 채팅(chat_id)에서 왔는지 확인한다.
+
+        텔레그램은 봇과 상호작용 가능한 누구에게서나 callback_query를 전달하므로,
+        메시지가 속한 chat.id(또는 보낸 사용자 from.id)가 설정된 chat_id와 일치할 때만
+        인정한다. review id는 인증 수단이 아니다.
+        """
+        if not chat_id:
+            return False
+        target = str(chat_id)
+        origin_chat = str(cb.get("message", {}).get("chat", {}).get("id", ""))
+        origin_user = str(cb.get("from", {}).get("id", ""))
+        return target in (origin_chat, origin_user)
 
 
 class DiscordGate:
