@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     # 1단계: 대본 (Claude)
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     script_model: str = Field(default="claude-opus-4-8", alias="NUTTI_SCRIPT_MODEL")
+    # 실행 간 영속 상태(직전 성과 피드백·최근 주제) 저장 경로.
+    # 매 사이클의 성과 분석을 다음 사이클 feedback으로 자동 연결하고,
+    # 최근 주제를 기억해 주제 자동 생성 시 중복을 피하는 데 쓴다.
+    state_path: str = Field(default="data/pipeline_state.json", alias="NUTTI_STATE_PATH")
 
     # 2단계: 영상
     hedra_api_key: str = Field(default="", alias="HEDRA_API_KEY")
