@@ -9,6 +9,7 @@ from nutti.config import Settings
 from nutti.integrations.ai_text import (
     AITextClient,
     FactCheckResult,
+    _clean_topic,
     _extract_tool_input,
     _first_text,
 )
@@ -147,3 +148,78 @@ def test_generate_metadata_no_duplicate_link():
     ])
     meta = _live_client(msg).generate_metadata(Script(topic="t", body="b"), url)
     assert meta.description.count(url) == 1
+
+
+# --- 주제 자동 생성(suggest_topic) ---
+
+def test_suggest_topic_dry_run_returns_seed():
+    topic = _client().suggest_topic()
+    assert isinstance(topic, str) and topic.strip()
+
+
+def test_suggest_topic_dry_run_avoids_recent():
+    # 최근 주제로 첫 시드를 막으면 다른 주제를 골라야 한다.
+    client = _client()
+    first = client.suggest_topic(recent_topics=[])
+    second = client.suggest_topic(recent_topics=[first])
+    assert second != first
+
+
+def test_suggest_topic_dry_run_all_seeds_used_still_returns():
+    # 모든 시드를 최근에 다뤄도 빈 문자열이 아니라 변형 주제를 돌려줘야 한다.
+    from nutti.integrations.ai_text import _SEED_TOPICS
+
+    client = _client()
+    topic = client.suggest_topic(recent_topics=list(_SEED_TOPICS))
+    assert topic.strip()
+
+
+def _live_topic_client(msg) -> AITextClient:
+    """비-dry 설정 + 가짜 Anthropic 주입 → suggest_topic 라이브 경로.
+
+    suggest_topic은 self.settings.dry_run으로 분기하므로(_client 여부가 아님),
+    라이브 경로를 타려면 dry_run=False 설정이 필요하다.
+    """
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    client._client = _FakeAnthropic(msg)
+    return client
+
+
+def test_suggest_topic_live_uses_first_text():
+    # 라이브 경로(가짜 Anthropic): text 응답을 한 줄 주제로 정리해 반환.
+    client = _live_topic_client(_Msg([_Block("text", text="강아지 여름철 수분 간식 3가지")]))
+    assert client.suggest_topic(feedback="여름 소재 반응 좋음") == "강아지 여름철 수분 간식 3가지"
+
+
+def test_suggest_topic_live_empty_falls_back_to_seed():
+    # 모델이 빈 응답을 주면 시드로 폴백(파이프라인이 멈추지 않도록).
+    client = _live_topic_client(_Msg([_Block("text", text="   ")]))
+    assert client.suggest_topic().strip()
+
+
+# --- _clean_topic 정리 로직 ---
+
+def test_clean_topic_strips_bullets_and_quotes():
+    assert _clean_topic('- "강아지 간식 적정량"') == "강아지 간식 적정량"
+    assert _clean_topic("1. 노령견 관절 간식") == "노령견 관절 간식"
+    assert _clean_topic("```\n강아지 치아 건강\n```") == "강아지 치아 건강"
+
+
+def test_clean_topic_takes_first_nonempty_line():
+    assert _clean_topic("\n\n강아지 수분 보충\n부가 설명") == "강아지 수분 보충"
+
+
+def test_clean_topic_preserves_leading_numbers_in_title():
+    # 번호 매김(1. )은 제거하되, 제목 자체의 숫자("10가지"·"2024년"·"5분")는 보존해야 한다.
+    assert _clean_topic("10가지 강아지 간식") == "10가지 강아지 간식"
+    assert _clean_topic("2024년 강아지 트렌드") == "2024년 강아지 트렌드"
+    assert _clean_topic("5분 안에 만드는 간식") == "5분 안에 만드는 간식"
+    # 진짜 번호 매김은 여전히 제거.
+    assert _clean_topic("10) 강아지 간식") == "강아지 간식"
+    assert _clean_topic("3] 강아지 간식") == "강아지 간식"
+
+
+def test_clean_topic_empty_returns_blank():
+    assert _clean_topic("") == ""
+    assert _clean_topic("   \n  ") == ""

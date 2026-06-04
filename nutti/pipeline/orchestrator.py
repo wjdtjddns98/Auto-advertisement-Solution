@@ -20,6 +20,7 @@ from nutti.models import (
 )
 from nutti.review.gates import DiscordGate, ReviewGate, TelegramGate
 from nutti.storage.sheets import SheetStore
+from nutti.storage.state_store import PipelineState
 
 log = get_logger(__name__)
 
@@ -49,17 +50,36 @@ class Orchestrator:
         telegram: ReviewGate | None = None,
         discord: ReviewGate | None = None,
         max_factcheck_retries: int = 1,
+        state: PipelineState | None = None,
     ):
         self.settings = settings or get_settings()
         self.ai = AITextClient(self.settings)
         self.studio = VideoStudio(self.settings)
         self.publisher = Publisher(self.settings)
         self.store = SheetStore(self.settings)
+        # 실행 간 영속 상태(직전 피드백·최근 주제). 테스트 시 tmp 경로 주입 가능.
+        self.state = state or PipelineState(self.settings.state_path)
         # 팩트체크 실패 시 issues를 피드백으로 대본을 재생성하는 최대 횟수.
         self.max_factcheck_retries = max_factcheck_retries
         # 검수 게이트 주입 가능(테스트 시 AutoApproveGate)
         self.telegram: ReviewGate = telegram or TelegramGate(self.settings)
         self.discord: ReviewGate = discord or DiscordGate(self.settings)
+
+    def resolve_inputs(self, topic: str | None = None, feedback: str = "") -> tuple[str, str]:
+        """실행 입력을 확정한다(피드백 자동 연결 + 주제 자동 생성).
+
+        - feedback이 비어 있으면 직전 사이클에서 저장한 분석 결과를 자동으로 불러온다.
+        - topic이 비어 있으면 (피드백·최근 주제를 반영해) 주제를 자동 생성한다.
+        - 확정된 주제는 최근 주제 목록에 기록해 다음 자동 생성 시 중복을 피한다.
+        """
+        effective_feedback = feedback or self.state.get_feedback()
+        if topic and topic.strip():
+            chosen = topic.strip()
+        else:
+            chosen = self.ai.suggest_topic(effective_feedback, self.state.get_recent_topics())
+        self.state.add_topic(chosen)
+        log.info("pipeline.inputs_resolved", topic=chosen, has_feedback=bool(effective_feedback))
+        return chosen, effective_feedback
 
     def run(
         self,
@@ -126,9 +146,15 @@ class Orchestrator:
             raise FactCheckFailed(result.issues)
 
     def collect_and_analyze(self, run: PipelineRun) -> str:
-        """업로드된 콘텐츠의 성과를 수집하고 다음 대본 개선안을 도출(피드백 루프)."""
+        """업로드된 콘텐츠의 성과를 수집하고 다음 대본 개선안을 도출(피드백 루프).
+
+        도출한 분석 결과를 상태에 저장해, 다음 사이클의 resolve_inputs가 이를
+        feedback으로 자동 주입하도록 한다(피드백 루프 닫기).
+        """
         run.reports = [self.publisher.fetch_performance(u) for u in run.uploads]
-        return self.ai.analyze_performance(run.reports)
+        analysis = self.ai.analyze_performance(run.reports)
+        self.state.save_feedback(analysis)
+        return analysis
 
     def _gate(self, gate: ReviewGate, stage: Stage, title: str, preview: str) -> None:
         review = ReviewRequest(stage=stage, title=title, preview=preview)

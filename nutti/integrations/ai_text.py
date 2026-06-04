@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel
 
 from nutti.config import Settings
@@ -16,6 +18,28 @@ SCRIPT_SYSTEM_PROMPT = (
     "60초 내외 쇼츠/릴스용 대본을 쓰되, 반드시 팩트체크 가능한 내용만 포함한다. "
     "과장·근거 없는 의학 주장은 금지한다."
 )
+
+# 주제 자동 생성용 시스템 프롬프트(다음 사이클에 다룰 쇼츠 주제 1개 제안).
+TOPIC_SYSTEM_PROMPT = (
+    "너는 애견 수제간식 브랜드 'Nutti'의 콘텐츠 기획자다. "
+    "수의학·사실에 기반한 강아지 건강/다이어트/음식 정보를 다루는 60초 쇼츠 주제를 "
+    "딱 한 개 제안한다. 최근 다룬 주제와 겹치지 않게 하고, 성과 분석 피드백이 있으면 "
+    "그 방향(잘 된 포맷·소재)을 반영한다. 검색·시청 욕구를 자극하되 과장은 피한다."
+)
+
+# dry_run 및 폴백용 주제 시드(외부 호출 없이 매 사이클 다른 주제가 나오도록).
+_SEED_TOPICS = [
+    "강아지 닭가슴살 간식, 하루 적정량은?",
+    "강아지가 먹으면 안 되는 음식 5가지",
+    "노령견 관절 건강에 좋은 간식 고르는 법",
+    "강아지 다이어트 중 간식, 이렇게 주세요",
+    "강아지 고구마 간식, 얼마나 줘도 될까?",
+    "강아지 치아 건강을 위한 덴탈 간식 진실",
+    "강아지 수분 보충, 간식으로도 가능할까?",
+    "강아지 알레르기, 간식으로 확인하는 법",
+    "강아지 단백질 간식 제대로 고르는 기준",
+    "수제간식 보관, 이렇게 하면 안 상해요",
+]
 
 # 팩트체크 시스템 프롬프트(수의학적 위험·근거 없는 주장 탐지).
 FACT_CHECK_SYSTEM_PROMPT = (
@@ -95,6 +119,24 @@ def _first_text(msg) -> str:
     return ""
 
 
+def _clean_topic(raw: str) -> str:
+    """모델이 돌려준 주제 텍스트를 한 줄 제목으로 정리.
+
+    여러 줄이면 첫 비어있지 않은 줄을 쓰고, 글머리표(-, *, 1.)·따옴표·백틱을 제거한다.
+    """
+    for line in (raw or "").splitlines():
+        line = line.strip().strip("`").strip()
+        # 글머리표 제거: "- ", "* ", "• ".
+        line = line.lstrip("-*•").strip()
+        # 번호 매김만 제거: "1. ", "10) ", "3] ". 단, "10가지"·"2024년"처럼
+        # 숫자 뒤에 구두점이 없는 정상 제목은 건드리지 않는다(글자 단위 제거 금지).
+        line = re.sub(r"^\d+[.)\]]\s*", "", line)
+        line = line.strip().strip('"').strip("'").strip()
+        if line:
+            return line
+    return ""
+
+
 class AITextClient:
     """Anthropic SDK 래퍼. dry_run이면 더미 대본/메타데이터를 생성한다."""
 
@@ -146,20 +188,17 @@ class AITextClient:
         # 실제 모드에서는 호출자가 fact_check_script로 검증/갱신한다.
         return Script(topic=topic, body=body, prompt=prompt, fact_checked=False)
 
-    def _generate_via_claude_code(self, topic: str, prompt: str) -> Script:
-        """Anthropic API 대신 Claude Code(Max 구독)로 대본 생성 — API 추가 과금 없음.
+    def _claude_cli(self, full_prompt: str) -> str:
+        """claude -p(헤드리스 print 모드)로 프롬프트를 보내고 stdout(텍스트)을 반환.
 
-        claude -p(헤드리스 print 모드)로 시스템 프롬프트+요청을 보내고 출력을 대본 본문으로 쓴다.
+        API 키가 없을 때 Claude Code(Max 구독)를 통해 생성하므로 API 추가 과금이 없다.
+        대본 생성·주제 제안 등 텍스트 생성 경로가 공유한다.
         """
         import subprocess
 
-        full = (
-            f"{SCRIPT_SYSTEM_PROMPT}\n\n{prompt}\n\n"
-            "대본 본문만 출력해줘. 머리말·설명·코드블록 없이 대본 텍스트만."
-        )
         try:
             proc = subprocess.run(
-                ["claude", "-p", full],
+                ["claude", "-p", full_prompt],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -171,9 +210,74 @@ class AITextClient:
             ) from exc
         if proc.returncode != 0:
             raise RuntimeError(f"claude -p 실패: {(proc.stderr or '').strip()[:200]}")
-        body = (proc.stdout or "").strip()
+        return (proc.stdout or "").strip()
+
+    def _generate_via_claude_code(self, topic: str, prompt: str) -> Script:
+        """Anthropic API 대신 Claude Code(Max 구독)로 대본 생성 — API 추가 과금 없음."""
+        full = (
+            f"{SCRIPT_SYSTEM_PROMPT}\n\n{prompt}\n\n"
+            "대본 본문만 출력해줘. 머리말·설명·코드블록 없이 대본 텍스트만."
+        )
+        body = self._claude_cli(full)
         log.info("script.generated_via_claude_code", topic=topic, chars=len(body))
         return Script(topic=topic, body=body, prompt=prompt, fact_checked=False)
+
+    def suggest_topic(self, feedback: str = "", recent_topics: list[str] | None = None) -> str:
+        """다음 사이클에 다룰 쇼츠 주제를 한 개 제안한다(주제 자동 최적화).
+
+        generate_script와 동일한 3-way 분기:
+        dry_run→시드 주제, API 키 있음→Anthropic API, 없음→Claude Code(claude -p).
+        recent_topics와 겹치지 않게 하고, feedback(직전 성과 분석)이 있으면 반영한다.
+        """
+        recent = recent_topics or []
+
+        if self.settings.dry_run:
+            log.info("dry_run.suggest_topic", n_recent=len(recent))
+            return self._dry_topic(recent)
+
+        prompt = "아래 조건으로 새 쇼츠 주제를 딱 한 개만 제안해줘.\n"
+        if recent:
+            prompt += "\n[최근 다룬 주제 — 겹치지 말 것]\n" + "\n".join(
+                f"- {t}" for t in recent
+            ) + "\n"
+        if feedback:
+            prompt += f"\n[직전 성과 분석 — 다음 주제에 반영]\n{feedback}\n"
+        prompt += "\n주제 문장 한 줄만 출력해줘. 따옴표·번호·머리말·설명 없이 제목 텍스트만."
+
+        if self._client is None:
+            # API 키 없음 → Claude Code(Max)로 주제 생성.
+            raw = self._claude_cli(f"{TOPIC_SYSTEM_PROMPT}\n\n{prompt}")
+        else:
+            msg = self._client.messages.create(
+                model=self.settings.script_model,
+                max_tokens=128,
+                system=[
+                    {
+                        "type": "text",
+                        "text": TOPIC_SYSTEM_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = _first_text(msg)
+
+        topic = _clean_topic(raw)
+        # 모델이 빈 응답/형식 깨짐을 주면 시드로 폴백(파이프라인이 멈추지 않도록).
+        if not topic:
+            log.warning("topic.suggest.empty_fallback")
+            return self._dry_topic(recent)
+        log.info("topic.suggested", topic=topic)
+        return topic
+
+    def _dry_topic(self, recent: list[str]) -> str:
+        """외부 호출 없이 최근 주제와 겹치지 않는 시드 주제를 고른다(결정적)."""
+        for seed in _SEED_TOPICS:
+            if seed not in recent:
+                return seed
+        # 모든 시드를 최근에 다뤘다면 인덱스로 변형해 새 주제를 만든다.
+        idx = len(recent) % len(_SEED_TOPICS)
+        return f"{_SEED_TOPICS[idx]} (심화편)"
 
     def fact_check_script(self, script: Script) -> FactCheckResult:
         """대본의 수의학적 주장에 대한 팩트체크. 호출자가 Script.fact_checked를 갱신한다."""
