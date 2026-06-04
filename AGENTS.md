@@ -44,7 +44,7 @@ N8n 스케줄러가 `nutti run`(또는 파이썬 함수)을 호출하고, 실제
 - **브랜칭**: GitHub Flow + dev. `main`(프로덕션, 보호됨) ← `dev`(통합) ← `feat/*`·`fix/*`·`docs/*`.
 - **커밋 전 검증**: `./.venv/Scripts/python.exe -m ruff check .` 와 `-m pytest -q` 둘 다 green 필수.
 - **CI**: push/PR(main·dev)마다 `.github/workflows/ci.yml`이 ruff+pytest(3.11/3.12/3.13) 실행.
-- **PR**: `gh pr create --base dev`. main 직접 머지 금지. **자동 머지하지 말 것**(사용자가 검토/머지).
+- **PR**: `gh pr create --base dev`. **dev 머지는 자동**(단 리뷰어 재검증/approve 후에만). **main 머지는 PO 명시 승인 후에만.** 상세 정책은 루트 `CLAUDE.md` 참고.
 - **완료 전**: 멀티에이전트 적대적 코드리뷰 루프(리뷰 차원 → 반박검증 → 수정 → clean까지) 권장.
 - **에이전트 모델 라우팅**: 깊은 추론=opus, 표준=sonnet, 대량·기계적(검색·반박검증)=haiku.
 
