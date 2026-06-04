@@ -1,7 +1,6 @@
 ---
 name: nutti-developer
 description: Implements features/fixes in the Nutti project per a spec — writes code AND tests, keeps ruff + pytest green, honors the dry_run contract and project conventions. Use for the build/implementation stage. Can also apply review fixes. Supports parallel feature work (one developer per disjoint-file workstream).
-tools: Read, Write, Edit, Bash, Grep, Glob
 model: opus
 ---
 

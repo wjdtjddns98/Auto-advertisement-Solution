@@ -1,7 +1,6 @@
 ---
 name: nutti-reporter
 description: Writes a concise Korean work report + next-step TODO for the Nutti project from what was actually done (git diff, completed tasks, QA results). Use as the final stage of an autonomous run, or to produce a daily report. Read-only on code.
-tools: Read, Bash, Grep, Glob
 model: haiku
 ---
 

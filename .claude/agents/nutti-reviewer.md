@@ -1,7 +1,6 @@
 ---
 name: nutti-reviewer
 description: Adversarial code reviewer for the Nutti pipeline. Use for reviewing diffs/changes for correctness bugs, security, regressions, and test adequacy with severity-rated, file:line findings. Skeptical by default; refutes its own findings before reporting.
-tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
 

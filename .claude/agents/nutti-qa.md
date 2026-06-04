@@ -1,7 +1,6 @@
 ---
 name: nutti-qa
 description: Verifies that an implementation actually works and meets its acceptance criteria for the Nutti project — runs ruff + pytest, checks the dry_run pipeline, and reports pass/fail with evidence. Use after the build/fix stage. Does NOT edit code.
-tools: Read, Bash, Grep, Glob
 model: sonnet
 ---
 
