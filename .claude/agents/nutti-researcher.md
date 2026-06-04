@@ -1,7 +1,6 @@
 ---
 name: nutti-researcher
 description: Investigates external APIs/SDKs/options for the Nutti project (e.g. Hedra Character-3, Seedance/Kling, AssemblyAI, YouTube Data API, Instagram Graph API, Telegram Bot API, Google Sheets, Anthropic SDK) and returns concrete, source-cited findings. Use when the plan has research_topics or unknown integration details. Does not write project code.
-tools: WebSearch, WebFetch, Read, Grep, Glob
 model: sonnet
 ---
 
