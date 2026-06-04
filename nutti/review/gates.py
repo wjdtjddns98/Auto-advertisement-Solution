@@ -11,12 +11,23 @@ from collections.abc import Callable
 from typing import Protocol
 
 from nutti.config import Settings
-from nutti.integrations.telegram import TelegramClient
+from nutti.integrations.telegram import TelegramClient, TelegramTransientError
 from nutti.logging import get_logger
 from nutti.models import ReviewDecision, ReviewRequest
 from nutti.storage.reviews import JsonFileReviewStore, ReviewStore
 
 log = get_logger(__name__)
+
+
+def _callback_origin_chat(cb: dict) -> str:
+    """콜백이 속한 chat.id를 안전하게 추출한다.
+
+    inline-mode 콜백은 message가 JSON null(None)이라 .get 체이닝이 깨질 수 있어
+    각 단계를 `or {}`로 방어한다.
+    """
+    message = cb.get("message") or {}
+    chat = message.get("chat") or {}
+    return str(chat.get("id", ""))
 
 
 class ReviewGate(Protocol):
@@ -73,6 +84,12 @@ class TelegramGate:
             log.info("telegram.dry_run_approve", stage=review.stage.value)
             return ReviewDecision.APPROVED
 
+        # 토큰만 있고 검수 채팅이 없으면 불투명한 API 크래시 대신 명확히 실패(설정 오류).
+        if not self.settings.telegram_chat_id:
+            raise ValueError(
+                "TELEGRAM_CHAT_ID가 비어 있습니다 — 봇 토큰만으로는 검수를 진행할 수 없습니다."
+            )
+
         client = self._client or TelegramClient(self.settings.telegram_bot_token)
         store = self._store or JsonFileReviewStore(self.settings.review_store_path)
         chat_id = self.settings.telegram_chat_id
@@ -97,10 +114,31 @@ class TelegramGate:
                 return ReviewDecision.REJECTED
 
             long_poll = max(0, min(50, int(remaining)))  # 텔레그램 권장 long-poll 상한
-            for update in client.get_updates(offset=offset, timeout=long_poll):
+            try:
+                updates = client.get_updates(offset=offset, timeout=long_poll)
+            except TelegramTransientError as exc:
+                # 일시적 오류만 재시도(전체 대기는 바깥 타임아웃이 제한). 영구 오류
+                # (잘못된 토큰 등 TelegramError)는 전파해 1시간 헛돌지 않고 빠르게 실패.
+                log.warning("telegram.poll_transient", stage=review.stage.value, error=str(exc))
+                self._sleep(self.settings.review_poll_interval_sec)
+                continue
+
+            for update in updates:
                 offset = int(update.get("update_id", 0)) + 1
                 cb = update.get("callback_query")
                 if not cb or not str(cb.get("data", "")).startswith(prefix):
+                    continue
+                # 인가 확인: 설정된 검수 채팅에서 온 콜백만 인정(아무나 승인 차단).
+                if not self._is_authorized(cb, chat_id):
+                    log.warning(
+                        "telegram.unauthorized_callback",
+                        stage=review.stage.value,
+                        from_chat=_callback_origin_chat(cb) or None,
+                    )
+                    try:
+                        client.answer_callback(cb.get("id", ""))
+                    except Exception:
+                        pass
                     continue
                 decision = _decision_from_callback(cb["data"], prefix)
                 # 사람이 이미 결정했으므로 UI 호출 전에 먼저 영속화(분실 방지).
@@ -116,6 +154,21 @@ class TelegramGate:
                 return decision
 
             self._sleep(self.settings.review_poll_interval_sec)
+
+    @staticmethod
+    def _is_authorized(cb: dict, chat_id: str) -> bool:
+        """콜백이 설정된 검수 채팅(chat_id)에서 왔는지 확인한다.
+
+        message.chat.id만 신뢰한다 — 텔레그램 서버가 봇이 메시지를 보낸 채팅으로
+        설정하는 값이라 위조 불가능하고, 설정된 chat_id와 정의상 일치한다(1:1 DM이면
+        chat.id가 곧 사용자 id). from.id(탭한 사용자)는 봇이 속한 다른 채팅에서도
+        일치할 수 있어 인증 기준으로 쓰면 우회가 생기므로 사용하지 않는다.
+        message가 없는 inline-mode 콜백은 chat을 알 수 없어 미인가로 처리한다.
+        """
+        if not chat_id:
+            return False
+        origin_chat = _callback_origin_chat(cb)
+        return bool(origin_chat) and origin_chat == str(chat_id)
 
 
 class DiscordGate:

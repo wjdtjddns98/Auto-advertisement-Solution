@@ -6,7 +6,12 @@
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from nutti.config import Settings
+from nutti.integrations.telegram import TelegramError, TelegramTransientError
 from nutti.models import ReviewDecision, ReviewRequest, Stage
 from nutti.review.gates import TelegramGate
 from nutti.storage.reviews import InMemoryReviewStore, JsonFileReviewStore
@@ -20,6 +25,7 @@ class FakeTelegramClient:
         self.sent: list[ReviewRequest] = []
         self.answered: list[str] = []
         self.edited: list[tuple[int, str]] = []
+        self.offsets: list = []  # get_updates에 전달된 offset 기록(전진 검증용)
         self.next_message_id = 4242
 
     def send_review(self, chat_id: str, review: ReviewRequest) -> int:
@@ -27,6 +33,7 @@ class FakeTelegramClient:
         return self.next_message_id
 
     def get_updates(self, offset=None, timeout: int = 0) -> list[dict]:
+        self.offsets.append(offset)
         if self._batches:
             return self._batches.pop(0)
         return []
@@ -36,6 +43,30 @@ class FakeTelegramClient:
 
     def edit_message(self, chat_id: str, message_id: int, text: str) -> None:
         self.edited.append((message_id, text))
+
+
+class FlakyTelegramClient(FakeTelegramClient):
+    """첫 N회 get_updates가 일시적 오류를 던지는 클라이언트(폴링 복원력 검증용)."""
+
+    def __init__(self, update_batches, fail_times: int = 1):
+        super().__init__(update_batches)
+        self._fail = fail_times
+
+    def get_updates(self, offset=None, timeout: int = 0) -> list[dict]:
+        self.offsets.append(offset)
+        if self._fail > 0:
+            self._fail -= 1
+            raise TelegramTransientError("일시적 네트워크 오류")
+        if self._batches:
+            return self._batches.pop(0)
+        return []
+
+
+class PermanentErrorClient(FakeTelegramClient):
+    """get_updates가 영구 오류(예: 잘못된 토큰)를 던지는 클라이언트."""
+
+    def get_updates(self, offset=None, timeout: int = 0) -> list[dict]:
+        raise TelegramError("invalid bot token")
 
 
 def _live_settings() -> Settings:
@@ -49,10 +80,18 @@ def _live_settings() -> Settings:
     )
 
 
-def _callback_update(review_id: str, value: str, update_id: int = 1) -> dict:
+def _callback_update(
+    review_id: str, value: str, update_id: int = 1, chat_id: str = "123"
+) -> dict:
+    # chat_id 기본값은 _live_settings()의 TELEGRAM_CHAT_ID와 일치(인가됨).
     return {
         "update_id": update_id,
-        "callback_query": {"id": "cbq1", "data": f"nutti:{review_id}:{value}"},
+        "callback_query": {
+            "id": "cbq1",
+            "data": f"nutti:{review_id}:{value}",
+            "message": {"chat": {"id": int(chat_id)}},
+            "from": {"id": int(chat_id)},
+        },
     }
 
 
@@ -135,3 +174,154 @@ def test_json_store_roundtrip(tmp_path):
     assert got is not None
     assert got.decision == ReviewDecision.APPROVED
     assert got.note == "ok"
+
+
+# --- #11: 알 수 없는 콜백 값은 보수적으로 거절 ---
+
+def test_unknown_callback_value_rejected():
+    review = _review()
+    client = FakeTelegramClient([[_callback_update(review.id, "garbage")]])
+    assert _gate(client).request(review) == ReviewDecision.REJECTED
+
+
+# --- #2: 설정된 검수 채팅이 아닌 콜백은 무시(아무나 승인 차단) ---
+
+def test_unauthorized_callback_is_ignored():
+    review = _review()
+    bad = _callback_update(review.id, "approved", chat_id="999")  # 다른 채팅
+    client = FakeTelegramClient([[bad]])
+    ticks = iter([0.0, 0.0, 9999.0])  # 1회 처리 후 타임아웃
+    decision = _gate(client, clock=lambda: next(ticks)).request(review)
+
+    assert decision == ReviewDecision.REJECTED  # 인가 안 됨 → 무시 → 타임아웃
+    assert client.answered == ["cbq1"]  # 스피너는 제거(answer_callback 호출됨)
+
+
+# --- #3: 폴링 중 일시적 예외가 run을 죽이지 않음 ---
+
+def test_poll_error_is_resilient():
+    review = _review()
+    client = FlakyTelegramClient([[_callback_update(review.id, "approved")]], fail_times=1)
+    assert _gate(client).request(review) == ReviewDecision.APPROVED
+
+
+# --- #8: offset이 전진해 처리한 업데이트를 재수신하지 않음 ---
+
+def test_offset_advances_to_avoid_redelivery():
+    review = _review()
+    other = _callback_update("deadbeef", "approved", update_id=5)
+    mine = _callback_update(review.id, "approved", update_id=6)
+    client = FakeTelegramClient([[other], [mine]])
+    _gate(client).request(review)
+
+    assert client.offsets[0] is None       # 첫 폴은 offset 없음
+    assert client.offsets[1] == 6          # update_id=5 처리 후 6으로 전진
+
+
+# --- #6: JsonFileReviewStore 손상복원 + 원자적 쓰기 ---
+
+def test_json_store_corrupt_file_does_not_raise(tmp_path):
+    path = tmp_path / "reviews.json"
+    path.write_text("not json {{{", encoding="utf-8")
+    store = JsonFileReviewStore(path)  # 손상 파일이어도 예외 없이 생성
+    assert store.all() == []
+
+
+def test_json_store_skips_bad_row(tmp_path):
+    path = tmp_path / "reviews.json"
+    good = _review()
+    payload = {good.id: good.model_dump(mode="json"), "bad": {"not": "valid"}}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    store = JsonFileReviewStore(path)
+    assert store.get(good.id) is not None  # 정상 행은 로드
+    assert store.get("bad") is None        # 깨진 행은 스킵
+
+
+def test_json_store_atomic_write_leaves_no_tmp(tmp_path):
+    path = tmp_path / "reviews.json"
+    store = JsonFileReviewStore(path)
+    store.save(_review())
+    assert path.exists()
+    assert not (tmp_path / "reviews.json.tmp").exists()  # 임시파일 잔존 없음
+
+
+# --- 재검증 라운드: 인가 수정의 regression 방지 ---
+
+def test_null_message_callback_does_not_crash():
+    # inline-mode 콜백은 message가 null → 크래시 없이 미인가 처리되어야 한다.
+    review = _review()
+    update = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cbq1",
+            "data": f"nutti:{review.id}:approved",
+            "message": None,  # inline-mode
+        },
+    }
+    client = FakeTelegramClient([[update]])
+    ticks = iter([0.0, 0.0, 9999.0])  # 1회 처리 후 타임아웃
+    decision = _gate(client, clock=lambda: next(ticks)).request(review)
+    assert decision == ReviewDecision.REJECTED  # 무시 → 타임아웃(크래시 없음)
+    assert client.answered == ["cbq1"]  # 스피너 제거(answer_callback 호출)
+
+
+def test_from_id_match_but_chat_mismatch_is_rejected():
+    # 구버전 우회 벡터 직접 검증: from.id=123(설정 일치)이지만 chat.id=999(불일치)면
+    # 옛 코드는 통과시켰지만 chat-only 인가는 거절해야 한다.
+    review = _review()
+    bad = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cbq1",
+            "data": f"nutti:{review.id}:approved",
+            "message": {"chat": {"id": 999}},   # 설정(123)과 다른 채팅
+            "from": {"id": 123},                # 설정과 같은 사용자
+        },
+    }
+    client = FakeTelegramClient([[bad]])
+    ticks = iter([0.0, 0.0, 9999.0])
+    assert _gate(client, clock=lambda: next(ticks)).request(review) == ReviewDecision.REJECTED
+
+
+def test_missing_chat_id_raises_clear_error():
+    # 토큰만 있고 TELEGRAM_CHAT_ID가 비면 불투명 크래시 대신 명확히 실패.
+    settings = Settings(NUTTI_DRY_RUN=False, TELEGRAM_BOT_TOKEN="x", TELEGRAM_CHAT_ID="")
+    gate = TelegramGate(settings, client=FakeTelegramClient([]), store=InMemoryReviewStore())
+    with pytest.raises(ValueError):
+        gate.request(_review())
+
+
+def test_ui_update_failure_is_swallowed_decision_kept():
+    # answer_callback/edit_message가 실패(ok:false 등)해도 결정은 유지(best-effort UI).
+    review = _review()
+
+    class _UIFailClient(FakeTelegramClient):
+        def answer_callback(self, callback_query_id):
+            raise TelegramError("query is too old")
+
+    client = _UIFailClient([[_callback_update(review.id, "approved")]])
+    store = InMemoryReviewStore()
+    assert _gate(client, store).request(review) == ReviewDecision.APPROVED
+    assert store.get(review.id).decision == ReviewDecision.APPROVED  # 영속도 유지
+
+
+def test_permanent_error_propagates_fails_fast():
+    # 잘못된 토큰 등 영구 오류는 1시간 헛돌지 않고 즉시 전파.
+    review = _review()
+    with pytest.raises(TelegramError):
+        _gate(PermanentErrorClient([])).request(review)
+
+
+def test_poll_transient_error_sleeps_before_retry():
+    review = _review()
+    client = FlakyTelegramClient([[_callback_update(review.id, "approved")]], fail_times=1)
+    sleeps: list = []
+    gate = TelegramGate(
+        _live_settings(),
+        client=client,
+        store=InMemoryReviewStore(),
+        sleep=lambda s: sleeps.append(s),
+    )
+    assert gate.request(review) == ReviewDecision.APPROVED
+    assert len(sleeps) >= 1  # 오류 후 백오프 sleep 호출됨
