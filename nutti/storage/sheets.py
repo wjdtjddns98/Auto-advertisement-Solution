@@ -59,6 +59,7 @@ class SheetStore:
             row = {
                 "script_id": script.id,
                 "topic": script.topic,
+                "body": script.body,
                 "prompt": script.prompt,
                 "created_at": script.created_at.isoformat(),
             }
@@ -66,7 +67,8 @@ class SheetStore:
             log.info("sheets.log_script.local", script_id=script.id)
             return
         self._worksheet().append_row(
-            ["script", script.id, script.topic, script.prompt, script.created_at.isoformat()]
+            ["script", script.id, script.topic, script.body, script.prompt,
+             script.created_at.isoformat()]
         )
         log.info("sheets.log_script.remote", script_id=script.id)
 

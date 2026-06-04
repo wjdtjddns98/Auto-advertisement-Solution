@@ -83,6 +83,7 @@ def test_log_script_appends_remote():
     assert rows[0][0] == "script"
     assert rows[0][1] == script.id
     assert rows[0][2] == script.topic
+    assert script.body in rows[0]  # 60초 대본 본문도 저장된다
     # 인메모리 폴백에는 기록되지 않는다.
     assert store.all_rows() == []
 
