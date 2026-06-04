@@ -16,7 +16,11 @@ log = get_logger(__name__)
 
 
 class TelegramError(Exception):
-    """텔레그램 Bot API 호출 실패(전송 오류 또는 ok:false). 토큰은 메시지에서 가려진다."""
+    """텔레그램 Bot API 호출 실패(영구). 토큰은 메시지에서 가려진다."""
+
+
+class TelegramTransientError(TelegramError):
+    """일시적 실패(네트워크/타임아웃/429/5xx) — 호출자가 재시도해도 되는 경우."""
 
 
 # 콜백 데이터에 실어보낼 결정값(승인/거절/수정).
@@ -47,12 +51,24 @@ class TelegramClient:
         return text.replace(self.token, "***") if self.token else text
 
     def _call(self, method: str, payload: dict) -> dict:
-        """Bot API 호출. 전송/HTTP/API 오류를 토큰을 가린 TelegramError로 변환한다."""
+        """Bot API 호출. 오류를 토큰을 가린 채 변환한다.
+
+        일시적 오류(네트워크/타임아웃/429/5xx)는 TelegramTransientError로, 영구 오류
+        (그 외 4xx 인증·설정 오류, ok:false)는 TelegramError로 구분해 호출자가 재시도
+        여부를 판단할 수 있게 한다. 토큰이 박힌 URL이 예외 메시지에 노출되지 않도록 스크럽.
+        """
         try:
             resp = self.http.post(f"{self.base_url}/{method}", json=payload)
             resp.raise_for_status()
+        except httpx.TransportError as exc:  # 네트워크/타임아웃 등 전송 계층 오류
+            raise TelegramTransientError(self._scrub(str(exc))) from None
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            msg = self._scrub(str(exc))
+            if status == 429 or 500 <= status < 600:  # 레이트리밋/서버 오류 = 일시적
+                raise TelegramTransientError(msg) from None
+            raise TelegramError(msg) from None  # 그 밖 4xx = 영구(잘못된 토큰 등)
         except httpx.HTTPError as exc:
-            # httpx 예외 메시지에는 토큰이 박힌 URL이 포함될 수 있어 스크럽한다.
             raise TelegramError(self._scrub(str(exc))) from None
         data = resp.json()
         # 텔레그램은 논리 오류 시 HTTP 200 + {"ok": false, "description": ...}를 반환.

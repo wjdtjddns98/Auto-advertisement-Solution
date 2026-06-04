@@ -8,7 +8,11 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from nutti.integrations.telegram import TelegramClient, TelegramError
+from nutti.integrations.telegram import (
+    TelegramClient,
+    TelegramError,
+    TelegramTransientError,
+)
 from nutti.models import ReviewRequest, Stage
 
 
@@ -43,6 +47,34 @@ class _RaisingHttp:
         raise self._exc
 
 
+class _StatusErrorResp:
+    """raise_for_status가 토큰이 박힌 URL을 담은 HTTPStatusError를 던지는 응답."""
+
+    def __init__(self, status: int, token: str):
+        self._status = status
+        self._token = token
+
+    def raise_for_status(self) -> None:
+        url = f"https://api.telegram.org/bot{self._token}/sendMessage"
+        req = httpx.Request("POST", url)
+        resp = httpx.Response(self._status, request=req)
+        raise httpx.HTTPStatusError(
+            f"Client error '{self._status}' for url '{url}'", request=req, response=resp
+        )
+
+    def json(self) -> dict:
+        return {}
+
+
+class _StatusErrorHttp:
+    def __init__(self, status: int, token: str):
+        self._status = status
+        self._token = token
+
+    def post(self, url, json=None):
+        return _StatusErrorResp(self._status, self._token)
+
+
 def _review() -> ReviewRequest:
     return ReviewRequest(stage=Stage.SCRIPT, title="t", preview="p")
 
@@ -71,3 +103,29 @@ def test_http_error_scrubs_token():
     msg = str(ei.value)
     assert token not in msg   # 토큰 노출 안 됨
     assert "***" in msg       # 가려짐
+
+
+def test_http_status_error_scrubs_token():
+    # raise_for_status가 던지는 HTTPStatusError(4xx)에도 토큰이 박힌 URL이 들어감.
+    token = "999999:STATUSSECRET"
+    client = TelegramClient(token, http=_StatusErrorHttp(401, token))
+    with pytest.raises(TelegramError) as ei:
+        client.send_review("123", _review())
+    msg = str(ei.value)
+    assert token not in msg
+    assert "***" in msg
+
+
+def test_http_429_is_transient():
+    # 레이트리밋/5xx는 일시적 오류로 분류되어 호출자가 재시도할 수 있어야 한다.
+    client = TelegramClient("tok", http=_StatusErrorHttp(429, "tok"))
+    with pytest.raises(TelegramTransientError):
+        client.get_updates()
+
+
+def test_answer_callback_ok_false_raises():
+    # send_review 외 다른 메서드도 _call을 거치므로 ok:false 시 표면화돼야 한다.
+    http = _OkHttp({"ok": False, "description": "query is too old"})
+    client = TelegramClient("tok", http=http)
+    with pytest.raises(TelegramError):
+        client.answer_callback("cbq")
