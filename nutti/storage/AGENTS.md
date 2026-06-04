@@ -10,7 +10,7 @@
 ## Key Files
 | File | Description |
 |------|-------------|
-| `sheets.py` | `SheetStore`: 대본·실행 기록(기획서의 'Sheets 저장'). 원격 자격증명 없으면 인메모리 폴백. 실연동은 gspread/Sheets API로 교체 |
+| `sheets.py` | `SheetStore`: 대본·실행 기록(기획서의 'Sheets 저장'). 실연동 gspread append 구현(자격증명 없으면 인메모리 폴백) |
 | `reviews.py` | `ReviewStore`(Protocol) + `InMemoryReviewStore`(테스트) + `JsonFileReviewStore`(영속). 검수 요청 상태 저장 |
 
 ## For AI Agents
@@ -25,6 +25,7 @@
 ### Testing Requirements
 - `tmp_path`로 JSON 라운드트립·손상복원·bad-row 스킵·임시파일 잔존 없음을 검증.
 - dry_run/자격증명 없음 → 인메모리 폴백 경로 확인.
+- fake gspread 클라이언트 주입으로 append 검증(네트워크 없이 원격 경로 진입).
 
 ### Common Patterns
 - 저장소는 추상 인터페이스(Protocol) + 인메모리/영속 구현 쌍. 파이프라인은 인터페이스에만 의존.
@@ -35,6 +36,6 @@
 - `nutti.config`, `nutti.models`(Script/PipelineRun/ReviewRequest), `nutti.logging`
 
 ### External
-- 표준 라이브러리(`json`, `pathlib`, `os`). 실연동 시 `gspread` 등 추가 예정.
+- 표준 라이브러리(`json`, `pathlib`, `os`) + `gspread`(실연동, lazy import).
 
 <!-- MANUAL: -->
