@@ -8,6 +8,21 @@
 # 의존성
 node_modules/
 
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# 자격증명
+*-service-account.json
+
 # 로그
 *.log
 
