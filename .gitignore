@@ -1,0 +1,16 @@
+# OMC (oh-my-claudecode) 상태/세션 파일
+.omc/
+
+# 환경 변수
+.env
+.env.local
+
+# 의존성
+node_modules/
+
+# 로그
+*.log
+
+# OS 파일
+Thumbs.db
+.DS_Store
