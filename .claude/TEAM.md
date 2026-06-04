@@ -9,7 +9,7 @@
 |------|----------|------|---------|
 | 🧭 기획 보조 | `nutti-planner` | opus | PO 지시 → 구체 스펙·작업분해·수용기준·리서치 주제 |
 | 🔬 리서치 | `nutti-researcher` | sonnet | 외부 API/SDK 조사 → 출처 포함 구현 노트 |
-| 💻 개발 | `nutti-developer` | sonnet | 스펙대로 구현 + 테스트, ruff/pytest green |
+| 💻 개발 | `nutti-developer` | **opus** | 스펙대로 구현 + 테스트. **workstream(기능)별 병렬** 투입 |
 | 🔍 코드리뷰 | `nutti-reviewer` | sonnet | 적대적 리뷰(결함·보안·회귀·테스트) |
 | ✅ QA | `nutti-qa` | sonnet | 테스트·수용기준 검증, 증거 기반 PASS/FAIL |
 | 📝 보고서 | `nutti-reporter` | haiku | 한국어 작업 보고 + 다음 Todo |
@@ -24,9 +24,12 @@ Workflow({ name: 'nutti-team', args: '<원하는 기능/작업 한 줄>' })
 
 파이프라인:
 ```
-기획(planner) → [리서치(researcher)·필요시 병렬] → 개발(developer)
-   → 리뷰(reviewer) ↔ 수정(developer) 루프(최대 2회) → QA(qa) → 보고(reporter)
+기획(planner) → [리서치·필요시 병렬]
+   → 공유파일 선처리(1명) → 개발(opus) ×N 병렬 (workstream=기능 단위, 파일 분리)
+   → 리뷰(reviewer) ↔ 수정(opus) 루프(최대 2회) → QA(qa, 전체 테스트) → 보고(reporter)
 ```
+> planner가 작업을 **파일이 겹치지 않는 workstream**으로 쪼개고, workstream마다 opus 개발자
+> 1명씩 **병렬**로 붙습니다. 공유 파일(models/config)은 먼저 1명이 선처리 → 충돌 방지.
 
 결과로 `plan / research / build / review_findings / qa / report_markdown`가 돌아옵니다.
 그 뒤 **리드(메인 세션)가** 표준 워크플로대로 처리: ruff/pytest 최종 확인 → 브랜치 →
