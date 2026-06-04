@@ -73,6 +73,9 @@ class Orchestrator:
         log.info("pipeline.start", run_id=run.id, topic=topic)
 
         # 1단계: 대본 (생성 → 팩트체크 → 검수①)
+        # 주의: log_script는 팩트체크를 통과한 대본만 기록한다. 끝내 실패하면
+        # _fact_check가 FactCheckFailed를 던져 로깅에 도달하지 않으며, 거절 사실은
+        # factcheck.rejected 로그로 남는다.
         run.current_stage = Stage.SCRIPT
         run.script = self.ai.generate_script(topic, feedback=feedback)
         self._fact_check(run, topic, feedback)
