@@ -65,7 +65,13 @@ def test_dry_run_uses_memory_fallback():
 
 def test_missing_credentials_uses_fallback():
     # dry_run=False지만 자격증명 비움 → is_remote False, 폴백 동작.
-    settings = Settings(NUTTI_DRY_RUN=False, NUTTI_ENV="test")
+    # 자격증명을 명시적으로 비워 로컬 .env 값이 새어들지 않게 한다(테스트 격리).
+    settings = Settings(
+        NUTTI_DRY_RUN=False,
+        NUTTI_ENV="test",
+        GOOGLE_SHEETS_ID="",
+        GOOGLE_SERVICE_ACCOUNT_JSON="",
+    )
     store = SheetStore(settings)
     assert store.is_remote is False
     store.log_script(Script(topic="t", body="본문"))

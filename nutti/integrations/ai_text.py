@@ -114,7 +114,7 @@ class AITextClient:
             prompt += f"\n[이전 사이클 개선 포인트]\n{feedback}\n"
         prompt += "\n위 주제로 60초 쇼츠 대본을 작성해줘."
 
-        if self._client is None:
+        if self.settings.dry_run:
             log.info("dry_run.generate_script", topic=topic)
             body = (
                 f"[DRY-RUN 대본] {topic}\n"
@@ -124,6 +124,10 @@ class AITextClient:
             )
             # dry_run은 팩트체크 통과를 시뮬레이션.
             return Script(topic=topic, body=body, prompt=prompt, fact_checked=True)
+
+        if self._client is None:
+            # API 키 없음 + 비-dry_run → Claude Code(Max 구독)로 생성(API 추가 과금 없음).
+            return self._generate_via_claude_code(topic, prompt)
 
         # 시스템 프롬프트에 prompt caching 적용(ephemeral).
         msg = self._client.messages.create(
@@ -140,6 +144,35 @@ class AITextClient:
         )
         body = _first_text(msg)
         # 실제 모드에서는 호출자가 fact_check_script로 검증/갱신한다.
+        return Script(topic=topic, body=body, prompt=prompt, fact_checked=False)
+
+    def _generate_via_claude_code(self, topic: str, prompt: str) -> Script:
+        """Anthropic API 대신 Claude Code(Max 구독)로 대본 생성 — API 추가 과금 없음.
+
+        claude -p(헤드리스 print 모드)로 시스템 프롬프트+요청을 보내고 출력을 대본 본문으로 쓴다.
+        """
+        import subprocess
+
+        full = (
+            f"{SCRIPT_SYSTEM_PROMPT}\n\n{prompt}\n\n"
+            "대본 본문만 출력해줘. 머리말·설명·코드블록 없이 대본 텍스트만."
+        )
+        try:
+            proc = subprocess.run(
+                ["claude", "-p", full],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=180,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "claude CLI를 찾을 수 없습니다 (Claude Code 설치/PATH 확인)."
+            ) from exc
+        if proc.returncode != 0:
+            raise RuntimeError(f"claude -p 실패: {(proc.stderr or '').strip()[:200]}")
+        body = (proc.stdout or "").strip()
+        log.info("script.generated_via_claude_code", topic=topic, chars=len(body))
         return Script(topic=topic, body=body, prompt=prompt, fact_checked=False)
 
     def fact_check_script(self, script: Script) -> FactCheckResult:
