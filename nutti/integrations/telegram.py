@@ -60,7 +60,8 @@ class TelegramClient:
         try:
             resp = self.http.post(f"{self.base_url}/{method}", json=payload)
             resp.raise_for_status()
-        except httpx.TransportError as exc:  # 네트워크/타임아웃 등 전송 계층 오류
+        except (httpx.TransportError, httpx.TooManyRedirects, httpx.DecodingError) as exc:
+            # 전송 계층(네트워크/타임아웃)·리다이렉트 루프·응답 디코딩 오류 = 일시적
             raise TelegramTransientError(self._scrub(str(exc))) from None
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code

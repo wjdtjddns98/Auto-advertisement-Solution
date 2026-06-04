@@ -263,15 +263,47 @@ def test_null_message_callback_does_not_crash():
     ticks = iter([0.0, 0.0, 9999.0])  # 1회 처리 후 타임아웃
     decision = _gate(client, clock=lambda: next(ticks)).request(review)
     assert decision == ReviewDecision.REJECTED  # 무시 → 타임아웃(크래시 없음)
+    assert client.answered == ["cbq1"]  # 스피너 제거(answer_callback 호출)
 
 
-def test_callback_from_other_chat_same_user_is_rejected():
-    # chat.id가 다르면(설정 채팅이 아니면) from.id가 무엇이든 거절(우회 차단).
+def test_from_id_match_but_chat_mismatch_is_rejected():
+    # 구버전 우회 벡터 직접 검증: from.id=123(설정 일치)이지만 chat.id=999(불일치)면
+    # 옛 코드는 통과시켰지만 chat-only 인가는 거절해야 한다.
     review = _review()
-    bad = _callback_update(review.id, "approved", chat_id="999")
+    bad = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cbq1",
+            "data": f"nutti:{review.id}:approved",
+            "message": {"chat": {"id": 999}},   # 설정(123)과 다른 채팅
+            "from": {"id": 123},                # 설정과 같은 사용자
+        },
+    }
     client = FakeTelegramClient([[bad]])
     ticks = iter([0.0, 0.0, 9999.0])
     assert _gate(client, clock=lambda: next(ticks)).request(review) == ReviewDecision.REJECTED
+
+
+def test_missing_chat_id_raises_clear_error():
+    # 토큰만 있고 TELEGRAM_CHAT_ID가 비면 불투명 크래시 대신 명확히 실패.
+    settings = Settings(NUTTI_DRY_RUN=False, TELEGRAM_BOT_TOKEN="x", TELEGRAM_CHAT_ID="")
+    gate = TelegramGate(settings, client=FakeTelegramClient([]), store=InMemoryReviewStore())
+    with pytest.raises(ValueError):
+        gate.request(_review())
+
+
+def test_ui_update_failure_is_swallowed_decision_kept():
+    # answer_callback/edit_message가 실패(ok:false 등)해도 결정은 유지(best-effort UI).
+    review = _review()
+
+    class _UIFailClient(FakeTelegramClient):
+        def answer_callback(self, callback_query_id):
+            raise TelegramError("query is too old")
+
+    client = _UIFailClient([[_callback_update(review.id, "approved")]])
+    store = InMemoryReviewStore()
+    assert _gate(client, store).request(review) == ReviewDecision.APPROVED
+    assert store.get(review.id).decision == ReviewDecision.APPROVED  # 영속도 유지
 
 
 def test_permanent_error_propagates_fails_fast():

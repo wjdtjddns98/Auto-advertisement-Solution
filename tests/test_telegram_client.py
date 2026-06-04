@@ -114,11 +114,26 @@ def test_http_status_error_scrubs_token():
     msg = str(ei.value)
     assert token not in msg
     assert "***" in msg
+    assert not isinstance(ei.value, TelegramTransientError)  # 401은 영구(재시도 안 함)
 
 
 def test_http_429_is_transient():
-    # 레이트리밋/5xx는 일시적 오류로 분류되어 호출자가 재시도할 수 있어야 한다.
+    # 레이트리밋은 일시적 오류로 분류되어 호출자가 재시도할 수 있어야 한다.
     client = TelegramClient("tok", http=_StatusErrorHttp(429, "tok"))
+    with pytest.raises(TelegramTransientError):
+        client.get_updates()
+
+
+def test_http_500_is_transient():
+    # 5xx 서버 오류도 일시적으로 분류.
+    client = TelegramClient("tok", http=_StatusErrorHttp(503, "tok"))
+    with pytest.raises(TelegramTransientError):
+        client.get_updates()
+
+
+def test_transport_error_is_transient():
+    # 네트워크/연결 오류(TransportError 계열)는 일시적으로 분류.
+    client = TelegramClient("tok", http=_RaisingHttp(httpx.ConnectError("연결 실패")))
     with pytest.raises(TelegramTransientError):
         client.get_updates()
 

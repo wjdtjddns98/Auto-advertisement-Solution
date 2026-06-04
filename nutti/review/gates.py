@@ -84,6 +84,12 @@ class TelegramGate:
             log.info("telegram.dry_run_approve", stage=review.stage.value)
             return ReviewDecision.APPROVED
 
+        # 토큰만 있고 검수 채팅이 없으면 불투명한 API 크래시 대신 명확히 실패(설정 오류).
+        if not self.settings.telegram_chat_id:
+            raise ValueError(
+                "TELEGRAM_CHAT_ID가 비어 있습니다 — 봇 토큰만으로는 검수를 진행할 수 없습니다."
+            )
+
         client = self._client or TelegramClient(self.settings.telegram_bot_token)
         store = self._store or JsonFileReviewStore(self.settings.review_store_path)
         chat_id = self.settings.telegram_chat_id
