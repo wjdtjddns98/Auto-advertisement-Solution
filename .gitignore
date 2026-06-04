@@ -22,6 +22,7 @@ dist/
 
 # 자격증명
 *-service-account.json
+secrets/
 
 # 로그
 *.log
