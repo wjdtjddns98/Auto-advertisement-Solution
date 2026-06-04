@@ -6,13 +6,28 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Protocol
 
 from nutti.config import Settings
+from nutti.integrations.telegram import TelegramClient, TelegramTransientError
 from nutti.logging import get_logger
 from nutti.models import ReviewDecision, ReviewRequest
+from nutti.storage.reviews import JsonFileReviewStore, ReviewStore
 
 log = get_logger(__name__)
+
+
+def _callback_origin_chat(cb: dict) -> str:
+    """콜백이 속한 chat.id를 안전하게 추출한다.
+
+    inline-mode 콜백은 message가 JSON null(None)이라 .get 체이닝이 깨질 수 있어
+    각 단계를 `or {}`로 방어한다.
+    """
+    message = cb.get("message") or {}
+    chat = message.get("chat") or {}
+    return str(chat.get("id", ""))
 
 
 class ReviewGate(Protocol):
@@ -29,22 +44,131 @@ class AutoApproveGate:
         return ReviewDecision.APPROVED
 
 
+def _decision_from_callback(data: str, prefix: str) -> ReviewDecision:
+    """콜백 데이터(`nutti:{id}:{value}`)에서 ReviewDecision을 파싱한다."""
+    value = data[len(prefix):]
+    try:
+        return ReviewDecision(value)
+    except ValueError:
+        # 알 수 없는 값은 보수적으로 거절 처리.
+        return ReviewDecision.REJECTED
+
+
 class TelegramGate:
     """텔레그램 인라인 버튼 검수(검수①·②).
 
-    실제 구현은 봇이 메시지를 보내고 콜백(버튼 탭)을 기다리는 비동기 흐름이지만,
-    여기서는 인터페이스만 고정한다. dry_run이면 자동 승인으로 폴백한다.
+    설계: 여기서 '비동기'는 사람이 비동기로 버튼을 탭하는 것을 뜻한다. 파이프라인은
+    승인 전까지 블로킹돼야 하므로 request()는 동기 시그니처를 유지하되, 내부에서
+    getUpdates를 롱폴링하며 일치하는 콜백을 기다린다. 검수 상태는 store에 영속화해
+    프로세스 재시작에도 살아남는다. client/store/clock/sleep을 주입하면 네트워크
+    없이 테스트할 수 있다.
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        client: TelegramClient | None = None,
+        store: ReviewStore | None = None,
+        clock: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
+    ):
         self.settings = settings
+        self._client = client
+        self._store = store
+        self._clock: Callable[[], float] = clock or time.monotonic
+        self._sleep: Callable[[float], None] = sleep or time.sleep
 
     def request(self, review: ReviewRequest) -> ReviewDecision:
         if self.settings.dry_run or not self.settings.telegram_bot_token:
             log.info("telegram.dry_run_approve", stage=review.stage.value)
             return ReviewDecision.APPROVED
-        # TODO: sendMessage(inline_keyboard=[승인/수정/거절]) → 콜백 폴링/웹훅 대기
-        raise NotImplementedError("텔레그램 검수 봇 미구현")
+
+        # 토큰만 있고 검수 채팅이 없으면 불투명한 API 크래시 대신 명확히 실패(설정 오류).
+        if not self.settings.telegram_chat_id:
+            raise ValueError(
+                "TELEGRAM_CHAT_ID가 비어 있습니다 — 봇 토큰만으로는 검수를 진행할 수 없습니다."
+            )
+
+        client = self._client or TelegramClient(self.settings.telegram_bot_token)
+        store = self._store or JsonFileReviewStore(self.settings.review_store_path)
+        chat_id = self.settings.telegram_chat_id
+
+        # 1) 인라인 버튼 메시지 전송 + PENDING 상태 영속화
+        message_id = client.send_review(chat_id, review)
+        review.message_id = message_id
+        review.decision = ReviewDecision.PENDING
+        store.save(review)
+        log.info("telegram.sent", stage=review.stage.value, message_id=message_id)
+
+        # 2) 콜백 롱폴링: 일치하는 버튼 탭이 오거나 타임아웃까지 대기.
+        #    서버사이드 long-poll(timeout)을 사용해 getUpdates 호출 횟수를 줄인다.
+        prefix = f"nutti:{review.id}:"
+        offset: int | None = None
+        start = self._clock()
+        while True:
+            remaining = self.settings.review_timeout_sec - (self._clock() - start)
+            if remaining <= 0:
+                store.update_decision(review.id, ReviewDecision.REJECTED, note="timeout")
+                log.warning("telegram.timeout", stage=review.stage.value)
+                return ReviewDecision.REJECTED
+
+            long_poll = max(0, min(50, int(remaining)))  # 텔레그램 권장 long-poll 상한
+            try:
+                updates = client.get_updates(offset=offset, timeout=long_poll)
+            except TelegramTransientError as exc:
+                # 일시적 오류만 재시도(전체 대기는 바깥 타임아웃이 제한). 영구 오류
+                # (잘못된 토큰 등 TelegramError)는 전파해 1시간 헛돌지 않고 빠르게 실패.
+                log.warning("telegram.poll_transient", stage=review.stage.value, error=str(exc))
+                self._sleep(self.settings.review_poll_interval_sec)
+                continue
+
+            for update in updates:
+                offset = int(update.get("update_id", 0)) + 1
+                cb = update.get("callback_query")
+                if not cb or not str(cb.get("data", "")).startswith(prefix):
+                    continue
+                # 인가 확인: 설정된 검수 채팅에서 온 콜백만 인정(아무나 승인 차단).
+                if not self._is_authorized(cb, chat_id):
+                    log.warning(
+                        "telegram.unauthorized_callback",
+                        stage=review.stage.value,
+                        from_chat=_callback_origin_chat(cb) or None,
+                    )
+                    try:
+                        client.answer_callback(cb.get("id", ""))
+                    except Exception:
+                        pass
+                    continue
+                decision = _decision_from_callback(cb["data"], prefix)
+                # 사람이 이미 결정했으므로 UI 호출 전에 먼저 영속화(분실 방지).
+                store.update_decision(review.id, decision)
+                try:
+                    client.answer_callback(cb.get("id", ""))
+                    client.edit_message(chat_id, message_id, f"검수 완료: {decision.value}")
+                except Exception:  # UI 갱신은 best-effort
+                    log.warning("telegram.ui_update_failed", review_id=review.id)
+                log.info(
+                    "telegram.decision", stage=review.stage.value, decision=decision.value
+                )
+                return decision
+
+            self._sleep(self.settings.review_poll_interval_sec)
+
+    @staticmethod
+    def _is_authorized(cb: dict, chat_id: str) -> bool:
+        """콜백이 설정된 검수 채팅(chat_id)에서 왔는지 확인한다.
+
+        message.chat.id만 신뢰한다 — 텔레그램 서버가 봇이 메시지를 보낸 채팅으로
+        설정하는 값이라 위조 불가능하고, 설정된 chat_id와 정의상 일치한다(1:1 DM이면
+        chat.id가 곧 사용자 id). from.id(탭한 사용자)는 봇이 속한 다른 채팅에서도
+        일치할 수 있어 인증 기준으로 쓰면 우회가 생기므로 사용하지 않는다.
+        message가 없는 inline-mode 콜백은 chat을 알 수 없어 미인가로 처리한다.
+        """
+        if not chat_id:
+            return False
+        origin_chat = _callback_origin_chat(cb)
+        return bool(origin_chat) and origin_chat == str(chat_id)
 
 
 class DiscordGate:

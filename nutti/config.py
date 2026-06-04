@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
     discord_webhook_url: str = Field(default="", alias="DISCORD_WEBHOOK_URL")
+    # 검수 대기 동작
+    review_timeout_sec: int = Field(default=3600, alias="NUTTI_REVIEW_TIMEOUT_SEC")
+    review_poll_interval_sec: float = Field(default=3.0, alias="NUTTI_REVIEW_POLL_INTERVAL_SEC")
+    review_store_path: str = Field(default="data/reviews.json", alias="NUTTI_REVIEW_STORE_PATH")
 
     # 4단계: 업로드
     youtube_client_id: str = Field(default="", alias="YOUTUBE_CLIENT_ID")

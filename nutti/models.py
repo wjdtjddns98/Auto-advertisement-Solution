@@ -101,6 +101,7 @@ class ReviewRequest(BaseModel):
     preview: str                   # 텍스트 미리보기 또는 미리보기 URL
     decision: ReviewDecision = ReviewDecision.PENDING
     note: str = ""
+    message_id: int | None = None  # 텔레그램 검수 메시지 ID(버튼 수정/콜백 매칭용)
 
 
 class PipelineRun(BaseModel):
