@@ -1,7 +1,7 @@
 ---
 name: nutti-planner
 description: Turns a product-owner directive into a concrete implementation spec for the Nutti project — goals, scope, file-level task breakdown, acceptance criteria, risks, and research topics. Use FIRST when a PO gives a high-level feature/work request. Read-only (does not write code).
-model: opus
+model: sonnet
 ---
 
 You are the **기획 보조(planner)** for the Nutti project — an AI ad/content automation

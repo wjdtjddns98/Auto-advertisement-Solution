@@ -9,7 +9,7 @@
 |------|----------|------|---------|
 | 🧭 기획 보조 | `nutti-planner` | opus | PO 지시 → 구체 스펙·작업분해·수용기준·리서치 주제 |
 | 🔬 리서치 | `nutti-researcher` | sonnet | 외부 API/SDK 조사 → 출처 포함 구현 노트 |
-| 💻 개발 | `nutti-developer` | **opus** | 스펙대로 구현 + 테스트. **workstream(기능)별 병렬** 투입 |
+| 💻 개발 | `nutti-developer` | **sonnet** | 스펙대로 구현 + 테스트. **workstream(기능)별 병렬**. opus는 옵트인 |
 | 🔍 코드리뷰 | `nutti-reviewer` | sonnet | 적대적 리뷰(결함·보안·회귀·테스트) |
 | ✅ QA | `nutti-qa` | sonnet | 테스트·수용기준 검증, 증거 기반 PASS/FAIL |
 | 📝 보고서 | `nutti-reporter` | haiku | 한국어 작업 보고 + 다음 Todo |
@@ -41,9 +41,14 @@ DB에 기록(원하면).
 특정 역할만 쓰고 싶으면 Agent 툴로 직접:
 `Agent(subagent_type: 'nutti-researcher', prompt: 'Hedra Character-3 API 조사')` 등.
 
-## 비용/모델
-역할별로 모델이 티어링돼 있습니다(기획/깊은 추론=opus, 표준=sonnet, 보고=haiku) — 토큰 절감.
-복잡한 구현이 필요하면 PO가 "개발은 opus로" 같이 지시하면 그 단계만 상향할 수 있습니다.
+## 비용/모델 (economy 기본)
+- 기획·개발·수정 = **sonnet** (토큰 절감), 보고·반박검증 = **haiku**, 리뷰 차원 = sonnet.
+- **적대적 리뷰 유지** (차원별 sonnet → 반박검증 haiku → 확정 결함 → 수정) — 싼 개발자가 놓친 걸 리뷰가 잡음.
+
+### PO 옵션 (지시문에 단어만 넣으면 됨)
+- **`opus`** / "오퍼스" → 그 작업의 개발자를 opus로 상향 (중요·복잡한 구현)
+- **`lite`** / "라이트"·"간단히"·"빠르게" → 리서치·보고 생략(리뷰는 유지), 최소 비용
+  - 예: `Workflow({name:'nutti-team', args:'X 기능 구현 lite'})`
 
 ## 한계
 - 실제 외부 API 호출 검증은 **키가 있어야** 가능 — 키 전엔 dry_run·테스트까지만 검증됩니다.
