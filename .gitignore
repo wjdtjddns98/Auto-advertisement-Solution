@@ -26,6 +26,14 @@ dist/
 # 로그
 *.log
 
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Claude Code 로컬 설정(에이전트·워크플로는 추적, 로컬 설정만 제외)
+.claude/settings.local.json
+
 # OS 파일
 Thumbs.db
 .DS_Store
