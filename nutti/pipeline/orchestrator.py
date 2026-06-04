@@ -18,7 +18,7 @@ from nutti.models import (
     ReviewRequest,
     Stage,
 )
-from nutti.review.gates import AutoApproveGate, DiscordGate, ReviewGate, TelegramGate
+from nutti.review.gates import DiscordGate, ReviewGate, TelegramGate
 from nutti.storage.sheets import SheetStore
 
 log = get_logger(__name__)
