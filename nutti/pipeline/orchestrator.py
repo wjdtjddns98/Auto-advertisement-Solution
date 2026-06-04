@@ -33,6 +33,14 @@ class GateRejected(Exception):
         super().__init__(f"{stage.value} 단계 검수 결과: {decision.value}")
 
 
+class FactCheckFailed(Exception):
+    """팩트체크가 재생성 한도 내에 통과하지 못해 파이프라인을 중단할 때 발생."""
+
+    def __init__(self, issues: list[str]):
+        self.issues = issues
+        super().__init__("팩트체크 실패: " + "; ".join(issues) if issues else "팩트체크 실패")
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -40,12 +48,15 @@ class Orchestrator:
         *,
         telegram: ReviewGate | None = None,
         discord: ReviewGate | None = None,
+        max_factcheck_retries: int = 1,
     ):
         self.settings = settings or get_settings()
         self.ai = AITextClient(self.settings)
         self.studio = VideoStudio(self.settings)
         self.publisher = Publisher(self.settings)
         self.store = SheetStore(self.settings)
+        # 팩트체크 실패 시 issues를 피드백으로 대본을 재생성하는 최대 횟수.
+        self.max_factcheck_retries = max_factcheck_retries
         # 검수 게이트 주입 가능(테스트 시 AutoApproveGate)
         self.telegram: ReviewGate = telegram or TelegramGate(self.settings)
         self.discord: ReviewGate = discord or DiscordGate(self.settings)
@@ -61,9 +72,13 @@ class Orchestrator:
         run = PipelineRun(topic=topic, content_format=content_format)
         log.info("pipeline.start", run_id=run.id, topic=topic)
 
-        # 1단계: 대본
+        # 1단계: 대본 (생성 → 팩트체크 → 검수①)
+        # 주의: log_script는 팩트체크를 통과한 대본만 기록한다. 끝내 실패하면
+        # _fact_check가 FactCheckFailed를 던져 로깅에 도달하지 않으며, 거절 사실은
+        # factcheck.rejected 로그로 남는다.
         run.current_stage = Stage.SCRIPT
         run.script = self.ai.generate_script(topic, feedback=feedback)
+        self._fact_check(run, topic, feedback)
         self.store.log_script(run.script)
         self._gate(self.telegram, Stage.SCRIPT, "대본 검수", run.script.body)
 
@@ -88,6 +103,27 @@ class Orchestrator:
         self.store.log_run(run)
         log.info("pipeline.done", run_id=run.id, uploads=len(run.uploads))
         return run
+
+    def _fact_check(self, run: PipelineRun, topic: str, feedback: str) -> None:
+        """대본 팩트체크. 실패하면 issues를 피드백으로 재생성하고, 한도를 넘으면 거절한다.
+
+        dry_run에서는 fact_check_script가 항상 통과를 반환하므로 재생성 루프는 돌지 않는다.
+        """
+        result = self.ai.fact_check_script(run.script)
+        attempts = 0
+        while not result.passed and attempts < self.max_factcheck_retries:
+            attempts += 1
+            log.warning("factcheck.retry", attempt=attempts, issues=result.issues)
+            retry_feedback = feedback + "\n[팩트체크 지적 — 아래 문제를 반드시 수정]\n" + "\n".join(
+                f"- {issue}" for issue in result.issues
+            )
+            run.script = self.ai.generate_script(topic, feedback=retry_feedback)
+            result = self.ai.fact_check_script(run.script)
+
+        run.script.fact_checked = result.passed
+        if not result.passed:
+            log.error("factcheck.rejected", issues=result.issues)
+            raise FactCheckFailed(result.issues)
 
     def collect_and_analyze(self, run: PipelineRun) -> str:
         """업로드된 콘텐츠의 성과를 수집하고 다음 대본 개선안을 도출(피드백 루프)."""

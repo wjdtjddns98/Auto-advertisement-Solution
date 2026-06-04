@@ -212,8 +212,9 @@ class AITextClient:
         if not hashtags:
             hashtags = ["#강아지간식", "#Nutti"]
 
-        # 설명이 calculator_url로 끝나도록 보정.
-        if not description.rstrip().endswith(calculator_url):
+        # 설명에 calculator_url이 없으면 추가(endswith가 아니라 포함 검사 — URL 뒤에
+        # 닫는 괄호·마침표가 붙어도 중복 추가되지 않도록).
+        if calculator_url not in description:
             sep = "\n\n" if description.strip() else ""
             description = f"{description.rstrip()}{sep}🐾 간식 계산기 → {calculator_url}"
 
