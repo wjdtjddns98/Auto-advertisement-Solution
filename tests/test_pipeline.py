@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from nutti.config import Settings
+from nutti.integrations.ai_text import FactCheckResult
 from nutti.models import ContentFormat, ReviewDecision, ReviewRequest, Stage
-from nutti.pipeline.orchestrator import GateRejected, Orchestrator
+from nutti.pipeline.orchestrator import FactCheckFailed, GateRejected, Orchestrator
 from nutti.review.gates import AutoApproveGate
 
 
@@ -63,3 +66,66 @@ def test_gate_rejection_stops_pipeline():
     except GateRejected as exc:
         assert exc.stage == Stage.SCRIPT
         assert exc.decision == ReviewDecision.REJECTED
+
+
+# --- 팩트체크 배선(#1): 오케스트레이터가 fact_check_script를 실제로 호출하는지 ---
+
+def _approving_orch(max_retries: int = 1) -> Orchestrator:
+    return Orchestrator(
+        _dry_settings(),
+        telegram=AutoApproveGate(),
+        discord=AutoApproveGate(),
+        max_factcheck_retries=max_retries,
+    )
+
+
+def test_factcheck_is_wired_and_passes(monkeypatch):
+    orch = _approving_orch()
+    calls = {"n": 0}
+
+    def passing(_script):
+        calls["n"] += 1
+        return FactCheckResult(passed=True, issues=[])
+
+    monkeypatch.setattr(orch.ai, "fact_check_script", passing)
+    run = orch.run("안전한 주제")
+    assert calls["n"] == 1  # 호출됨(데드코드 아님)
+    assert run.script.fact_checked is True
+    assert run.uploads  # 정상 진행
+
+
+def test_factcheck_regenerates_then_rejects(monkeypatch):
+    orch = _approving_orch(max_retries=1)
+    fc_calls = {"n": 0}
+    gen_calls = {"n": 0}
+
+    def always_fail(_script):
+        fc_calls["n"] += 1
+        return FactCheckResult(passed=False, issues=["근거 없는 효능 주장"])
+
+    real_gen = orch.ai.generate_script
+
+    def counting_gen(topic, feedback=""):
+        gen_calls["n"] += 1
+        return real_gen(topic, feedback=feedback)
+
+    monkeypatch.setattr(orch.ai, "fact_check_script", always_fail)
+    monkeypatch.setattr(orch.ai, "generate_script", counting_gen)
+
+    with pytest.raises(FactCheckFailed) as exc:
+        orch.run("위험한 주제")
+    assert exc.value.issues == ["근거 없는 효능 주장"]
+    assert fc_calls["n"] == 2  # 최초 + 재생성 1회
+    assert gen_calls["n"] == 2  # 재생성으로 대본 다시 생성됨
+
+
+def test_factcheck_passes_after_one_retry(monkeypatch):
+    orch = _approving_orch(max_retries=2)
+    results = iter([
+        FactCheckResult(passed=False, issues=["수정 필요"]),
+        FactCheckResult(passed=True, issues=[]),
+    ])
+    monkeypatch.setattr(orch.ai, "fact_check_script", lambda _s: next(results))
+    run = orch.run("주제")
+    assert run.script.fact_checked is True
+    assert run.uploads  # 재생성 후 통과 → 정상 진행

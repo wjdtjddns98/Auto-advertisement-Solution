@@ -89,3 +89,61 @@ def test_extract_tool_input_finds_named_tool():
 def test_extract_tool_input_missing_returns_none():
     msg = _Msg([_Block("text", text="없음")])
     assert _extract_tool_input(msg, "emit_metadata") is None
+
+
+def test_extract_tool_input_non_dict_returns_none():
+    # 매칭되는 tool_use 블록이 있어도 input이 dict가 아니면 None (가드 검증).
+    msg = _Msg([_Block("tool_use", name="emit_metadata", input=None)])
+    assert _extract_tool_input(msg, "emit_metadata") is None
+
+
+# --- 라이브 경로(가짜 Anthropic 클라이언트 주입, 네트워크 없음) ---
+
+class _FakeMessages:
+    def __init__(self, msg):
+        self._msg = msg
+
+    def create(self, **_kwargs):
+        return self._msg
+
+
+class _FakeAnthropic:
+    def __init__(self, msg):
+        self.messages = _FakeMessages(msg)
+
+
+def _live_client(msg) -> AITextClient:
+    client = AITextClient(_dry_settings())
+    client._client = _FakeAnthropic(msg)  # dry_run 분기 우회 → 라이브 경로
+    return client
+
+
+def test_fact_check_parse_failure_fails_safe():
+    # record_fact_check tool_use가 없는 응답 → 보수적으로 passed=False.
+    client = _live_client(_Msg([_Block("text", text="도구 호출 없음")]))
+    result = client.fact_check_script(Script(topic="t", body="본문"))
+    assert result.passed is False
+    assert result.issues  # 비어있지 않음
+
+
+def test_generate_metadata_live_appends_url_and_defaults_hashtags():
+    url = "https://example.com/calc/"
+    msg = _Msg([
+        _Block("tool_use", name="emit_metadata",
+               input={"title": "제목", "description": "설명 본문", "hashtags": []}),
+    ])
+    meta = _live_client(msg).generate_metadata(Script(topic="t", body="b"), url)
+    assert url in meta.description          # 누락된 링크 보정
+    assert len(meta.hashtags) >= 1          # 빈 해시태그 → 기본값 폴백
+
+
+def test_generate_metadata_no_duplicate_link():
+    # 설명 중간에 URL이 이미 있으면(뒤에 마침표) 중복 추가하지 않아야 한다(#7).
+    url = "https://example.com/calc/"
+    msg = _Msg([
+        _Block("tool_use", name="emit_metadata",
+               input={"title": "제목", "description": f"여기 링크({url}) 참고하세요.",
+                      "hashtags": ["#강아지"]}),
+    ])
+    meta = _live_client(msg).generate_metadata(Script(topic="t", body="b"), url)
+    assert meta.description.count(url) == 1
