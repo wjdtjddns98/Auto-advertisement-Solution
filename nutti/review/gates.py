@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from typing import Protocol
@@ -171,15 +172,247 @@ class TelegramGate:
         return bool(origin_chat) and origin_chat == str(chat_id)
 
 
-class DiscordGate:
-    """디스코드 검수/아카이브(검수③ + 리포트 보관)."""
+# ---------------------------------------------------------------------------
+# 디스코드 게이트 (검수③)
+# ---------------------------------------------------------------------------
 
-    def __init__(self, settings: Settings):
+
+class DiscordWebhookError(RuntimeError):
+    """디스코드 웹훅 호출 실패(영구). 웹훅 URL 토큰은 메시지에서 가려진다."""
+
+
+class DiscordWebhookTransientError(DiscordWebhookError):
+    """일시적 실패(네트워크/429/5xx) — 호출자가 재시도해도 되는 경우."""
+
+
+class DiscordReceiverTransientError(RuntimeError):
+    """DiscordDecisionReceiver.poll() 일시적 실패(네트워크/타임아웃 등).
+
+    poll() 구현체가 이 예외를 던지면 DiscordGate 폴링 루프가 재시도한다.
+    영구 오류는 이 클래스가 아닌 RuntimeError(또는 그 서브클래스)를 사용해
+    전파시켜 빠르게 실패하도록 한다.
+    """
+
+
+
+class DiscordWebhookClient:
+    """Discord 웹훅 POST 래퍼. httpx는 실제 경로에서만 lazy import한다.
+
+    `http`로 httpx.Client를 주입하면 네트워크 없이 테스트할 수 있다.
+
+    보안: webhook_url에는 토큰이 포함되므로 공개 속성으로 노출하지 않는다.
+    마스킹된 URL이 필요하면 `masked_url` 프로퍼티를 사용한다.
+    """
+
+    def __init__(self, webhook_url: str, *, http=None):
+        # 웹훅 URL(토큰 포함)을 비공개로 저장 — 공개 속성 노출 금지.
+        self._webhook_url = webhook_url
+        self._http = http
+
+    @property
+    def masked_url(self) -> str:
+        """웹훅 URL에서 토큰(마지막 경로 세그먼트)을 *** 로 마스킹해 반환한다.
+
+        로그/에러 메시지에서 토큰이 노출되지 않도록 이 프로퍼티를 사용한다.
+        """
+        return re.sub(r"(/webhooks/\d+/)[^/?#]+", r"\1***", self._webhook_url)
+
+    @property
+    def _client(self):
+        """주입된 클라이언트가 없으면 httpx.Client를 지연 생성한다."""
+        if self._http is None:
+            import httpx  # lazy import — dry_run 경로에서는 불필요
+
+            self._http = httpx.Client(timeout=30.0)
+        return self._http
+
+    def send_card(self, review: ReviewRequest) -> None:
+        """검수 카드를 디스코드 웹훅으로 전송한다(embed 형식).
+
+        HTTP 4xx(429 제외)/5xx 에러는 DiscordWebhookError/DiscordWebhookTransientError로
+        변환하며, 웹훅 URL 토큰은 예외 메시지에서 가려진다.
+        """
+        import httpx  # lazy import — TransportError/TooManyRedirects 참조용
+
+        payload = {
+            "embeds": [
+                {
+                    "title": f"[검수 요청] {review.title}",
+                    "description": review.preview[:2000],  # embed description 최대 4096자, 여유있게 제한
+                    "fields": [
+                        {"name": "단계", "value": review.stage.value, "inline": True},
+                        {"name": "검수 ID", "value": review.id, "inline": True},
+                    ],
+                    "color": 0x5865F2,  # Discord 브랜드 색상
+                }
+            ]
+        }
+        try:
+            resp = self._client.post(self._webhook_url, json=payload)
+        except (httpx.TransportError, httpx.TooManyRedirects) as exc:
+            # 전송 계층 오류 — 예외 메시지에 원본 URL(토큰 포함)이 담길 수 있으므로
+            # type(exc).__name__ 만 사용하고 URL/바디는 포함하지 않는다.
+            raise DiscordWebhookTransientError(
+                f"discord_transport_error type={type(exc).__name__}"
+            ) from None
+
+        if resp.status_code == 429:
+            # 429 응답 바디의 retry_after(float, 초 단위) 파싱.
+            try:
+                body = resp.json()
+                retry_after = float(body.get("retry_after", 1.0))
+            except Exception:
+                retry_after = 1.0
+            raise DiscordWebhookTransientError(f"rate_limited retry_after={retry_after}")
+        if 500 <= resp.status_code < 600:
+            raise DiscordWebhookTransientError(
+                f"discord_server_error status={resp.status_code}"
+            )
+        if not resp.is_success:
+            # 응답 body의 message 필드는 임의 문자열(URL/토큰 포함 가능)이므로
+            # 상태 코드와 Discord 에러 코드(정수)만 노출한다.
+            try:
+                body = resp.json()
+                detail = f"status={resp.status_code} code={body.get('code')}"
+            except Exception:
+                detail = f"status={resp.status_code}"
+            raise DiscordWebhookError(f"discord_error {detail}")
+        # 204 No Content 또는 200/201 — 성공.
+
+    def close(self) -> None:
+        """httpx 클라이언트를 닫는다(명시적 정리가 필요할 때).
+
+        close() 후 self._http를 None으로 초기화해 두 번째 send_card 호출 시
+        _client 프로퍼티가 새 httpx.Client를 재생성하지 않도록 한다.
+        """
+        if self._http is not None:
+            self._http.close()
+            self._http = None  # 항목 8: close 후 재생성 누수 방지
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+class DiscordDecisionReceiver(Protocol):
+    """디스코드 인바운드 결정 수신 인터페이스.
+
+    실제 구현은 Discord Bot Gateway/인터랙션 또는 외부 저장소 폴링이 필요하다.
+    현재 DiscordGate는 이 Protocol을 주입받아 사용하므로, 향후 실 구현 시
+    이 Protocol을 구현한 클래스를 만들어 주입하면 된다.
+    """
+
+    def poll(self, review_id: str) -> ReviewDecision | None:
+        """검수 ID에 대한 결정을 조회한다. 아직 결정 없으면 None 반환."""
+        ...
+
+
+class InMemoryDiscordStore:
+    """메모리 기반 디스코드 결정 저장소(테스트/fake 수신 채널용).
+
+    테스트에서 set_decision으로 결정을 미리 심어두면, poll이 해당 결정을 반환한다.
+    """
+
+    def __init__(self) -> None:
+        self._decisions: dict[str, ReviewDecision] = {}
+
+    def set_decision(self, review_id: str, decision: ReviewDecision) -> None:
+        """결정을 저장한다(테스트에서 fake 수신 시뮬레이션용)."""
+        self._decisions[review_id] = decision
+
+    def poll(self, review_id: str) -> ReviewDecision | None:
+        """저장된 결정이 있으면 반환하고, 없으면 None을 반환한다."""
+        return self._decisions.get(review_id)
+
+
+class DiscordGate:
+    """디스코드 검수/아카이브(검수③ + 리포트 보관).
+
+    설계: 웹훅으로 검수 카드를 전송하고, DiscordDecisionReceiver Protocol을 통해
+    인바운드 결정을 폴링 방식으로 기다린다. 실 수신 구현(Bot Gateway 등)은
+    TODO(live) — receiver=None이면 ValueError로 fast-fail한다.
+    client/receiver/store/clock/sleep을 주입하면 네트워크 없이 테스트할 수 있다.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        client: DiscordWebhookClient | None = None,
+        receiver: DiscordDecisionReceiver | None = None,
+        store: ReviewStore | None = None,
+        clock: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
+    ):
         self.settings = settings
+        self._client = client
+        self._receiver = receiver
+        self._store = store
+        self._clock: Callable[[], float] = clock or time.monotonic
+        self._sleep: Callable[[float], None] = sleep or time.sleep
 
     def request(self, review: ReviewRequest) -> ReviewDecision:
+        """검수 카드를 전송하고 결정이 수신될 때까지 폴링한다.
+
+        dry_run=True 또는 discord_webhook_url이 비어있으면 자동 승인한다.
+        실 경로에서 receiver가 None이면 ValueError로 즉시 실패한다
+        (TODO(live): Discord Bot Gateway 또는 외부 저장소 기반 수신 구현 필요).
+        """
         if self.settings.dry_run or not self.settings.discord_webhook_url:
             log.info("discord.dry_run_approve", stage=review.stage.value)
             return ReviewDecision.APPROVED
-        # TODO: 웹훅으로 메타데이터 전송 → 답장 기반 수정 요청 수신
-        raise NotImplementedError("디스코드 검수 미구현")
+
+        # receiver가 없으면 결정을 수신할 방법이 없으므로 명확히 실패.
+        # TODO(live): Discord Bot Gateway/인터랙션 기반 DiscordDecisionReceiver 구현 필요.
+        if self._receiver is None:
+            raise ValueError(
+                "DISCORD_DECISION_RECEIVER가 설정되지 않았습니다 — "
+                "Discord Bot Gateway 또는 외부 저장소 기반 수신 구현이 필요합니다. TODO(live)"
+            )
+
+        # self._client가 None이면 직접 생성하고, 종료 시 반드시 close()를 호출해
+        # httpx 커넥션 풀이 누수되지 않도록 한다. 주입된 클라이언트는 호출자가 책임진다.
+        _own_client = self._client is None
+        client = self._client or DiscordWebhookClient(self.settings.discord_webhook_url)
+        store = self._store or JsonFileReviewStore(self.settings.review_store_path)
+
+        try:
+            # 1) 웹훅으로 검수 카드 전송 + PENDING 상태 영속화.
+            #    DiscordWebhookError(영구)/DiscordWebhookTransientError(일시적)는 전파(fast-fail).
+            client.send_card(review)
+            review.decision = ReviewDecision.PENDING
+            store.save(review)
+            log.info("discord.sent", stage=review.stage.value, review_id=review.id)
+
+            # 2) 결정 폴링: receiver.poll()이 결정을 반환하거나 타임아웃까지 대기.
+            #    일시적 오류(DiscordReceiverTransientError)는 재시도, 전체 대기는 타임아웃이 제한.
+            start = self._clock()
+            while True:
+                remaining = self.settings.review_timeout_sec - (self._clock() - start)
+                if remaining <= 0:
+                    store.update_decision(review.id, ReviewDecision.REJECTED, note="timeout")
+                    log.warning("discord.timeout", stage=review.stage.value)
+                    return ReviewDecision.REJECTED
+
+                try:
+                    decision = self._receiver.poll(review.id)
+                except DiscordReceiverTransientError as exc:
+                    # 일시적 오류만 재시도(전체 대기는 바깥 타임아웃이 제한). 영구 오류는 전파.
+                    log.warning(
+                        "discord.poll_transient", stage=review.stage.value, error=str(exc)
+                    )
+                    self._sleep(self.settings.review_poll_interval_sec)
+                    continue
+                if decision is not None:
+                    store.update_decision(review.id, decision)
+                    log.info(
+                        "discord.decision", stage=review.stage.value, decision=decision.value
+                    )
+                    return decision
+
+                self._sleep(self.settings.review_poll_interval_sec)
+        finally:
+            if _own_client:
+                client.close()
