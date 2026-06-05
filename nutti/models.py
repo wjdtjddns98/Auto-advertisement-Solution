@@ -52,15 +52,14 @@ class Script(BaseModel):
 
 
 class VideoAsset(BaseModel):
-    """2단계 산출물: 합성된 최종 영상과 중간 자산."""
+    """2단계 산출물: Veo 단일컷 영상과 중간 자산."""
 
     script_id: str
-    character_clip_url: str | None = None     # Hedra Character-3
-    scene_clip_urls: list[str] = Field(default_factory=list)  # Seedance/Kling
-    subtitle_url: str | None = None           # AssemblyAI
-    final_url: str | None = None
+    frame_image_path: str | None = None  # NanoBanana(마스코트 시작 프레임) 로컬 경로
+    video_path: str | None = None        # VeoClient가 즉시 다운로드해 저장한 로컬 경로
+    final_url: str | None = None         # 최종 산출물 위치(로컬 파일 경로 문자열 허용)
     preview_url: str | None = None
-    duration_sec: float = 0.0
+    duration_sec: float = Field(default=8.0)  # Veo 단일컷 기본 8초
 
 
 class Metadata(BaseModel):
