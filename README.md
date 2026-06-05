@@ -34,7 +34,7 @@ nutti/
   logging.py             # 구조화 로깅
   integrations/
     ai_text.py           # Claude: 대본·메타데이터·성과분석
-    video.py             # Hedra(캐릭터)·Seedance/Kling(씬)·AssemblyAI(자막)
+    video.py             # NanoBanana(시작 프레임) → Veo 3.1 단일컷 8초 영상
     publishing.py        # YouTube Data API · Instagram Graph API
   review/
     gates.py             # 검수 게이트 (텔레그램·디스코드·자동승인)
@@ -77,7 +77,7 @@ nutti run "강아지 수제간식 레시피" --reels
 | 단계 | 파일 | 연동 대상 |
 |------|------|-----------|
 | 1·3·5 | `integrations/ai_text.py` | Anthropic API (dry_run 외 자동 동작) |
-| 2 | `integrations/video.py` | Hedra Character-3, Seedance 2.0/Kling 3.0, AssemblyAI |
+| 2 | `integrations/video.py` | Gemini(NanoBanana 시작 프레임) → Veo 3.1 image-to-video |
 | 4·5 | `integrations/publishing.py` | YouTube Data API v3, Instagram Graph API |
 | 검수 | `review/gates.py` | Telegram Bot(인라인 버튼), Discord Webhook |
 | 저장 | `storage/sheets.py` | Google Sheets API |

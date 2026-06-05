@@ -33,14 +33,18 @@ class Settings(BaseSettings):
     # 최근 주제를 기억해 주제 자동 생성 시 중복을 피하는 데 쓴다.
     state_path: str = Field(default="data/pipeline_state.json", alias="NUTTI_STATE_PATH")
 
-    # 2단계: 영상
-    hedra_api_key: str = Field(default="", alias="HEDRA_API_KEY")
-    hedra_character_id: str = Field(default="", alias="HEDRA_CHARACTER_ID")
-    seedance_api_key: str = Field(default="", alias="SEEDANCE_API_KEY")
-    kling_api_key: str = Field(default="", alias="KLING_API_KEY")
-    elevenlabs_api_key: str = Field(default="", alias="ELEVENLABS_API_KEY")
-    elevenlabs_voice_id: str = Field(default="", alias="ELEVENLABS_VOICE_ID")
-    assemblyai_api_key: str = Field(default="", alias="ASSEMBLYAI_API_KEY")
+    # 2단계: 영상 (Gemini 이미지 → Veo 3.1 image-to-video)
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_image_model: str = Field(
+        default="gemini-2.5-flash-preview-05-20", alias="NUTTI_GEMINI_IMAGE_MODEL"
+    )
+    veo_model: str = Field(default="veo-3.1-fast-generate-preview", alias="NUTTI_VEO_MODEL")
+    # 마스코트 레퍼런스 이미지 경로(없으면 텍스트 프롬프트만으로 시작 프레임 생성).
+    nutti_mascot_image: str = Field(default="", alias="NUTTI_MASCOT_IMAGE")
+    # 생성된 프레임/영상을 저장하는 로컬 디렉터리(Veo 산출물은 48시간 후 삭제되므로 즉시 저장).
+    nutti_media_dir: str = Field(default="data/media", alias="NUTTI_MEDIA_DIR")
+    veo_poll_interval_sec: float = Field(default=15.0, alias="NUTTI_VEO_POLL_INTERVAL_SEC")
+    veo_timeout_sec: float = Field(default=600.0, alias="NUTTI_VEO_TIMEOUT_SEC")
 
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
