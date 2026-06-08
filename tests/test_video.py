@@ -1548,3 +1548,19 @@ def test_produce_closes_self_created_veo_client_on_extend_failure(monkeypatch):
     with pytest.raises(VideoRenderError):
         studio.produce(script)
     assert created["veo"].close_count == 1
+
+
+def test_write_bytes_cleans_tmp_on_replace_failure(tmp_path, monkeypatch):
+    """os.replace 실패(Windows PermissionError 등) 시 .tmp 잔재를 남기지 않는다(디스크 누수 방지)."""
+    import os as _os
+
+    out = tmp_path / "video_x.mp4"
+
+    def _boom(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(_os, "replace", _boom)
+    with pytest.raises(VideoRenderError):
+        video_module._write_bytes(out, b"DATA", "테스트 영상")
+    assert not (tmp_path / "video_x.mp4.tmp").exists()  # tmp 잔재 없음
+    assert not out.exists()

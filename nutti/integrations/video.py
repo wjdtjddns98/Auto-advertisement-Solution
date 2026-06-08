@@ -252,12 +252,18 @@ def _write_bytes(out_path: Path, data: bytes, what: str) -> None:
     """
     import os
 
+    tmp_path = out_path.with_name(out_path.name + ".tmp")
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = out_path.with_name(out_path.name + ".tmp")
         tmp_path.write_bytes(data)
         os.replace(tmp_path, out_path)
     except OSError as exc:
+        # os.replace 실패(Windows: 대상이 다른 프로세스에 열려 있으면 PermissionError) 시
+        # tmp 잔재(수백 MB 영상)가 디스크에 남지 않도록 정리한 뒤 전파한다.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise VideoRenderError(f"{what} 저장 실패: {type(exc).__name__}") from None
 
 
