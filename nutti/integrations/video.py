@@ -579,6 +579,8 @@ class VeoClient(_HttpClosingMixin):
         Gemini 파일 API는 실제 바이트를 GCS 서명 URL로 302 리다이렉트할 수 있다.
         GCS 서명 URL은 쿼리파라미터로 자체 인증하므로 API 키 헤더 없이 재요청한다.
         """
+        # Veo 완료 응답의 URI도 API 응답값(신뢰 불가 입력) — scheme·host 검증 필수.
+        _validate_redirect_location(uri)
         headers = _gemini_headers(self.settings) if uri.startswith(_GEMINI_BASE) else None
         # follow_redirects=False: 리다이렉트 대상이 GCS 등 외부 호스트일 때
         # API 키 헤더가 새지 않도록 수동으로 처리한다.
