@@ -204,6 +204,11 @@ class AITextClient:
 
             self._client = Anthropic(api_key=settings.anthropic_api_key)
 
+    @staticmethod
+    def split_beats(body: str) -> list[str]:
+        """대본 본문을 영상 비트(8초 클립 단위)로 분할한다(REVISE 등 외부 재계산용)."""
+        return _split_into_beats(body)
+
     def generate_script(self, topic: str, feedback: str = "") -> Script:
         """주제로부터 대본 생성. feedback은 5단계 분석 결과를 반영할 때 사용."""
         prompt = f"주제: {topic}\n"
