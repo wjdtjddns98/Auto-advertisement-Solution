@@ -114,18 +114,24 @@ class Orchestrator:
             )
             raise GateRejected(Stage.SCRIPT, script_decision)
 
-        # 2단계: 영상
+        # 2단계: 영상 (REVISE 시 대본 수정 → 영상 재생성 루프)
         run.current_stage = Stage.VIDEO
         run.video = self.studio.produce(run.script)
-        # VIDEO 단계: 영상 파일이 있으면 MP4를 텔레그램으로 직접 전송(인라인 재생).
-        video_review = ReviewRequest(
-            stage=Stage.VIDEO,
-            title="영상 품질 검수",
-            preview=run.video.preview_url or "",
-            media_path=run.video.video_path,
-        )
-        video_decision = self.telegram.request(video_review)
-        if video_decision not in (ReviewDecision.APPROVED,):
+        while True:
+            video_review = ReviewRequest(
+                stage=Stage.VIDEO,
+                title="영상 품질 검수",
+                preview=run.video.preview_url or "",
+                media_path=run.video.video_path,
+            )
+            video_decision = self.telegram.request(video_review)
+            if video_decision == ReviewDecision.APPROVED:
+                break
+            if video_decision == ReviewDecision.REVISE and video_review.revised_content:
+                run.script.body = video_review.revised_content
+                self.store.update_script(run.script)
+                run.video = self.studio.produce(run.script)
+                continue
             log.warning(
                 "pipeline.gate_blocked", stage=Stage.VIDEO.value, decision=video_decision.value
             )
