@@ -346,6 +346,46 @@ def test_nano_banana_missing_image_in_response_raises(tmp_path):
         client.generate_frame("a dog")
 
 
+class _MultiRespFake:
+    """post 호출마다 순서대로 다른 응답을 돌려주는 fake (재시도 시나리오용)."""
+
+    def __init__(self, responses: list[_Resp]):
+        self._responses = iter(responses)
+        self.call_count = 0
+        self.closed = False
+
+    def post(self, url, *, headers=None, json=None):
+        self.call_count += 1
+        return next(self._responses)
+
+    def close(self):
+        self.closed = True
+
+
+def test_nano_banana_generate_frame_retries_on_missing_image(tmp_path, monkeypatch):
+    """이미지 파트 없는 응답 후 재시도하면 성공한다(sleep 없이 빠르게)."""
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    no_image = _Resp(json_data={"candidates": [{"content": {"parts": [{"text": "only"}]}}]})
+    ok = _nano_image_response()
+    fake = _MultiRespFake([no_image, ok])
+    client = NanoBananaClient(_gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake)
+    path = client.generate_frame("a dog")
+    assert Path(path).exists()
+    assert fake.call_count == 2  # 1회 실패 + 1회 성공
+
+
+def test_nano_banana_generate_frame_exhausts_retries(tmp_path, monkeypatch):
+    """모든 재시도가 실패하면 VideoRenderError를 던진다."""
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    no_image = _Resp(json_data={"candidates": [{"content": {"parts": [{"text": "only"}]}}]})
+    max_tries = 1 + NanoBananaClient._MAX_FRAME_RETRIES
+    fake = _MultiRespFake([no_image] * max_tries)
+    client = NanoBananaClient(_gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake)
+    with pytest.raises(VideoRenderError):
+        client.generate_frame("a dog")
+    assert fake.call_count == max_tries
+
+
 def test_nano_banana_error_message_redacts_url_and_body(tmp_path):
     """HTTP 오류 메시지에는 상태 코드만 — URL·응답 본문은 노출하지 않는다."""
     settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
