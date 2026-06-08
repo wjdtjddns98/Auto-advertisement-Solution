@@ -930,6 +930,24 @@ def test_veo_client_download_sends_api_key_only_to_gemini_host(tmp_path):
     assert headers.get("x-goog-api-key") == "test-gemini-key"
 
 
+def test_veo_client_download_download_path_initial_uri_sends_api_key(tmp_path):
+    """/download/v1beta/... 경로가 초기 URI로 직접 반환될 때 API 키를 포함한다.
+
+    Veo 완료 응답이 /v1beta/... 대신 /download/v1beta/... 경로 URI를 직접
+    반환하는 경우에도 API 키 헤더를 전달해야 한다. (line 588 _GEMINI_HOST 체크)
+    """
+    download_path_uri = (
+        "https://generativelanguage.googleapis.com/download/v1beta"
+        "/files/direct-dl:download?alt=media"
+    )
+    fake = FakeVeoHttp(get_responses=[_veo_done_response(uri=download_path_uri)])
+    client = _veo_client(tmp_path, fake)
+    client.generate(_frame_file(tmp_path), "prompt")
+    headers = fake.download_headers[0]
+    assert headers is not None
+    assert headers.get("x-goog-api-key") == "test-gemini-key"
+
+
 def test_veo_client_download_gemini_to_gemini_redirect_keeps_api_key(tmp_path):
     """Gemini→Gemini 302 리다이렉트 시 두 번째 요청에도 API 키 헤더를 유지한다.
 

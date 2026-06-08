@@ -585,7 +585,7 @@ class VeoClient(_HttpClosingMixin):
         """
         # Veo 완료 응답의 URI도 API 응답값(신뢰 불가 입력) — scheme·host 검증 필수.
         _validate_redirect_location(uri)
-        headers = _gemini_headers(self.settings) if uri.startswith(_GEMINI_BASE) else None
+        headers = _gemini_headers(self.settings) if uri.startswith(_GEMINI_HOST) else None
         # follow_redirects=False: 리다이렉트 대상이 GCS 등 외부 호스트일 때
         # API 키 헤더가 새지 않도록 수동으로 처리한다.
         resp = _safe_send(
