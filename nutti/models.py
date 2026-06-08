@@ -101,6 +101,8 @@ class ReviewRequest(BaseModel):
     decision: ReviewDecision = ReviewDecision.PENDING
     note: str = ""
     message_id: int | None = None  # 텔레그램 검수 메시지 ID(버튼 수정/콜백 매칭용)
+    revised_content: str | None = None  # 사용자가 입력한 수정 대본 내용
+    media_path: str | None = None       # 영상 파일 전송용 로컬 경로
 
 
 class PipelineRun(BaseModel):
