@@ -324,13 +324,19 @@ class NanoBananaClient(_HttpClosingMixin):
         self._http = httpx.Client(timeout=60.0)
         return self._http
 
+    # Gemini 이미지 API는 간헐적으로 이미지 파트 없이 응답한다(알려진 flakiness).
+    # 일시적 실패로 간주하고 최대 이 횟수만큼 재시도한다.
+    _MAX_FRAME_RETRIES = 2
+
     def generate_frame(self, scene_prompt: str, *, reference_image_path: str | None = None) -> str:
         """시작 프레임 이미지를 생성해 media_dir에 저장하고 로컬 경로를 반환한다.
 
         `reference_image_path`가 있으면 마스코트 일관성을 위해 base64
         inline_data 파트로 첨부한다(이미지 컨디셔닝).
+        Gemini가 이미지 파트 없이 응답하면 _MAX_FRAME_RETRIES 횟수만큼 재시도한다.
         """
         import base64
+        import time
 
         parts: list[dict] = [{"text": scene_prompt}]
         if reference_image_path:
@@ -348,18 +354,30 @@ class NanoBananaClient(_HttpClosingMixin):
             "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
         }
         url = f"{_GEMINI_BASE}/models/{self.settings.gemini_image_model}:generateContent"
-        data = _send_json(
-            lambda: self._client().post(
-                url, headers=_gemini_headers(self.settings), json=body
-            ),
-            "Gemini 프레임 생성",
-        )
-        image_bytes = self._extract_image_bytes(data)
-        out_path = Path(self.settings.nutti_media_dir) / f"frame_{uuid4().hex[:12]}.png"
-        # 디스크 쓰기 실패(OSError)도 VideoRenderError 계약을 지킨다(_write_bytes).
-        _write_bytes(out_path, image_bytes, "Gemini 프레임 이미지")
-        log.info("nano_banana.frame.saved", path=str(out_path))
-        return str(out_path)
+
+        last_exc: Exception | None = None
+        for attempt in range(1 + self._MAX_FRAME_RETRIES):
+            if attempt > 0:
+                wait = 2.0 * attempt
+                log.warning("nano_banana.frame.retry", attempt=attempt, wait=wait)
+                time.sleep(wait)
+            data = _send_json(
+                lambda: self._client().post(
+                    url, headers=_gemini_headers(self.settings), json=body
+                ),
+                "Gemini 프레임 생성",
+            )
+            try:
+                image_bytes = self._extract_image_bytes(data)
+            except VideoRenderError as exc:
+                last_exc = exc
+                continue
+            out_path = Path(self.settings.nutti_media_dir) / f"frame_{uuid4().hex[:12]}.png"
+            _write_bytes(out_path, image_bytes, "Gemini 프레임 이미지")
+            log.info("nano_banana.frame.saved", path=str(out_path))
+            return str(out_path)
+
+        raise last_exc  # type: ignore[misc]
 
     @staticmethod
     def _extract_image_bytes(data: dict) -> bytes:
@@ -397,8 +415,18 @@ class NanoBananaClient(_HttpClosingMixin):
                         raise VideoRenderError(
                             f"Gemini 이미지 base64 디코드 실패: {type(exc).__name__}"
                         ) from None
-        # 원본 본문에는 내부 메타데이터가 있을 수 있어 키 목록만 노출(redaction).
-        log.debug("nano_banana.missing_image", keys=list(data.keys()))
+        # finishReason이 있으면 더 명확한 오류 메시지 제공(SAFETY 필터 등 진단용).
+        finish_reason = None
+        if isinstance(candidates, list) and candidates:
+            first = candidates[0]
+            if isinstance(first, dict):
+                finish_reason = first.get("finishReason")
+        log.debug("nano_banana.missing_image", keys=list(data.keys()), finish_reason=finish_reason)
+        if finish_reason:
+            raise VideoRenderError(
+                f"Gemini 이미지 파트 없음 — finishReason={finish_reason} "
+                f"(응답 키: {list(data.keys())})"
+            )
         raise VideoRenderError(
             f"Gemini 응답에 이미지 파트가 없습니다 (응답 키: {list(data.keys())})"
         )
