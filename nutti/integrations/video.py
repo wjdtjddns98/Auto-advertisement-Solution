@@ -553,12 +553,26 @@ class VeoClient(_HttpClosingMixin):
         """완료된 영상을 즉시 내려받아 media_dir에 저장하고 경로를 반환한다.
 
         `x-goog-api-key`는 자격증명이므로 **Gemini API 도메인일 때만** 붙인다.
-        완료 응답의 URI는 서명된 GCS URL 등 외부 호스트일 수 있는데(자체 인증을
-        쿼리 파라미터로 들고 있음), 거기에 키 헤더를 보내면 해당 호스트의
-        액세스 로그·HTTP 중간자에게 키가 샌다(credential leak).
+        Gemini 파일 API는 실제 바이트를 GCS 서명 URL로 302 리다이렉트할 수 있다.
+        GCS 서명 URL은 쿼리파라미터로 자체 인증하므로 API 키 헤더 없이 재요청한다.
         """
         headers = _gemini_headers(self.settings) if uri.startswith(_GEMINI_BASE) else None
-        resp = _safe_send(lambda: self._client().get(uri, headers=headers), "Veo 영상 다운로드")
+        # follow_redirects=False: 리다이렉트 대상이 GCS 등 외부 호스트일 때
+        # API 키 헤더가 새지 않도록 수동으로 처리한다.
+        resp = _safe_send(
+            lambda: self._client().get(uri, headers=headers, follow_redirects=False),
+            "Veo 영상 다운로드",
+        )
+        sc = getattr(resp, "status_code", 200)
+        if 300 <= sc < 400:
+            location = (getattr(resp, "headers", {}) or {}).get("location", "")
+            if not location:
+                raise VideoRenderError("Veo 영상 다운로드: 리다이렉트 응답에 Location 헤더 없음")
+            # GCS 서명 URL은 API 키 헤더 없이, 리다이렉트는 끝까지 따라간다.
+            resp = _safe_send(
+                lambda: self._client().get(location, follow_redirects=True),
+                "Veo 영상 다운로드(리다이렉트)",
+            )
         _raise_for_status(resp, "Veo 영상 다운로드")
         content = getattr(resp, "content", None)
         if not isinstance(content, (bytes, bytearray)) or not content:

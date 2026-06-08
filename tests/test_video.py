@@ -70,10 +70,11 @@ def _no_sleep(_seconds):
 
 
 class _Resp:
-    """httpx.Response 대역(status_code + json + content만 흉내).
+    """httpx.Response 대역(status_code + headers + json + content 흉내).
 
     `json_exc`를 주면 json() 호출 시 그 예외를 던진다 — HTTP 200에 비-JSON
     본문이 오는 경우(CDN/프록시 장애)를 시뮬레이션하기 위함이다.
+    `headers`는 302 Location 등 응답 헤더 시뮬레이션에 사용한다.
     """
 
     def __init__(
@@ -83,11 +84,13 @@ class _Resp:
         json_data=None,
         content: bytes = b"",
         json_exc: Exception | None = None,
+        headers: dict | None = None,
     ):
         self.status_code = status_code
         self._json = json_data if json_data is not None else {}
         self.content = content
         self._json_exc = json_exc
+        self.headers = dict(headers or {})
 
     def json(self):
         if self._json_exc is not None:
@@ -431,6 +434,7 @@ class FakeVeoHttp:
         post_exc: Exception | None = None,
         get_responses: list | None = None,
         download_response: _Resp | Exception | None = None,
+        redirect_location: str | None = None,
     ):
         self.post_response = post_response or _veo_submit_response()
         self.post_exc = post_exc
@@ -438,6 +442,10 @@ class FakeVeoHttp:
         self.download_response = (
             download_response if download_response is not None else _Resp(content=b"FAKE-MP4-BYTES")
         )
+        # redirect_location 설정 시: 첫 다운로드 요청에서 302+Location을 반환하고,
+        # 이후 Location URL로의 요청에서 download_response를 반환한다.
+        self.redirect_location = redirect_location
+        self._redirect_served = False
         self.poll_count = 0
         self.poll_urls: list[str] = []
         self.download_urls: list[str] = []
@@ -464,7 +472,7 @@ class FakeVeoHttp:
             return None
         return f"{video_module._GEMINI_BASE}/{name.lstrip('/')}"
 
-    def get(self, url, *, headers=None):
+    def get(self, url, *, headers=None, follow_redirects=None):
         if url == self._expected_poll_url():
             self.poll_count += 1
             self.poll_urls.append(url)
@@ -474,6 +482,11 @@ class FakeVeoHttp:
             return item
         self.download_urls.append(url)
         self.download_headers.append(headers)
+        # redirect_location 설정 시: 첫 다운로드 요청에서 302를 반환하고
+        # Location URL로의 재요청에서 실제 download_response를 반환한다.
+        if self.redirect_location and not self._redirect_served:
+            self._redirect_served = True
+            return _Resp(status_code=302, headers={"location": self.redirect_location})
         if isinstance(self.download_response, Exception):
             raise self.download_response
         return self.download_response
@@ -897,6 +910,34 @@ def test_veo_client_download_sends_api_key_only_to_gemini_host(tmp_path):
     headers = fake.download_headers[0]
     assert headers is not None
     assert headers.get("x-goog-api-key") == "test-gemini-key"
+
+
+def test_veo_client_download_follows_302_redirect(tmp_path):
+    """Gemini 파일 API가 302로 GCS에 리다이렉트하면 Location URL에서 영상을 받는다.
+
+    - 첫 GET(Gemini URL): API 키 헤더 포함, 302 + Location 반환
+    - 두 번째 GET(Location URL): API 키 헤더 없이 실제 영상 바이트 반환
+    - download_headers[0]에 API 키, download_headers[1]에는 키 없음
+    """
+    gcs_url = "https://storage.googleapis.com/veo-signed/video.mp4?X-Goog-Signature=abc"
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/redirect-test:download"
+    fake = FakeVeoHttp(
+        get_responses=[_veo_done_response(uri=gemini_uri)],
+        download_response=_Resp(content=b"REAL-MP4-BYTES"),
+        redirect_location=gcs_url,
+    )
+    client = _veo_client(tmp_path, fake)
+    path = client.generate(_frame_file(tmp_path), "prompt")
+
+    assert Path(path).read_bytes() == b"REAL-MP4-BYTES"
+    # 첫 요청(Gemini): API 키 포함
+    assert fake.download_headers[0] is not None
+    assert fake.download_headers[0].get("x-goog-api-key") == "test-gemini-key"
+    # 두 번째 요청(GCS): API 키 없음(자격증명 누출 방지)
+    second_headers = fake.download_headers[1]
+    assert not second_headers or "x-goog-api-key" not in {k.lower() for k in second_headers}
+    # 두 번째 요청 URL이 Location URL과 일치해야 한다.
+    assert fake.download_urls[1] == gcs_url
 
 
 def test_fake_veo_http_routes_polls_without_operations_prefix(tmp_path):
