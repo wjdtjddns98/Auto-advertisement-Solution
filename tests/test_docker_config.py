@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 # 프로젝트 루트 (tests/ 의 부모)
 ROOT = Path(__file__).parent.parent
@@ -518,4 +519,131 @@ def test_deploy_md_service_names_exist_in_compose(
     assert not unknown_svcs, (
         f"DEPLOY.md 가 docker-compose.yml 에 없는 서비스를 참조: {unknown_svcs} — "
         "서비스명이 바뀌었으면 DEPLOY.md 도 함께 업데이트해야 함"
+    )
+
+
+# ── runner 서비스 검증 (yaml.safe_load 기반) ────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def compose_data() -> dict:
+    """docker-compose.yml 을 yaml.safe_load 로 파싱한 딕셔너리를 반환한다.
+
+    yaml 앵커(<<: *nutti-base) 는 safe_load 가 머지 키를 처리하므로
+    실제 서비스 딕셔너리 값으로 확인할 수 있다.
+    """
+    path = ROOT / "docker-compose.yml"
+    assert path.exists(), "docker-compose.yml 이 프로젝트 루트에 없음"
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def test_runner_service_exists(compose_data: dict) -> None:
+    """runner 서비스가 docker-compose.yml services 에 정의되어야 한다."""
+    services = compose_data.get("services", {})
+    assert "runner" in services, (
+        "runner 서비스가 없음 — `docker compose run --rm runner run '주제'` 수동 실행 불가"
+    )
+
+
+def test_runner_profiles_manual(compose_data: dict) -> None:
+    """runner 서비스가 profiles: [manual] 로 선언되어 평소 up -d 에 포함되지 않아야 한다."""
+    runner = compose_data["services"]["runner"]
+    profiles = runner.get("profiles", [])
+    assert "manual" in profiles, (
+        f"runner profiles 에 'manual' 이 없음 (현재: {profiles}) — "
+        "`docker compose up -d` 시 runner 가 불필요하게 기동됨"
+    )
+
+
+def test_runner_no_entrypoint_override(compose_data: dict) -> None:
+    """runner 서비스에 entrypoint 오버라이드가 없어야 한다.
+
+    nutti 서비스는 Ofelia 대기용으로 entrypoint 를 /bin/sh 로 오버라이드하지만,
+    runner 는 Dockerfile ENTRYPOINT ["nutti"] 를 그대로 사용해야 인자가
+    nutti 서브커맨드로 올바르게 전달된다.
+    """
+    runner = compose_data["services"]["runner"]
+    assert "entrypoint" not in runner, (
+        f"runner 에 entrypoint 오버라이드가 있음: {runner.get('entrypoint')} — "
+        "Dockerfile ENTRYPOINT ['nutti'] 를 그대로 써야 run '주제' 가 동작함"
+    )
+
+
+def test_runner_inherits_volumes(compose_data: dict) -> None:
+    """runner 서비스가 nutti 서비스와 동일한 볼륨 마운트를 상속해야 한다.
+
+    yaml 앵커 머지(<<: *nutti-base) 로 볼륨이 공유되는지 실제 파싱 결과로 확인한다.
+    """
+    runner = compose_data["services"]["runner"]
+    volumes = runner.get("volumes", [])
+    # ./data:/app/data 와 ./secrets:/app/secrets:ro 가 모두 있어야 한다.
+    volume_strings = [v if isinstance(v, str) else str(v) for v in volumes]
+    assert any("data:/app/data" in v for v in volume_strings), (
+        "runner volumes 에 ./data:/app/data 마운트가 없음"
+    )
+    assert any("secrets:/app/secrets" in v for v in volume_strings), (
+        "runner volumes 에 ./secrets:/app/secrets:ro 마운트가 없음"
+    )
+
+
+def test_runner_inherits_env(compose_data: dict) -> None:
+    """runner 서비스가 GOOGLE_SERVICE_ACCOUNT_JSON 환경변수를 상속해야 한다.
+
+    yaml 앵커 머지로 environment 블록이 공유되는지 실제 파싱 결과로 확인한다.
+    """
+    runner = compose_data["services"]["runner"]
+    env = runner.get("environment", {})
+    # environment 는 dict 또는 list 형태일 수 있다.
+    if isinstance(env, dict):
+        assert "GOOGLE_SERVICE_ACCOUNT_JSON" in env, (
+            "runner environment 에 GOOGLE_SERVICE_ACCOUNT_JSON 이 없음"
+        )
+    else:
+        keys = [e.split("=")[0] if "=" in e else e for e in env]
+        assert "GOOGLE_SERVICE_ACCOUNT_JSON" in keys, (
+            "runner environment 에 GOOGLE_SERVICE_ACCOUNT_JSON 이 없음"
+        )
+
+
+def test_runner_restart_no(compose_data: dict) -> None:
+    """runner 서비스의 restart 정책이 'no' 여야 한다 (one-shot 서비스)."""
+    runner = compose_data["services"]["runner"]
+    restart = runner.get("restart", "")
+    assert restart == "no", (
+        f"runner restart 가 'no' 가 아님 (현재: {restart!r}) — "
+        "one-shot 실행 후 컨테이너가 자동 재시작되면 안 됨"
+    )
+
+
+# ── config 서브커맨드 CliRunner 검증 ─────────────────────────────────────────
+
+
+def test_cli_config_exits_zero(monkeypatch) -> None:
+    """nutti config 서브커맨드가 NUTTI_DRY_RUN=true 환경에서 exit_code 0 으로 종료해야 한다.
+
+    Dockerfile HEALTHCHECK 가 `nutti config` 를 사용하므로 이 커맨드가 비정상 종료하면
+    컨테이너가 unhealthy 로 마킹되어 Ofelia 가 job-exec 대상을 찾지 못한다.
+    네트워크 호출 없이 typer.testing.CliRunner 로 검증한다.
+    """
+    from typer.testing import CliRunner
+
+    from nutti.cli import app
+
+    # dry_run 보장 — conftest 의 httpx 차단과 함께 외부 호출 완전 차단
+    monkeypatch.setenv("NUTTI_DRY_RUN", "true")
+    monkeypatch.setenv("NUTTI_ENV", "test")
+    # get_settings() 캐시를 초기화해 새 환경변수 값이 반영되도록 한다.
+    try:
+        from nutti.config import get_settings
+
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+    except AttributeError:
+        pass  # 캐시 없는 버전은 건너뜀
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 0, (
+        f"nutti config 가 exit_code {result.exit_code} 로 종료됨 — "
+        f"출력: {result.output!r}, 예외: {result.exception}"
     )
