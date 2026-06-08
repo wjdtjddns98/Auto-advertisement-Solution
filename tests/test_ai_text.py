@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from nutti.config import Settings
 from nutti.integrations.ai_text import (
     AITextClient,
@@ -63,9 +65,11 @@ def test_split_into_beats_strips_bullets_and_numbers():
 
 
 def test_split_into_beats_falls_back_to_sentences():
-    """줄이 부족하면 문장 종결부호 기준으로 쪼개 n개로 분배한다."""
+    """줄이 부족하면 문장 종결부호 기준으로 쪼개 n개로 분배한다(순서 보존)."""
     beats = _split_into_beats("문장1. 문장2! 문장3? 문장4.", n=4)
     assert len(beats) == 4
+    assert beats[0].startswith("문장1")
+    assert beats[-1].startswith("문장4")
 
 
 def test_split_into_beats_fewer_than_n_returns_available():
@@ -156,8 +160,12 @@ class _FakeAnthropic:
 
 
 def _live_client(msg) -> AITextClient:
-    client = AITextClient(_dry_settings())
-    client._client = _FakeAnthropic(msg)  # dry_run 분기 우회 → 라이브 경로
+    # dry_run=False여야 dry_run을 직접 보는 메서드(fact_check_script 등)도 라이브 경로를 탄다.
+    # (예전엔 dry_settings + _client 주입으로도 fact_check가 _client is None만 봐서 통과했지만,
+    #  이제 dry_run 가드가 먼저라 dry_run=False가 필수다.)
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    client._client = _FakeAnthropic(msg)
     return client
 
 
@@ -167,6 +175,68 @@ def test_fact_check_parse_failure_fails_safe():
     result = client.fact_check_script(Script(topic="t", body="본문"))
     assert result.passed is False
     assert result.issues  # 비어있지 않음
+
+
+def test_generate_script_live_populates_beats():
+    """라이브 Anthropic 경로도 beats를 채운다(되돌리면 영상이 8초 단일컷으로 퇴화 → 회귀 핀)."""
+    msg = _Msg([_Block("text", text="훅 문장\n설명1 문장\n설명2 문장\n마무리 문장")])
+    script = _live_client(msg).generate_script("강아지 간식")
+    assert len(script.beats) == 4
+    assert script.beats[0] == "훅 문장"
+    assert script.beats[-1] == "마무리 문장"
+
+
+def test_fact_check_live_without_key_pass(monkeypatch):
+    """dry_run=False + 키 없음 → Claude Code 폴백. 'PASS' 응답이면 통과."""
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)  # _client=None (키 없음)
+    monkeypatch.setattr(client, "_claude_cli", lambda _full: "PASS")
+    result = client.fact_check_script(Script(topic="t", body="안전한 내용"))
+    assert result.passed is True
+    assert result.issues == []
+
+
+def test_fact_check_live_without_key_does_not_silently_pass(monkeypatch):
+    """CRITICAL 회귀 핀: 키 없을 때 조용히 통과하지 않는다 — FAIL이면 문제를 담아 차단."""
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    monkeypatch.setattr(client, "_claude_cli", lambda _full: "FAIL\n급여량 근거 없음")
+    result = client.fact_check_script(Script(topic="t", body="위험한 주장"))
+    assert result.passed is False
+    assert result.issues == ["급여량 근거 없음"]
+
+
+def test_fact_check_live_without_key_cli_error_fails_safe(monkeypatch):
+    """Claude CLI 오류 시 통과를 지어내지 않고 passed=False로 차단(fail-safe)."""
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+
+    def _boom(_full):
+        raise RuntimeError("claude -p 실패: 종료코드 1")
+
+    monkeypatch.setattr(client, "_claude_cli", _boom)
+    result = client.fact_check_script(Script(topic="t", body="x"))
+    assert result.passed is False
+    assert result.issues
+
+
+def test_claude_cli_error_excludes_stderr(monkeypatch):
+    """claude -p 비정상 종료 시 RuntimeError에 stderr 원문이 새지 않는다(종료코드만 노출)."""
+    import subprocess
+
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+
+    class _Proc:
+        returncode = 2
+        stdout = ""
+        stderr = "SECRET-PROMPT-FRAGMENT 비밀 단편"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(RuntimeError) as exc:
+        client._claude_cli("민감한 프롬프트")
+    assert "SECRET-PROMPT-FRAGMENT" not in str(exc.value)
+    assert "2" in str(exc.value)  # 종료코드는 노출
 
 
 def test_generate_metadata_live_appends_url_and_defaults_hashtags():

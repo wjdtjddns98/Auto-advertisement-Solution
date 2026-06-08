@@ -242,14 +242,21 @@ def _send_json(send, what: str) -> dict:
 
 
 def _write_bytes(out_path: Path, data: bytes, what: str) -> None:
-    """바이트를 디스크에 저장한다. OSError(디스크 풀/권한)도 VideoRenderError로.
+    """바이트를 디스크에 원자적으로 저장한다. OSError(디스크 풀/권한)도 VideoRenderError로.
 
+    tmp 파일에 먼저 쓴 뒤 os.replace로 교체한다(JsonFileReviewStore와 동일 패턴) —
+    쓰기 도중 크래시(SIGKILL·전원·디스크 풀)가 나도 truncated 영상/프레임이
+    media_dir에 남아 누적되지 않는다(영상은 수백 MB라 디스크 누수 위험).
     호출부(오케스트레이터)는 영상 서브시스템에서 VideoRenderError만 기대하므로,
     쓰기 실패를 그대로 새지 않게 한다. 메시지는 예외 타입명만(경로 노출 금지).
     """
+    import os
+
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(data)
+        tmp_path = out_path.with_name(out_path.name + ".tmp")
+        tmp_path.write_bytes(data)
+        os.replace(tmp_path, out_path)
     except OSError as exc:
         raise VideoRenderError(f"{what} 저장 실패: {type(exc).__name__}") from None
 
@@ -339,9 +346,12 @@ class NanoBananaClient(_HttpClosingMixin):
     `VideoRenderError`로 전파한다. 테스트는 `http=`로 fake를 주입한다.
     """
 
-    def __init__(self, settings: Settings, *, http=None):
+    def __init__(self, settings: Settings, *, http=None, sleep=None):
         self.settings = settings
         self._http = http
+        # 재시도 backoff 대기(기본 time.sleep). VeoClient와 동일하게 주입 가능 —
+        # 테스트가 전역 monkeypatch 없이 가짜 시계를 넣어 결정적으로 검증한다.
+        self._sleep = sleep if sleep is not None else time.sleep
 
     def _client(self):
         """httpx 클라이언트를 지연 확보(주입 우선). dry_run에선 호출되지 않는다."""
@@ -364,7 +374,6 @@ class NanoBananaClient(_HttpClosingMixin):
         Gemini가 이미지 파트 없이 응답하면 _MAX_FRAME_RETRIES 횟수만큼 재시도한다.
         """
         import base64
-        import time
 
         parts: list[dict] = [{"text": scene_prompt}]
         if reference_image_path:
@@ -388,7 +397,7 @@ class NanoBananaClient(_HttpClosingMixin):
             if attempt > 0:
                 wait = 2.0 * attempt
                 log.warning("nano_banana.frame.retry", attempt=attempt, wait=wait)
-                time.sleep(wait)
+                self._sleep(wait)
             data = _send_json(
                 lambda: self._client().post(
                     url, headers=_gemini_headers(self.settings), json=body
@@ -838,7 +847,7 @@ class VideoStudio:
         client = self._nano_client
         owned = None
         if client is None:
-            client = owned = NanoBananaClient(self.settings)
+            client = owned = NanoBananaClient(self.settings, sleep=self._sleep)
         try:
             path = client.generate_frame(
                 self._frame_prompt(script),

@@ -362,25 +362,27 @@ class _MultiRespFake:
         self.closed = True
 
 
-def test_nano_banana_generate_frame_retries_on_missing_image(tmp_path, monkeypatch):
-    """이미지 파트 없는 응답 후 재시도하면 성공한다(sleep 없이 빠르게)."""
-    monkeypatch.setattr("time.sleep", lambda _: None)
+def test_nano_banana_generate_frame_retries_on_missing_image(tmp_path):
+    """이미지 파트 없는 응답 후 재시도하면 성공한다(sleep 주입으로 빠르게)."""
     no_image = _Resp(json_data={"candidates": [{"content": {"parts": [{"text": "only"}]}}]})
     ok = _nano_image_response()
     fake = _MultiRespFake([no_image, ok])
-    client = NanoBananaClient(_gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake)
+    client = NanoBananaClient(
+        _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake, sleep=lambda _: None
+    )
     path = client.generate_frame("a dog")
     assert Path(path).exists()
     assert fake.call_count == 2  # 1회 실패 + 1회 성공
 
 
-def test_nano_banana_generate_frame_exhausts_retries(tmp_path, monkeypatch):
+def test_nano_banana_generate_frame_exhausts_retries(tmp_path):
     """모든 재시도가 실패하면 VideoRenderError를 던진다."""
-    monkeypatch.setattr("time.sleep", lambda _: None)
     no_image = _Resp(json_data={"candidates": [{"content": {"parts": [{"text": "only"}]}}]})
     max_tries = 1 + NanoBananaClient._MAX_FRAME_RETRIES
     fake = _MultiRespFake([no_image] * max_tries)
-    client = NanoBananaClient(_gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake)
+    client = NanoBananaClient(
+        _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake, sleep=lambda _: None
+    )
     with pytest.raises(VideoRenderError):
         client.generate_frame("a dog")
     assert fake.call_count == max_tries
@@ -1522,3 +1524,27 @@ def test_produce_closes_self_created_nano_client_even_on_failure(monkeypatch):
     with pytest.raises(VideoRenderError):
         studio.produce(_script())
     assert created["nano"].close_count == 1
+
+
+def test_produce_closes_self_created_veo_client_on_extend_failure(monkeypatch):
+    """멀티비트에서 extend()가 실패해도 자체 생성한 VeoClient는 finally에서 닫힌다.
+
+    finally가 generate만 감싸도록 좁혀지면 extend 실패 시 owned 클라이언트가
+    새지만(누수) 이 테스트가 잡는다(_produce_clips의 finally 범위 핀).
+    """
+    created: dict = {}
+
+    class _ExtendFailVeo(FakeVeoClient):
+        def __init__(self, settings, **kwargs):
+            super().__init__()
+            created["veo"] = self
+
+        def extend(self, video_path: str, prompt: str) -> str:
+            raise VideoRenderError("Veo 연장 제출 HTTP 500")
+
+    monkeypatch.setattr(video_module, "VeoClient", _ExtendFailVeo)
+    studio = VideoStudio(_gemini_settings(), nano_client=FakeNanoBananaClient())
+    script = Script(topic="t", body="b", beats=["가", "나", "다"])  # generate 1 + extend 2(첫 연장서 실패)
+    with pytest.raises(VideoRenderError):
+        studio.produce(script)
+    assert created["veo"].close_count == 1

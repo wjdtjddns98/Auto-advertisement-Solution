@@ -276,7 +276,10 @@ class AITextClient:
                 "claude CLI를 찾을 수 없습니다 (Claude Code 설치/PATH 확인)."
             ) from exc
         if proc.returncode != 0:
-            raise RuntimeError(f"claude -p 실패: {(proc.stderr or '').strip()[:200]}")
+            # stderr는 프롬프트 단편을 에코할 수 있어 예외/로그에 원문을 싣지 않는다
+            # (코드베이스의 redaction 규율과 일관). 진단은 DEBUG 로그로만, 외부엔 종료코드만.
+            log.debug("claude_cli.stderr", content=(proc.stderr or "").strip()[:200])
+            raise RuntimeError(f"claude -p 실패: 종료코드 {proc.returncode}")
         return (proc.stdout or "").strip()
 
     def _generate_via_claude_code(self, topic: str, prompt: str) -> Script:
@@ -294,6 +297,35 @@ class AITextClient:
             beats=_split_into_beats(body),
             fact_checked=False,
         )
+
+    def _fact_check_via_claude_code(self, script: Script) -> FactCheckResult:
+        """Anthropic API 키 없이 Claude Code(claude -p)로 팩트체크 — 안전 게이트 유지.
+
+        claude -p는 구조화 도구 출력을 줄 수 없어, 첫 줄에 PASS/FAIL을 적고 FAIL이면
+        다음 줄부터 문제를 나열하게 한 뒤 보수적으로 파싱한다. CLI 오류·빈 응답·형식
+        불명은 모두 passed=False로 처리해 검수 게이트로 넘긴다(fail-safe — 통과를
+        지어내지 않는다). 누설 방지를 위해 예외 타입명만 issues에 남긴다.
+        """
+        full = (
+            f"{FACT_CHECK_SYSTEM_PROMPT}\n\n"
+            "다음 대본을 팩트체크해줘. 근거 없는/위험한 수의학적 주장이 없으면 첫 줄에 "
+            "정확히 'PASS'만, 있으면 첫 줄에 'FAIL'을 적고 다음 줄부터 문제를 한 줄씩 적어줘. "
+            f"머리말·설명 없이.\n\n{script.body}"
+        )
+        try:
+            raw = self._claude_cli(full)
+        except RuntimeError as exc:
+            log.warning("fact_check.claude_code_failed", script_id=script.id)
+            return FactCheckResult(passed=False, issues=[f"팩트체크 실행 실패: {type(exc).__name__}"])
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        if not lines:
+            log.warning("fact_check.claude_code_empty", script_id=script.id)
+            return FactCheckResult(passed=False, issues=["팩트체크 응답이 비어 있음"])
+        if lines[0].upper().startswith("PASS"):
+            return FactCheckResult(passed=True, issues=[])
+        # FAIL(또는 형식 불명) → 보수적으로 차단. 상세가 없으면 일반 사유를 남긴다.
+        issues = lines[1:] if lines[0].upper().startswith("FAIL") else lines
+        return FactCheckResult(passed=False, issues=issues or ["근거 불충분(상세 미제공)"])
 
     def suggest_topic(self, feedback: str = "", recent_topics: list[str] | None = None) -> str:
         """다음 사이클에 다룰 쇼츠 주제를 한 개 제안한다(주제 자동 최적화).
@@ -353,10 +385,21 @@ class AITextClient:
         return f"{_SEED_TOPICS[idx]} (심화편)"
 
     def fact_check_script(self, script: Script) -> FactCheckResult:
-        """대본의 수의학적 주장에 대한 팩트체크. 호출자가 Script.fact_checked를 갱신한다."""
-        if self._client is None:
+        """대본의 수의학적 주장에 대한 팩트체크. 호출자가 Script.fact_checked를 갱신한다.
+
+        분기는 generate_script와 동일하게 3-way다: dry_run→통과 시뮬레이션,
+        API 키 있음→Anthropic 도구 호출, 키 없음(라이브)→Claude Code(claude -p) 폴백.
+        과거엔 `self._client is None`만 보고 통과시켜, 라이브+키없음(운영 기본) 모드에서
+        유일한 자동 수의학 안전 게이트가 조용히 무력화됐다 — dry_run을 명시적으로 가른다.
+        """
+        if self.settings.dry_run:
             log.info("dry_run.fact_check", script_id=script.id)
             return FactCheckResult(passed=True, issues=[])
+
+        if self._client is None:
+            # 라이브 + API 키 없음 → Claude Code(Max)로 팩트체크. 키 없다고 조용히
+            # 통과시키면 위험·근거없는 수의학 주장이 검수 전에 걸러지지 않는다.
+            return self._fact_check_via_claude_code(script)
 
         prompt = (
             "다음 대본에서 근거가 없거나 위험한 수의학적 주장을 찾아 "
