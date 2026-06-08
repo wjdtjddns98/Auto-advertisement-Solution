@@ -450,6 +450,7 @@ class FakeVeoHttp:
         self.poll_urls: list[str] = []
         self.download_urls: list[str] = []
         self.download_headers: list[dict | None] = []
+        self.download_follow_redirects: list[bool | None] = []
         self.closed = False
 
     def post(self, url, *, headers=None, json=None):
@@ -482,6 +483,7 @@ class FakeVeoHttp:
             return item
         self.download_urls.append(url)
         self.download_headers.append(headers)
+        self.download_follow_redirects.append(follow_redirects)
         # redirect_location 설정 시: 첫 다운로드 요청에서 302를 반환하고
         # Location URL로의 재요청에서 실제 download_response를 반환한다.
         if self.redirect_location and not self._redirect_served:
@@ -938,6 +940,49 @@ def test_veo_client_download_follows_302_redirect(tmp_path):
     assert not second_headers or "x-goog-api-key" not in {k.lower() for k in second_headers}
     # 두 번째 요청 URL이 Location URL과 일치해야 한다.
     assert fake.download_urls[1] == gcs_url
+    # 첫 요청은 반드시 follow_redirects=False — API 키 헤더가 GCS로 새지 않도록.
+    assert fake.download_follow_redirects[0] is False
+
+
+@pytest.mark.parametrize(
+    "evil_location",
+    [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1/internal",
+        "file:///etc/passwd",
+        "ftp://storage.googleapis.com/evil",
+        "https://evil.example.com/video.mp4",
+    ],
+)
+def test_veo_client_download_rejects_unsafe_location(tmp_path, evil_location):
+    """Location 헤더가 허용 호스트/scheme 밖이면 SSRF 방어로 VideoRenderError를 낸다."""
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/evil-redirect:download"
+    fake = FakeVeoHttp(
+        get_responses=[_veo_done_response(uri=gemini_uri)],
+        redirect_location=evil_location,
+    )
+    client = _veo_client(tmp_path, fake)
+    with pytest.raises(VideoRenderError, match="Location URL"):
+        client.generate(_frame_file(tmp_path), "prompt")
+
+
+def test_veo_client_download_302_missing_location_raises(tmp_path):
+    """302 응답에 Location 헤더가 없으면 VideoRenderError를 낸다(가드 브랜치 핀)."""
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/no-location:download"
+
+    class _NoLocationRedirectHttp(FakeVeoHttp):
+        def get(self, url, *, headers=None, follow_redirects=None):
+            self.download_urls.append(url)
+            self.download_headers.append(headers)
+            self.download_follow_redirects.append(follow_redirects)
+            if url != self._expected_poll_url():
+                return _Resp(status_code=302, headers={})
+            return super().get(url, headers=headers, follow_redirects=follow_redirects)
+
+    fake = _NoLocationRedirectHttp(get_responses=[_veo_done_response(uri=gemini_uri)])
+    client = _veo_client(tmp_path, fake)
+    with pytest.raises(VideoRenderError, match="Location 헤더"):
+        client.generate(_frame_file(tmp_path), "prompt")
 
 
 def test_fake_veo_http_routes_polls_without_operations_prefix(tmp_path):

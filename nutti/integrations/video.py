@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from nutti.config import Settings
@@ -43,6 +44,11 @@ _MAX_TOPIC_CHARS = 200
 # 어떤 경로 세그먼트를 쓰든(키 확보 전 미확정) 허용하되, 형태만 좁게 검증한다.
 _OP_NAME_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _MAX_OP_NAME_CHARS = 256
+# 302 리다이렉트 Location URL에서 허용할 호스트. _validate_op_name과 동일한
+# 방어 원칙: API 응답값(Location 헤더)은 신뢰 불가 입력.
+_SAFE_REDIRECT_HOSTS = frozenset(
+    {"storage.googleapis.com", "generativelanguage.googleapis.com"}
+)
 
 
 def _validate_op_name(op_name: str) -> str:
@@ -66,6 +72,26 @@ def _validate_op_name(op_name: str) -> str:
             f"Veo operation name 형식이 올바르지 않습니다 (길이 {len(op_name)})"
         )
     return normalized
+
+
+def _validate_redirect_location(location: str) -> None:
+    """302 리다이렉트 Location URL이 안전한 호스트인지 검증한다.
+
+    scheme=https + host가 _SAFE_REDIRECT_HOSTS 내에 있어야 한다.
+    _validate_op_name과 동일 원칙: API 응답값은 신뢰 불가 입력(SSRF 방어).
+    """
+    try:
+        parsed = urlparse(location)
+    except Exception as exc:  # noqa: BLE001
+        raise VideoRenderError("Veo 다운로드: Location URL 파싱 실패") from exc
+    if parsed.scheme != "https":
+        raise VideoRenderError("Veo 다운로드: Location URL scheme 불허 (허용: https)")
+    host = (parsed.hostname or "").lower()
+    if not any(host == s or host.endswith(f".{s}") for s in _SAFE_REDIRECT_HOSTS):
+        raise VideoRenderError(
+            "Veo 다운로드: Location URL 호스트 불허"
+            " (허용: storage.googleapis.com, generativelanguage.googleapis.com)"
+        )
 
 
 def _sanitize_prompt_text(text: str, max_chars: int) -> str:
@@ -563,11 +589,15 @@ class VeoClient(_HttpClosingMixin):
             lambda: self._client().get(uri, headers=headers, follow_redirects=False),
             "Veo 영상 다운로드",
         )
-        sc = getattr(resp, "status_code", 200)
+        sc = getattr(resp, "status_code", None)
+        if not isinstance(sc, int):
+            raise VideoRenderError("Veo 영상 다운로드 응답에 유효한 status_code가 없습니다")
         if 300 <= sc < 400:
             location = (getattr(resp, "headers", {}) or {}).get("location", "")
             if not location:
                 raise VideoRenderError("Veo 영상 다운로드: 리다이렉트 응답에 Location 헤더 없음")
+            # SSRF 방어: Location 헤더(API 응답값)는 신뢰 불가 — scheme·host 검증 필수.
+            _validate_redirect_location(location)
             # GCS 서명 URL은 API 키 헤더 없이, 리다이렉트는 끝까지 따라간다.
             resp = _safe_send(
                 lambda: self._client().get(location, follow_redirects=True),
