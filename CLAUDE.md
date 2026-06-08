@@ -53,13 +53,16 @@
 5. **머지 정책**:
    - **dev로의 머지는 자동** — 단 적대적 리뷰어가 지적한 사항을 **고친 뒤 같은 리뷰어에게 재검증(approve) 받고 나서만** 머지. 수정만 하고 재승인 없이 머지 금지. CI fail/changes-needed면 고치고 재시도. 자기 PR은 `--approve` 불가(브랜치 보호 0 approvals라 머지는 됨) → `gh pr review --comment`로 코멘트.
    - **main으로의 머지(dev→main 릴리스)는 항상 PO 명시 승인 후에만.** 절대 임의 머지 금지.
-6. **완료 전 적대적 리뷰 루프** — 규모에 따라 자동 선택, 매번 동일 전략 쓰지 않는다:
+6. **완료 전 적대적 리뷰 루프** — **단일 리뷰어가 기본**, 풀 리뷰는 진짜 위험한 변경에만(토큰 절감):
 
    | 작업 규모 | 리뷰 전략 | 방법 |
    |-----------|-----------|------|
-   | 신규 기능·아키텍처 변경·security-sensitive | `nutti-review` full (4차원 sonnet + 반박 haiku) | `Workflow({name:'nutti-review'})` |
-   | 버그픽스·1-3파일 수정 | 단일 `nutti-reviewer` 에이전트 1회 | `Agent({subagent_type:'nutti-reviewer',...})` |
+   | **보안 민감(인증·시크릿·외부 신뢰불가 입력 처리)·대규모 아키텍처 변경에 한정** | `nutti-review` full (4차원) — **회당 ~1.2M 토큰이라 비싸다. 꼭 필요할 때만** | `Workflow({name:'nutti-review'})` |
+   | **그 외 대부분(신규 기능·멀티파일·버그픽스) = 기본값** | 단일 `nutti-reviewer` 에이전트 1회 | `Agent({subagent_type:'nutti-reviewer',...})` |
    | docstring·주석·설정값·테스트 문자열만 수정 | 리뷰 생략 | 직접 커밋 |
+
+   리뷰어 에이전트가 빈 응답을 반환하면(이 환경의 알려진 버그) 토큰을 더 쓰지 말고
+   직접 핵심(보안·계약·회귀)을 점검하고 CI green을 근거로 진행한다.
 
    **재리뷰 기준**: 확정 결함 중 `high`/`critical`이 있으면 수정 후 재리뷰 필수.
    `medium`/`low`만 남으면 수정 후 PR comment에 기록하고 재리뷰 없이 머지.
