@@ -80,10 +80,7 @@ def _validate_redirect_location(location: str) -> None:
     scheme=https + host가 _SAFE_REDIRECT_HOSTS 내에 있어야 한다.
     _validate_op_name과 동일 원칙: API 응답값은 신뢰 불가 입력(SSRF 방어).
     """
-    try:
-        parsed = urlparse(location)
-    except Exception as exc:  # noqa: BLE001
-        raise VideoRenderError("Veo 다운로드: Location URL 파싱 실패") from exc
+    parsed = urlparse(location)
     if parsed.scheme != "https":
         raise VideoRenderError("Veo 다운로드: Location URL scheme 불허 (허용: https)")
     host = (parsed.hostname or "").lower()
@@ -598,10 +595,12 @@ class VeoClient(_HttpClosingMixin):
                 raise VideoRenderError("Veo 영상 다운로드: 리다이렉트 응답에 Location 헤더 없음")
             # SSRF 방어: Location 헤더(API 응답값)는 신뢰 불가 — scheme·host 검증 필수.
             _validate_redirect_location(location)
-            # GCS 서명 URL은 API 키 헤더 없이 요청한다.
-            # follow_redirects=False: Location 검증 이후의 추가 hop을 허용 안 함(SSRF 체인 방지).
+            # Gemini 도메인 리다이렉트는 API 키 헤더를 유지해야 한다.
+            # GCS 서명 URL은 API 키 없이 쿼리파라미터로 자체 인증한다.
+            # follow_redirects=False: 검증된 Location 이후의 추가 hop을 차단(SSRF 체인 방지).
+            redir_headers = _gemini_headers(self.settings) if location.startswith(_GEMINI_BASE) else None
             resp = _safe_send(
-                lambda: self._client().get(location, follow_redirects=False),
+                lambda: self._client().get(location, headers=redir_headers, follow_redirects=False),
                 "Veo 영상 다운로드(리다이렉트)",
             )
             r_sc = getattr(resp, "status_code", None)

@@ -169,6 +169,16 @@ def test_prompt_builder_sanitizes_single_quotes_in_dialogue():
     assert "no additional animals, no people, no on-screen text" in prompt
 
 
+def test_prompt_builder_preserves_newlines_in_dialogue():
+    """대사 내 개행은 현재 보존된다 — Veo 프롬프트 호환성 의도적 설계.
+
+    제거가 필요하면 _sanitize_prompt_text를 함께 수정하고 이 단언을 갱신한다.
+    """
+    prompt = VeoPromptBuilder().build(_script(body="첫 줄\n둘째 줄"))
+    assert "첫 줄" in prompt
+    assert "둘째 줄" in prompt
+
+
 def test_prompt_builder_truncates_overlong_dialogue():
     """대사 길이는 상한(_MAX_DIALOGUE_CHARS)으로 잘린다(주입 표면 제한)."""
     prompt = VeoPromptBuilder().build(_script(body="가" * 2000))
@@ -182,7 +192,7 @@ def test_frame_prompt_sanitizes_topic():
     prompt = VideoStudio._frame_prompt(script)
     assert "'" not in prompt
     assert "간식’" in prompt
-    assert len(prompt) < 500 + 300  # 주제가 _MAX_TOPIC_CHARS로 잘려 전체 길이가 유계.
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 300  # 주제 잘림 경계 핀.
     # 금지 요소 지시는 주입과 무관하게 유지된다.
     assert "No people, no additional animals, no on-screen text." in prompt
 
@@ -901,6 +911,8 @@ def test_veo_client_download_sends_no_api_key_to_external_uri(tmp_path):
     assert fake.download_urls == [_VIDEO_URI]
     headers = fake.download_headers[0]
     assert not headers or "x-goog-api-key" not in {k.lower() for k in headers}
+    # 초기 GET도 follow_redirects=False — API 키가 외부 호스트로 새지 않도록.
+    assert fake.download_follow_redirects[0] is False
 
 
 def test_veo_client_download_sends_api_key_only_to_gemini_host(tmp_path):
@@ -912,6 +924,30 @@ def test_veo_client_download_sends_api_key_only_to_gemini_host(tmp_path):
     headers = fake.download_headers[0]
     assert headers is not None
     assert headers.get("x-goog-api-key") == "test-gemini-key"
+
+
+def test_veo_client_download_gemini_to_gemini_redirect_keeps_api_key(tmp_path):
+    """Gemini→Gemini 302 리다이렉트 시 두 번째 요청에도 API 키 헤더를 유지한다.
+
+    generativelanguage.googleapis.com 도메인 내 리다이렉트(지역 라우팅 등)에서
+    API 키를 누락하면 401이 발생하므로, Location이 _GEMINI_BASE로 시작할 때는
+    재전송해야 한다.
+    """
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/gemini-redir:download"
+    gemini_redirect = f"{video_module._GEMINI_BASE}/files/gemini-redir:download?region=us"
+    fake = FakeVeoHttp(
+        get_responses=[_veo_done_response(uri=gemini_uri)],
+        download_response=_Resp(content=b"REAL-MP4-BYTES"),
+        redirect_location=gemini_redirect,
+    )
+    client = _veo_client(tmp_path, fake)
+    path = client.generate(_frame_file(tmp_path), "prompt")
+    assert Path(path).read_bytes() == b"REAL-MP4-BYTES"
+    # 두 번째 요청(Gemini 리다이렉트 URL)에도 API 키 포함
+    assert fake.download_headers[1] is not None
+    assert fake.download_headers[1].get("x-goog-api-key") == "test-gemini-key"
+    # 두 번째 요청 URL이 리다이렉트 Location과 일치
+    assert fake.download_urls[1] == gemini_redirect
 
 
 def test_veo_client_download_follows_302_redirect(tmp_path):
@@ -1119,6 +1155,8 @@ def test_produce_end_to_end_fakes_fills_all_fields():
     frame_path, prompt = veo.calls[0]
     assert frame_path == "data/fake/frame_x.jpg"
     assert "'누띠는 무방부제예요!'" in prompt
+    # NanoBanana에 전달된 scene_prompt가 _frame_prompt 결과와 일치한다(배선 핀).
+    assert nano.calls[0][0] == VideoStudio._frame_prompt(script)
     # 주입된 클라이언트는 호출부 소유 — produce가 닫지 않는다.
     assert nano.close_count == 0
     assert veo.close_count == 0
@@ -1140,6 +1178,17 @@ def test_produce_passes_mascot_reference_image_to_nano():
 def test_produce_validate_config_missing_gemini_key_raises():
     """실 경로 + GEMINI_API_KEY 빈값이면 시작 시점에 ValueError로 빠르게 실패한다."""
     studio = VideoStudio(_live_settings())
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        studio.produce(_script())
+
+
+def test_produce_validate_config_partial_injection_still_requires_key():
+    """nano_client만 주입되고 veo_client=None이면 키 검사를 건너뛰지 않는다(OR 로직 핀).
+
+    needs_key = nano is None OR veo is None → 하나라도 None이면 키 필요.
+    AND로 변경되면 partial injection이 키 검사를 우회해 실 API를 호출할 수 있다.
+    """
+    studio = VideoStudio(_live_settings(), nano_client=FakeNanoBananaClient())
     with pytest.raises(ValueError, match="GEMINI_API_KEY"):
         studio.produce(_script())
 
