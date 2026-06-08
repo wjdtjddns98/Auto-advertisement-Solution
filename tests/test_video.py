@@ -942,6 +942,8 @@ def test_veo_client_download_follows_302_redirect(tmp_path):
     assert fake.download_urls[1] == gcs_url
     # 첫 요청은 반드시 follow_redirects=False — API 키 헤더가 GCS로 새지 않도록.
     assert fake.download_follow_redirects[0] is False
+    # GCS 요청도 follow_redirects=False — 추가 hop 체인(SSRF) 차단.
+    assert fake.download_follow_redirects[1] is False
 
 
 @pytest.mark.parametrize(
@@ -982,6 +984,32 @@ def test_veo_client_download_302_missing_location_raises(tmp_path):
     fake = _NoLocationRedirectHttp(get_responses=[_veo_done_response(uri=gemini_uri)])
     client = _veo_client(tmp_path, fake)
     with pytest.raises(VideoRenderError, match="Location 헤더"):
+        client.generate(_frame_file(tmp_path), "prompt")
+
+
+def test_veo_client_download_rejects_chained_redirect(tmp_path):
+    """검증된 GCS URL이 다시 302를 반환하면 추가 hop을 차단하고 VideoRenderError를 낸다."""
+    gcs_url = "https://storage.googleapis.com/veo-signed/video.mp4"
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/chain-redirect:download"
+
+    class _ChainedRedirectHttp(FakeVeoHttp):
+        def get(self, url, *, headers=None, follow_redirects=None):
+            if url == self._expected_poll_url():
+                self.poll_count += 1
+                self.poll_urls.append(url)
+                item = self.get_responses.pop(0)
+                return item
+            self.download_urls.append(url)
+            self.download_headers.append(headers)
+            self.download_follow_redirects.append(follow_redirects)
+            if url == gemini_uri:
+                return _Resp(status_code=302, headers={"location": gcs_url})
+            # GCS URL에 대해 또 302를 반환 — 추가 hop 시뮬레이션
+            return _Resp(status_code=302, headers={"location": "https://cdn.example.com/"})
+
+    fake = _ChainedRedirectHttp(get_responses=[_veo_done_response(uri=gemini_uri)])
+    client = _veo_client(tmp_path, fake)
+    with pytest.raises(VideoRenderError, match="추가 리다이렉트"):
         client.generate(_frame_file(tmp_path), "prompt")
 
 

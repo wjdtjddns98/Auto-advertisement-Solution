@@ -598,11 +598,15 @@ class VeoClient(_HttpClosingMixin):
                 raise VideoRenderError("Veo 영상 다운로드: 리다이렉트 응답에 Location 헤더 없음")
             # SSRF 방어: Location 헤더(API 응답값)는 신뢰 불가 — scheme·host 검증 필수.
             _validate_redirect_location(location)
-            # GCS 서명 URL은 API 키 헤더 없이, 리다이렉트는 끝까지 따라간다.
+            # GCS 서명 URL은 API 키 헤더 없이 요청한다.
+            # follow_redirects=False: Location 검증 이후의 추가 hop을 허용 안 함(SSRF 체인 방지).
             resp = _safe_send(
-                lambda: self._client().get(location, follow_redirects=True),
+                lambda: self._client().get(location, follow_redirects=False),
                 "Veo 영상 다운로드(리다이렉트)",
             )
+            r_sc = getattr(resp, "status_code", None)
+            if isinstance(r_sc, int) and 300 <= r_sc < 400:
+                raise VideoRenderError("Veo 다운로드: 허용 호스트 이후 추가 리다이렉트 금지")
         _raise_for_status(resp, "Veo 영상 다운로드")
         content = getattr(resp, "content", None)
         if not isinstance(content, (bytes, bytearray)) or not content:
