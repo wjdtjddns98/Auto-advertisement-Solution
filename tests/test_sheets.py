@@ -153,3 +153,51 @@ def test_no_gspread_import_in_fallback(monkeypatch):
     store.log_script(Script(topic="t", body="b"))
     store.log_run(PipelineRun(topic="t"))
     assert len(store.all_rows()) == 2
+
+
+def test_build_client_reads_file_path(tmp_path, monkeypatch):
+    """GOOGLE_SERVICE_ACCOUNT_JSON 값이 존재하는 파일 경로일 때 파일을 읽어야 한다.
+
+    DEPLOY.md 및 docker-compose.yml 은 /app/secrets/sa.json 절대경로를 사용하므로
+    이 파일 읽기 분기가 운영의 핵심 경로다. gspread 실호출은 fake로 대체한다.
+    """
+    import json
+
+    # 실제 sa.json 파일을 tmp_path에 생성
+    sa_data = {"type": "service_account", "project_id": "test-proj"}
+    sa_file = tmp_path / "sa.json"
+    sa_file.write_text(json.dumps(sa_data), encoding="utf-8")
+
+    # GOOGLE_SERVICE_ACCOUNT_JSON 에 파일 경로(문자열) 설정
+    settings = Settings(
+        NUTTI_DRY_RUN=False,
+        GOOGLE_SHEETS_ID="sheet123",
+        GOOGLE_SERVICE_ACCOUNT_JSON=str(sa_file),
+        NUTTI_ENV="test",
+    )
+
+    # gspread.service_account_from_dict를 fake로 교체 — 실 API 호출 금지
+    captured: list[dict] = []
+
+    def _fake_service_account_from_dict(creds):
+        captured.append(creds)
+        return _FakeGspreadClient()
+
+    import types
+
+    fake_gspread = types.ModuleType("gspread")
+    fake_gspread.service_account_from_dict = _fake_service_account_from_dict  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "gspread", fake_gspread)
+
+    # SheetStore 초기화 → _build_client → 파일 읽기 분기
+    store = SheetStore(settings)
+
+    # 파일에서 읽은 내용이 그대로 service_account_from_dict 에 전달됐는지 확인
+    assert len(captured) == 1, "service_account_from_dict 가 정확히 1회 호출돼야 한다"
+    assert captured[0]["type"] == "service_account"
+    assert captured[0]["project_id"] == "test-proj"
+
+    # 클라이언트가 주입됐으므로 원격 경로로 동작해야 한다
+    assert store._client is not None
+    store.log_script(Script(topic="파일경로테스트", body="본문"))
+    assert store.all_rows() == []  # 원격 경로 → 인메모리 폴백에 기록 안 됨

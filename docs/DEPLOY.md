@@ -201,20 +201,30 @@ docker compose logs -f
 
 ## 8. 수동 실행
 
-스케줄 없이 즉시 파이프라인을 1회 실행하려면:
+스케줄 없이 즉시 파이프라인을 1회 실행하려면 **`runner` 서비스**를 사용한다.
+
+`runner`는 Dockerfile의 `ENTRYPOINT ["nutti"]` 를 그대로 사용하는 one-shot 서비스다.
+`nutti` 서비스는 Ofelia job-exec 대기용으로 entrypoint가 오버라이드되어 있어
+`docker compose run --rm nutti run "주제"` 는 exit 127 로 실패한다.
 
 ```bash
 # 실제 주제로 수동 실행 (실 API 호출)
-docker compose run --rm nutti run "강아지 닭가슴살 간식, 하루 적정량은?"
+docker compose --profile manual run --rm runner run "강아지 닭가슴살 간식, 하루 적정량은?"
 
 # Reels 형식으로 수동 실행
-docker compose run --rm nutti run "강아지 수제간식 레시피" --reels
+docker compose --profile manual run --rm runner run "강아지 수제간식 레시피" --reels
 
 # config 확인
-docker compose run --rm nutti config
+docker compose --profile manual run --rm runner config
 ```
 
 `--rm` 플래그로 실행 완료 후 임시 컨테이너가 자동 삭제된다.
+`runner` 서비스는 `profiles: [manual]` 로 선언되어 `docker compose up -d` 에는 포함되지 않는다.
+
+> **주의**: `--profile manual` 플래그는 반드시 명시한다. Docker Compose **v2.20+** 는
+> `compose run` 시 대상 서비스의 프로파일을 자동 활성화하므로 생략해도 동작하지만,
+> 그 미만 버전(Ubuntu 22.04 LTS의 apt 기본 패키지 등)에서는 생략 시
+> `no such service: runner` 오류가 발생한다. 모든 버전에서 동작하도록 항상 붙여 쓴다.
 
 ---
 
@@ -225,7 +235,7 @@ docker compose run --rm nutti config
 
 ```bash
 # dry_run 모드로 전체 사이클 실행
-docker compose run --rm -e NUTTI_DRY_RUN=true nutti run "도커 스모크"
+docker compose --profile manual run --rm -e NUTTI_DRY_RUN=true runner run "도커 스모크"
 ```
 
 `완료: run=...` 형식의 로그와 함께 `exit 0`으로 종료되면 이미지가 정상이다.
