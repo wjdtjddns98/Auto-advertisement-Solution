@@ -12,6 +12,7 @@ from nutti.integrations.ai_text import (
     _clean_topic,
     _extract_tool_input,
     _first_text,
+    _split_into_beats,
 )
 from nutti.models import Script
 
@@ -44,6 +45,47 @@ def test_generate_script_dry_run():
     assert isinstance(script, Script)
     assert script.body.strip()
     assert script.fact_checked is True
+
+
+def test_generate_script_dry_run_fills_four_beats():
+    """dry_run 대본은 영상 비트 4개(8+7*3=29초)로 분할돼 채워진다."""
+    script = _client().generate_script("강아지 닭가슴살 간식 적정량")
+    assert len(script.beats) == 4
+    assert all(b.strip() for b in script.beats)
+
+
+def test_split_into_beats_by_lines():
+    assert _split_into_beats("훅\n설명1\n설명2\n마무리") == ["훅", "설명1", "설명2", "마무리"]
+
+
+def test_split_into_beats_strips_bullets_and_numbers():
+    assert _split_into_beats("1. 훅\n2. 설명\n3. 설명2\n4. 끝") == ["훅", "설명", "설명2", "끝"]
+
+
+def test_split_into_beats_falls_back_to_sentences():
+    """줄이 부족하면 문장 종결부호 기준으로 쪼개 n개로 분배한다."""
+    beats = _split_into_beats("문장1. 문장2! 문장3? 문장4.", n=4)
+    assert len(beats) == 4
+
+
+def test_split_into_beats_fewer_than_n_returns_available():
+    beats = _split_into_beats("한 문장만 있어요", n=4)
+    assert len(beats) >= 1
+    assert all(b.strip() for b in beats)
+
+
+def test_split_into_beats_empty_returns_empty():
+    assert _split_into_beats("") == []
+    assert _split_into_beats("   ") == []
+
+
+def test_split_into_beats_more_lines_than_n_chunks_evenly():
+    """줄 수가 n보다 많으면 균등 묶어 정확히 n개(빈 비트 없음, 순서 보존)."""
+    beats = _split_into_beats("a\nb\nc\nd\ne\nf", n=4)
+    assert len(beats) == 4
+    assert all(b.strip() for b in beats)
+    assert beats[0].startswith("a")
+    assert beats[-1].endswith("f")
 
 
 def test_fact_check_passes_in_dry_run():

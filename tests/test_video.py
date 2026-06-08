@@ -506,8 +506,10 @@ class FakeVeoHttp:
         self.download_headers: list[dict | None] = []
         self.download_follow_redirects: list[bool | None] = []
         self.closed = False
+        self.post_bodies: list[dict | None] = []
 
     def post(self, url, *, headers=None, json=None):
+        self.post_bodies.append(json)
         if self.post_exc is not None:
             raise self.post_exc
         return self.post_response
@@ -1254,16 +1256,25 @@ class FakeNanoBananaClient:
 
 
 class FakeVeoClient:
-    """VeoClient 대체 — 호출 인자를 기록하고 결정적 경로를 반환한다."""
+    """VeoClient 대체 — 생성/연장 호출 인자를 기록하고 결정적 경로를 반환한다.
+
+    `extend`는 매 호출 새 경로(`.extN`)를 돌려준다 — 멀티비트 연쇄 입력
+    (직전 결과가 다음 연장의 입력)을 테스트가 추적할 수 있게 하기 위함이다.
+    """
 
     def __init__(self, video_path: str = "data/fake/video.mp4"):
         self.video_path = video_path
         self.calls: list[tuple[str, str]] = []
+        self.extend_calls: list[tuple[str, str]] = []
         self.close_count = 0
 
     def generate(self, frame_path: str, prompt: str) -> str:
         self.calls.append((frame_path, prompt))
         return self.video_path
+
+    def extend(self, video_path: str, prompt: str) -> str:
+        self.extend_calls.append((video_path, prompt))
+        return f"{self.video_path}.ext{len(self.extend_calls)}"
 
     def close(self):
         self.close_count += 1
@@ -1303,6 +1314,91 @@ def test_produce_passes_mascot_reference_image_to_nano():
     )
     studio.produce(_script())
     assert nano.calls[0][1] == "assets/mascot.png"
+
+
+def test_produce_multi_beat_generates_then_extends():
+    """비트 4개면 generate 1회 + extend 3회로 연쇄 연장하고 duration=29초(8+7*3)."""
+    nano = FakeNanoBananaClient(frame_path="data/fake/f.jpg")
+    veo = FakeVeoClient(video_path="data/fake/v.mp4")
+    studio = VideoStudio(_gemini_settings(), nano_client=nano, veo_client=veo)
+    script = Script(
+        topic="강아지 간식",
+        body="훅\n설명1\n설명2\n마무리",
+        beats=["훅 대사", "설명1 대사", "설명2 대사", "마무리 대사"],
+    )
+    asset = studio.produce(script)
+    assert len(veo.calls) == 1           # 첫 비트는 generate(8초)
+    assert len(veo.extend_calls) == 3    # 나머지 비트는 extend(7초)
+    assert asset.duration_sec == 29.0
+    # generate는 시작 프레임을, 연장은 직전 영상 결과를 입력으로 연쇄한다.
+    assert veo.calls[0][0] == "data/fake/f.jpg"
+    assert veo.extend_calls[0][0] == "data/fake/v.mp4"
+    assert veo.extend_calls[1][0] == "data/fake/v.mp4.ext1"
+    assert veo.extend_calls[2][0] == "data/fake/v.mp4.ext2"
+    assert asset.video_path == "data/fake/v.mp4.ext3"  # 최종 = 마지막 연장 결과
+    # 각 비트 대사가 해당 클립 프롬프트에 인용된다.
+    assert "'훅 대사'" in veo.calls[0][1]
+    assert "'마무리 대사'" in veo.extend_calls[2][1]
+
+
+def test_produce_three_beats_duration_22():
+    """비트 3개면 duration=22초(8+7*2)."""
+    studio = VideoStudio(
+        _gemini_settings(), nano_client=FakeNanoBananaClient(), veo_client=FakeVeoClient()
+    )
+    script = Script(topic="t", body="b", beats=["가", "나", "다"])
+    asset = studio.produce(script)
+    assert asset.duration_sec == 22.0
+
+
+def test_produce_no_beats_falls_back_to_single_clip():
+    """beats가 비면 body 단일 비트 → generate만, extend 없음, duration=8초(하위호환)."""
+    nano = FakeNanoBananaClient()
+    veo = FakeVeoClient()
+    studio = VideoStudio(_gemini_settings(), nano_client=nano, veo_client=veo)
+    asset = studio.produce(_script(body="한 줄 대사"))
+    assert len(veo.calls) == 1
+    assert len(veo.extend_calls) == 0
+    assert asset.duration_sec == 8.0
+    assert "'한 줄 대사'" in veo.calls[0][1]
+
+
+def test_produce_dry_run_multi_beat_duration():
+    """dry_run에서도 비트 수에 따라 duration이 8+7*(N-1)로 계산된다."""
+    studio = VideoStudio(_dry_settings())
+    script = Script(topic="t", body="b", beats=["a", "b", "c", "d"])
+    asset = studio.produce(script)
+    assert asset.duration_sec == 29.0
+
+
+def test_build_beat_extend_vs_start_phrasing():
+    """build_beat: 시작 비트는 8초 단일컷, 연장 비트는 '같은 컷 이어가기' 문구를 쓴다."""
+    builder = VeoPromptBuilder()
+    start = builder.build_beat("첫 대사")
+    cont = builder.build_beat("다음 대사", extend=True)
+    assert "single continuous 8-second shot" in start
+    assert "continuing the same" in cont
+    assert "'첫 대사'" in start
+    assert "'다음 대사'" in cont
+    # 금지 요소는 두 경우 모두 유지된다(깨짐 방지).
+    assert "no on-screen text" in start
+    assert "no on-screen text" in cont
+
+
+def test_veo_client_extend_submits_video_inline_data(tmp_path):
+    """extend는 직전 영상을 instances[0].video.inlineData(720p)로 제출하고 다운로드한다."""
+    src = tmp_path / "prev.mp4"
+    src.write_bytes(b"PREV-MP4-BYTES")
+    fake = FakeVeoHttp(get_responses=[_veo_done_response()])
+    client = _veo_client(tmp_path, fake)
+    path = client.extend(str(src), "이어서 말하기")
+    assert Path(path).exists()
+    inst = fake.post_bodies[0]["instances"][0]
+    # 연장 입력은 image가 아니라 video.inlineData로 넘어간다.
+    assert "image" not in inst
+    assert inst["video"]["inlineData"]["mimeType"] == "video/mp4"
+    assert inst["video"]["inlineData"]["data"]  # base64 페이로드 채워짐
+    assert fake.post_bodies[0]["parameters"]["resolution"] == "720p"
 
 
 def test_produce_validate_config_missing_gemini_key_raises():

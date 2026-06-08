@@ -12,17 +12,28 @@ from nutti.models import Metadata, PerformanceReport, Script
 
 log = get_logger(__name__)
 
+# ========================= PO 수정 구역 (대본 톤·내용) =========================
+# 마스코트가 "무슨 말을, 어떤 톤으로" 할지는 아래 한국어 프롬프트를 고치면 바뀐다.
+# · 더 친근하게/전문적으로/재밌게 → 첫 문장(페르소나)과 말투 지시를 수정
+# · 영상 길이를 바꾸려면 "약 30초"·"정확히 4개의 비트"·"4줄" 숫자를 함께 고치고,
+#   _split_into_beats 기본값(n=4)과 video.py의 비트 연장(8초+7초)도 맞춰야 한다(개발자 요청 권장).
+#   비트 N개 → 영상 8 + 7*(N-1)초. 4비트=29초, 3비트=22초.
+# 한국어 프롬프트라 PO가 직접 고쳐도 안전하다.
 SCRIPT_SYSTEM_PROMPT = (
     "너는 애견 수제간식 브랜드 'Nutti'의 콘텐츠 작가다. "
     "수의학·사실에 기반한 강아지 건강/다이어트/음식 정보를 다룬다. "
-    "60초 내외 쇼츠/릴스용 대본을 쓰되, 반드시 팩트체크 가능한 내용만 포함한다. "
-    "과장·근거 없는 의학 주장은 금지한다."
+    "약 30초 분량의 쇼츠/릴스 대본을 '정확히 4개의 비트'로 쓴다: "
+    "①훅(시선을 끄는 질문이나 한마디) ②핵심설명1 ③핵심설명2 ④마무리·CTA(간식계산기 유도). "
+    "각 비트는 강아지 마스코트가 약 7초 말하는 분량 — 한국어 1~2문장(40자 안팎)으로 짧고 명확하게. "
+    "반드시 팩트체크 가능한 내용만 포함하고, 과장·근거 없는 의학 주장은 금지한다. "
+    "출력은 각 비트를 줄바꿈으로 구분해 정확히 4줄로 — 머리말·번호·따옴표 없이 대사 문장만."
 )
+# ======================= PO 수정 구역 끝 (대본 톤·내용) =======================
 
 # 주제 자동 생성용 시스템 프롬프트(다음 사이클에 다룰 쇼츠 주제 1개 제안).
 TOPIC_SYSTEM_PROMPT = (
     "너는 애견 수제간식 브랜드 'Nutti'의 콘텐츠 기획자다. "
-    "수의학·사실에 기반한 강아지 건강/다이어트/음식 정보를 다루는 60초 쇼츠 주제를 "
+    "수의학·사실에 기반한 강아지 건강/다이어트/음식 정보를 다루는 30초 쇼츠 주제를 "
     "딱 한 개 제안한다. 최근 다룬 주제와 겹치지 않게 하고, 성과 분석 피드백이 있으면 "
     "그 방향(잘 된 포맷·소재)을 반영한다. 검색·시청 욕구를 자극하되 과장은 피한다."
 )
@@ -137,6 +148,50 @@ def _clean_topic(raw: str) -> str:
     return ""
 
 
+def _chunk_evenly(items: list[str], n: int) -> list[str]:
+    """items를 최대 n개 그룹으로 균등 분할해 각 그룹을 공백으로 이어붙인다.
+
+    항목 수가 n보다 적으면 그룹 수도 그만큼 줄어 빈 비트를 만들지 않는다.
+    """
+    if not items:
+        return []
+    n = min(n, len(items))
+    size = len(items) / n
+    groups: list[str] = []
+    for i in range(n):
+        start = round(i * size)
+        end = round((i + 1) * size)
+        chunk = " ".join(items[start:end]).strip()
+        if chunk:
+            groups.append(chunk)
+    return groups
+
+
+def _split_into_beats(text: str, n: int = 4) -> list[str]:
+    """대본 텍스트를 최대 n개의 영상 비트(대사 토막)로 분리한다.
+
+    1순위는 줄바꿈(머리표·번호 제거 후), 줄 수가 부족하면 문장 종결부호 기준으로
+    재분리한 뒤 균등 분배한다. 항상 1~n개의 비어있지 않은 비트를 반환한다(빈
+    입력이면 빈 리스트). 모델 출력이 정확히 n줄이 아니어도 비트 분할이 견고하다.
+    """
+    raw = text or ""
+    lines: list[str] = []
+    for ln in raw.splitlines():
+        ln = ln.strip().lstrip("-*•").strip()
+        ln = re.sub(r"^\d+[.)\]]\s*", "", ln).strip()
+        if ln:
+            lines.append(ln)
+    if len(lines) >= n:
+        return _chunk_evenly(lines, n)
+    # 줄이 부족 → 문장 단위로 더 잘게 쪼갠다.
+    joined = " ".join(lines) if lines else raw.strip()
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?。…])\s+", joined) if s.strip()]
+    if len(sentences) >= n:
+        return _chunk_evenly(sentences, n)
+    # 그래도 부족하면 있는 만큼(최소 1개) 반환.
+    return sentences or ([joined] if joined else [])
+
+
 class AITextClient:
     """Anthropic SDK 래퍼. dry_run이면 더미 대본/메타데이터를 생성한다."""
 
@@ -154,18 +209,24 @@ class AITextClient:
         prompt = f"주제: {topic}\n"
         if feedback:
             prompt += f"\n[이전 사이클 개선 포인트]\n{feedback}\n"
-        prompt += "\n위 주제로 60초 쇼츠 대본을 작성해줘."
+        prompt += "\n위 주제로 30초 쇼츠 대본을 비트별로 정확히 4줄로 작성해줘."
 
         if self.settings.dry_run:
             log.info("dry_run.generate_script", topic=topic)
             body = (
-                f"[DRY-RUN 대본] {topic}\n"
-                "훅: 우리 강아지, 이 간식 먹어도 될까요?\n"
-                "본문: 수의학적으로 안전한 재료와 적정량을 소개합니다.\n"
-                "CTA: 프로필 링크의 간식계산기로 우리 아이 맞춤 간식을 확인하세요!"
+                "우리 강아지, 이 간식 먹어도 될까요?\n"
+                f"오늘 주제는 '{topic}'.\n"
+                "수의학적으로 안전한 재료와 적정량만 골라 알려드릴게요.\n"
+                "프로필 링크의 간식계산기로 우리 아이 맞춤량을 확인하세요!"
             )
-            # dry_run은 팩트체크 통과를 시뮬레이션.
-            return Script(topic=topic, body=body, prompt=prompt, fact_checked=True)
+            # dry_run은 팩트체크 통과를 시뮬레이션. 비트는 줄 단위로 분할(정확히 4비트).
+            return Script(
+                topic=topic,
+                body=body,
+                prompt=prompt,
+                beats=_split_into_beats(body),
+                fact_checked=True,
+            )
 
         if self._client is None:
             # API 키 없음 + 비-dry_run → Claude Code(Max 구독)로 생성(API 추가 과금 없음).
@@ -186,7 +247,13 @@ class AITextClient:
         )
         body = _first_text(msg)
         # 실제 모드에서는 호출자가 fact_check_script로 검증/갱신한다.
-        return Script(topic=topic, body=body, prompt=prompt, fact_checked=False)
+        return Script(
+            topic=topic,
+            body=body,
+            prompt=prompt,
+            beats=_split_into_beats(body),
+            fact_checked=False,
+        )
 
     def _claude_cli(self, full_prompt: str) -> str:
         """claude -p(헤드리스 print 모드)로 프롬프트를 보내고 stdout(텍스트)을 반환.
@@ -216,11 +283,17 @@ class AITextClient:
         """Anthropic API 대신 Claude Code(Max 구독)로 대본 생성 — API 추가 과금 없음."""
         full = (
             f"{SCRIPT_SYSTEM_PROMPT}\n\n{prompt}\n\n"
-            "대본 본문만 출력해줘. 머리말·설명·코드블록 없이 대본 텍스트만."
+            "비트별로 정확히 4줄만 출력해줘. 머리말·번호·설명·코드블록 없이 대사 문장만."
         )
         body = self._claude_cli(full)
         log.info("script.generated_via_claude_code", topic=topic, chars=len(body))
-        return Script(topic=topic, body=body, prompt=prompt, fact_checked=False)
+        return Script(
+            topic=topic,
+            body=body,
+            prompt=prompt,
+            beats=_split_into_beats(body),
+            fact_checked=False,
+        )
 
     def suggest_topic(self, feedback: str = "", recent_topics: list[str] | None = None) -> str:
         """다음 사이클에 다룰 쇼츠 주제를 한 개 제안한다(주제 자동 최적화).

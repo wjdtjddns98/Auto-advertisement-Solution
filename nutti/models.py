@@ -41,13 +41,16 @@ class ReviewDecision(str, Enum):
 
 
 class Script(BaseModel):
-    """1단계 산출물: 60초 내외 쇼츠/릴스 대본."""
+    """1단계 산출물: 약 30초 쇼츠/릴스 대본(영상은 8초 생성 + 7초씩 Veo 연장으로 제작)."""
 
     id: str = Field(default_factory=_new_id)
     topic: str
     body: str
     prompt: str = ""
     fact_checked: bool = False
+    # 영상 비트별 대사(훅 → 핵심설명 → 마무리/CTA). 각 비트가 하나의 8/7초 클립이
+    # 된다. 비면 body 전체를 단일 클립 대사로 쓴다(하위호환·단일컷 폴백).
+    beats: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_utcnow)
 
 
