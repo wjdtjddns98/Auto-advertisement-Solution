@@ -40,10 +40,16 @@ _RETRY_BACKOFF_SEC = 2.0
 # 비트 1개(8초/7초)의 대사는 짧으므로 이 한도를 넘을 이유가 없다.
 _MAX_DIALOGUE_CHARS = 500
 _MAX_TOPIC_CHARS = 200
-# 영상 길이 구성: 첫 클립 8초 생성 + 비트마다 7초 연장(Veo 공식 연장 단위).
-# 비트 N개 → 8 + 7*(N-1)초. 기본 4비트 = 29초(약 30초 타겟), 3비트 = 22초.
-_BASE_CLIP_SEC = 8.0
-_EXTEND_CLIP_SEC = 7.0
+# 영상 길이 구성: 비트마다 독립 8초 클립을 생성해 ffmpeg로 잇는다(스티칭).
+# Veo 연장(extend)은 16:9 가로만 지원해 세로 쇼츠(9:16)엔 못 써서 스티칭을 택했다.
+# 비트 N개 → 8*N초. 기본 4비트 = 32초.
+_CLIP_SEC = 8.0
+# Veo가 화면에 텍스트(특히 깨진 한글 자막)를 임의 렌더하는 것을 억제하는 negativePrompt.
+# 대사를 음성으로만 내보내기 위함 — 실측에서 이 파라미터로 자막이 사라짐을 확인.
+_VEO_NEGATIVE_PROMPT = (
+    "text, subtitles, captions, words, letters, writing, watermark, "
+    "on-screen text, caption bar, hardcoded subtitles, korean text overlay"
+)
 # Veo 제출 응답의 operation name 허용 형태. API 응답값을 그대로 폴링 URL에
 # 끼워 넣으므로(_poll의 `{base}/{op_name}`) 신뢰할 수 없는 입력으로 보고 검증한다.
 # 허용 문자(영숫자·`.`·`_`·`/`·`-`)만으로 구성돼야 하며, 이를 벗어나는 문자
@@ -290,19 +296,23 @@ class VeoPromptBuilder:
     - 대사는 작은따옴표로 인용해 Veo 네이티브 음성으로 발화시킨다(별도 TTS 불요).
     - 카메라는 고정(locked-off tripod)·medium close-up·eye-level — 흔들림/컷 전환 방지.
     - 깨짐 주원인(추가 동물·사람·화면 내 텍스트)을 명시적으로 금지한다.
-    - 포맷: photorealistic · 9:16 세로. 첫 비트는 8초 단일컷, 연장 비트는 직전 컷을 이어감.
+    - 포맷: photorealistic · 9:16 세로 · 각 비트는 8초 단일컷(여러 비트는 ffmpeg로 스티칭).
     """
 
     # =========================== PO 수정 구역 (영상 연출) ===========================
     # 영상의 "연기·카메라·말투"를 바꾸려면 아래 영어 템플릿을 고친다.
     # · _SPEAKING_OFF / _SPEAKING_DIRECT: 마스코트가 누구에게 말하는지(인터뷰 톤 vs 정면)
     # · _CAMERA: 카메라 워크(고정·클로즈업). 흔들면 립싱크/일관성 깨짐 위험 ↑
-    # · _NEGATIVE: 금지 요소(사람·다른 동물·화면 자막). 영상 깨짐 방지용 — 함부로 빼지 말 것
+    # · _NEGATIVE: 금지 요소(사람·다른 동물·화면 자막/글자). Veo가 깨진 한글 자막을
+    #   임의로 박는 걸 막는 핵심 방어 — 함부로 빼지 말 것(_VEO_NEGATIVE_PROMPT와 이중 방어)
     # 한국어로 "이렇게 바꾸고 싶다"만 정해도 됨 — 영어 반영은 개발자에게 요청 권장.
     _SPEAKING_OFF = "speaking in Korean to an off-screen interviewer"
     _SPEAKING_DIRECT = "speaking in Korean directly to the camera"
     _CAMERA = "Camera: locked-off tripod shot, medium close-up, eye-level, no camera movement."
-    _NEGATIVE = "Strictly no additional animals, no people, no on-screen text, no captions."
+    _NEGATIVE = (
+        "Strictly no additional animals, no people. Absolutely no text, subtitles, "
+        "captions, letters, words, or writing anywhere in the frame."
+    )
     # ========================= PO 수정 구역 끝 (영상 연출) =========================
 
     def build(self, script: Script, *, off_screen_interviewer: bool = True) -> str:
@@ -313,29 +323,21 @@ class VeoPromptBuilder:
         text = script.body.strip() or script.topic
         return self.build_beat(text, off_screen_interviewer=off_screen_interviewer)
 
-    def build_beat(
-        self, dialogue_text: str, *, off_screen_interviewer: bool = True, extend: bool = False
-    ) -> str:
-        """비트 대사 한 토막으로 Veo 프롬프트를 만든다.
+    def build_beat(self, dialogue_text: str, *, off_screen_interviewer: bool = True) -> str:
+        """비트 대사 한 토막으로 8초 단일컷 Veo 프롬프트를 만든다.
 
-        `extend=True`면 직전 컷을 이어가는 연장 비트용 문구를, False면 8초 단일컷
-        시작 비트용 문구를 쓴다. 대사는 `_sanitize_prompt_text`로 정제한다 — 대사에
-        작은따옴표가 있으면 인용 구분자를 탈출해 금지 지시(추가 동물·사람·텍스트
-        금지)를 덮어쓰는 주입이 가능하기 때문이다.
+        대사는 음성(spoken audio only)으로만 발화시키고 화면 자막을 금지한다 — Veo가
+        한글 자막을 임의 렌더하면 깨진 글자로 나오기 때문(negativePrompt와 이중 방어).
+        대사는 `_sanitize_prompt_text`로 정제한다 — 작은따옴표가 있으면 인용 구분자를
+        탈출해 금지 지시(추가 동물·사람·텍스트 금지)를 덮어쓰는 주입이 가능하기 때문이다.
         """
-        dialogue = _sanitize_prompt_text(
-            dialogue_text.strip() or "", _MAX_DIALOGUE_CHARS
-        )
+        dialogue = _sanitize_prompt_text(dialogue_text.strip() or "", _MAX_DIALOGUE_CHARS)
         speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
-        shot = (
-            "continuing the same locked-off shot of the same dog"
-            if extend
-            else "single continuous 8-second shot"
-        )
         return (
-            f"A photorealistic dog mascot {speaking}, saying: '{dialogue}'. "
+            f"A photorealistic dog mascot {speaking}, saying (as spoken audio only, "
+            f"no on-screen text): '{dialogue}'. "
             f"{self._CAMERA} "
-            f"Format: vertical 9:16, {shot}. "
+            "Format: vertical 9:16, single continuous 8-second shot. "
             f"{self._NEGATIVE}"
         )
 
@@ -525,31 +527,24 @@ class VeoClient(_HttpClosingMixin):
         return self._http
 
     def generate(self, frame_path: str, prompt: str) -> str:
-        """시작 프레임 + 프롬프트로 영상을 생성하고 로컬 저장 경로를 반환한다."""
+        """시작 프레임 + 프롬프트로 8초 영상을 생성하고 로컬 저장 경로를 반환한다.
+
+        쇼츠는 세로(9:16)인데 Veo 영상 연장(extend)은 16:9 가로만 지원하므로, 길이는
+        연장이 아니라 독립 8초 클립을 여러 개 생성해 VideoStudio에서 ffmpeg로 잇는다.
+        """
         op_name = self._submit(frame_path, prompt)
         uri = self._poll(op_name)
         return self._download(uri)
 
-    def extend(self, video_path: str, prompt: str) -> str:
-        """기존 Veo 영상을 약 7초 연장하고 새 로컬 저장 경로를 반환한다.
-
-        직전에 다운로드한 MP4를 base64 inlineData로 재투입해, image-to-video와
-        동일한 LRO 경로(제출 → 폴링 → 즉시 다운로드)를 탄다. Veo 연장은 720p
-        한정이며 `durationSeconds` 지정 없이 자동으로 약 7초가 덧붙는다(공식 사양:
-        7초씩 최대 20회, 누적 148초). 연장 입력은 Veo가 생성한 영상이어야 한다.
-        """
-        op_name = self._submit_extend(video_path, prompt)
-        uri = self._poll(op_name)
-        return self._download(uri)
-
     def _submit(self, frame_path: str, prompt: str) -> str:
-        """image-to-video 작업을 제출하고 operation name을 반환한다."""
+        """image-to-video 작업을 제출하고 operation name을 반환한다.
+
+        `negativePrompt`로 화면 텍스트를 억제한다 — Veo가 대사를 화면 자막으로 임의
+        렌더하면 한글 자형을 못 그려 깨진 글자로 나오기 때문(실측 확인된 약점).
+        """
         import base64
 
         frame_bytes = _read_bytes(frame_path, "Veo 시작 프레임")
-        # TODO(live): image 필드명(instances.image.bytesBase64Encoded/mimeType,
-        # parameters.aspectRatio)은 키 확보 후 실 응답으로 최종 검증 필요(불일치 시 400).
-        # 연장(_submit_extend)의 video 필드는 공식 REST 문서로 확인됨.
         body = {
             "instances": [
                 {
@@ -560,40 +555,14 @@ class VeoClient(_HttpClosingMixin):
                     },
                 }
             ],
-            "parameters": {"aspectRatio": "9:16"},
-        }
-        return self._submit_body(body)
-
-    def _submit_extend(self, video_path: str, prompt: str) -> str:
-        """영상 연장 작업을 제출하고 operation name을 반환한다.
-
-        연장 입력 영상은 `instances[0].video.inlineData`(base64 MP4)로 넘긴다(공식
-        REST 사양). 연장은 720p 고정이라 `parameters.resolution`을 명시한다.
-        """
-        import base64
-
-        video_bytes = _read_bytes(video_path, "Veo 연장 입력 영상")
-        body = {
-            "instances": [
-                {
-                    "prompt": prompt,
-                    "video": {
-                        "inlineData": {
-                            "mimeType": "video/mp4",
-                            "data": base64.b64encode(video_bytes).decode("ascii"),
-                        }
-                    },
-                }
-            ],
-            "parameters": {"resolution": "720p"},
+            "parameters": {"aspectRatio": "9:16", "negativePrompt": _VEO_NEGATIVE_PROMPT},
         }
         return self._submit_body(body)
 
     def _submit_body(self, body: dict) -> str:
         """predictLongRunning 본문을 제출하고 검증된 operation name을 반환한다.
 
-        생성(_submit)·연장(_submit_extend)이 공유하는 제출 경로 — URL 구성,
-        operation name 추출·검증, redaction 로깅을 한곳에 둔다.
+        URL 구성, operation name 추출·검증, redaction 로깅을 한곳에 둔다.
         """
         url = f"{_GEMINI_BASE}/models/{self.settings.veo_model}:predictLongRunning"
         data = _send_json(
@@ -775,16 +744,15 @@ class VideoStudio:
             raise ValueError("GEMINI_API_KEY가 비어 있습니다 — dry_run=False 시 필수입니다.")
 
     def produce(self, script: Script) -> VideoAsset:
-        """시작 프레임 → 비트별 Veo 생성/연장 → 이어진 영상 → VideoAsset 반환.
+        """시작 프레임 → 비트별 8초 클립 생성 → ffmpeg 스티칭 → VideoAsset 반환.
 
-        대본 비트(`script.beats`)가 N개면 첫 비트는 8초 생성, 나머지는 7초씩
-        연장해 하나의 연속 영상(8 + 7*(N-1)초)을 만든다. 비트가 없으면 body
-        단일컷(8초)으로 폴백한다(하위호환).
+        대본 비트(`script.beats`)가 N개면 같은 시작 프레임으로 8초 클립 N개를 만들어
+        ffmpeg로 이어붙인다(총 8*N초). 비트가 없으면 body 단일컷(8초)으로 폴백한다.
         """
         # 실 경로면 시작 전에 필수 키를 검증(미설정 시 빠르게 실패).
         self.validate_config()
         beats = self._beats(script)
-        duration = _BASE_CLIP_SEC + _EXTEND_CLIP_SEC * (len(beats) - 1)
+        duration = _CLIP_SEC * len(beats)
 
         if self.settings.dry_run:
             log.info("dry_run.video", script_id=script.id, beats=len(beats))
@@ -820,11 +788,12 @@ class VideoStudio:
         return [script.body.strip() or script.topic]
 
     def _produce_clips(self, frame_path: str, beats: list[str]) -> str:
-        """첫 비트는 생성, 나머지는 직전 영상을 7초씩 연장해 최종 경로를 반환한다.
+        """각 비트를 독립 8초 클립으로 생성한 뒤 ffmpeg로 이어붙여 최종 경로를 반환한다.
 
-        Veo 클라이언트를 한 번만 확보해 생성·연장에 재사용하고, 자체 생성분만
-        finally에서 정확히 1회 닫는다(주입분은 소유자가 닫는다 — 연결 풀 누수 방지).
-        연장 입력은 직전 단계가 로컬에 저장한 MP4 경로다(48h 만료 전 즉시 다운로드됨).
+        모든 클립이 같은 시작 프레임을 써서 마스코트 외형 일관성을 유지한다(음성은
+        클립마다 독립 생성됨 — 8초 경계에서 톤이 끊길 수 있다). Veo 클라이언트는
+        한 번만 확보해 재사용하고, 자체 생성분만 finally에서 정확히 1회 닫는다
+        (주입분은 소유자가 닫는다 — 연결 풀 누수 방지).
         """
         builder = VeoPromptBuilder()
         client = self._veo_client
@@ -832,17 +801,54 @@ class VideoStudio:
         if client is None:
             client = owned = VeoClient(self.settings, sleep=self._sleep)
         try:
-            video_path = client.generate(frame_path, builder.build_beat(beats[0]))
-            log.info("video.veo.done", path=video_path)
-            for i, beat in enumerate(beats[1:], start=2):
-                video_path = client.extend(
-                    video_path, builder.build_beat(beat, extend=True)
-                )
-                log.info("video.veo.extend.done", path=video_path, beat=i)
+            clips: list[str] = []
+            for i, beat in enumerate(beats, start=1):
+                clip = client.generate(frame_path, builder.build_beat(beat))
+                log.info("video.veo.clip.done", path=clip, beat=i, of=len(beats))
+                clips.append(clip)
         finally:
             if owned is not None:
                 _close_owned(owned)
-        return video_path
+        return self._stitch(clips)
+
+    def _stitch(self, clips: list[str]) -> str:
+        """여러 8초 클립을 ffmpeg로 이어붙여 하나의 MP4로 만든다(재인코딩 concat).
+
+        클립이 1개면 스티칭 없이 그대로 반환한다. ffmpeg 바이너리는 imageio-ffmpeg가
+        번들한 것을 쓴다(시스템 설치 불요). 실패(ffmpeg 비정상 종료·미설치)는
+        VideoRenderError 계약으로 변환하며, 입력 경로가 박힐 수 있는 stderr 원문은
+        노출하지 않고 예외 타입명만 남긴다(redaction).
+        """
+        if len(clips) == 1:
+            return clips[0]
+        import subprocess
+
+        import imageio_ffmpeg
+
+        out_path = Path(self.settings.nutti_media_dir) / f"video_{uuid4().hex[:12]}.mp4"
+        inputs: list[str] = []
+        for clip in clips:
+            inputs += ["-i", clip]
+        streams = "".join(f"[{i}:v][{i}:a]" for i in range(len(clips)))
+        filt = f"{streams}concat=n={len(clips)}:v=1:a=1[v][a]"
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            *inputs,
+            "-filter_complex",
+            filt,
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            str(out_path),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise VideoRenderError(f"영상 스티칭 실패: {type(exc).__name__}") from None
+        log.info("video.stitched", path=str(out_path), clips=len(clips))
+        return str(out_path)
 
     def _generate_frame(self, script: Script) -> str:
         """NanoBanana로 시작 프레임을 생성한다(마스코트 레퍼런스 이미지 선택 첨부).

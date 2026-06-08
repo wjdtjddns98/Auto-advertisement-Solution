@@ -16,6 +16,7 @@ from nutti.models import (
     PipelineRun,
     ReviewDecision,
     ReviewRequest,
+    Script,
     Stage,
 )
 from nutti.review.gates import DiscordGate, ReviewGate, TelegramGate
@@ -23,6 +24,23 @@ from nutti.storage.sheets import SheetStore
 from nutti.storage.state_store import PipelineState
 
 log = get_logger(__name__)
+
+# 한국어 발화 기준 8초 ≈ 35~45자. 비트가 이보다 길면 Veo가 8초에 다 못 말할 수 있어 경고한다.
+_BEAT_CHARS_WARN = 45
+
+
+def _beats_preview(script: Script) -> str:
+    """대본을 영상 클립(비트) 단위로 나눠 보여준다 — 어디서 잘리는지 + 8초 초과 경고.
+
+    각 비트가 8초 클립 하나가 되므로, PO가 클립 경계와 길이를 미리 확인하고 필요하면
+    텔레그램에서 그 자리에서 수정할 수 있다(REVISE).
+    """
+    beats = script.beats or [script.body]
+    lines = [f"[대본 검수 — {len(beats)}개 클립 · 약 {8 * len(beats)}초]"]
+    for i, beat in enumerate(beats, start=1):
+        warn = "  ⚠️8초보다 길 수 있음(줄여주세요)" if len(beat) > _BEAT_CHARS_WARN else ""
+        lines.append(f"{i}. 8초: {beat}{warn}")
+    return "\n".join(lines)
 
 
 class GateRejected(Exception):
@@ -100,13 +118,17 @@ class Orchestrator:
         run.script = self.ai.generate_script(topic, feedback=feedback)
         self._fact_check(run, topic, feedback)
         self.store.log_script(run.script)
-        # REVISE: 수정 내용이 있으면 script.body에 반영하고 시트를 업데이트한다.
-        script_review = ReviewRequest(stage=Stage.SCRIPT, title="대본 검수", preview=run.script.body)
+        # REVISE: 수정 내용이 있으면 script.body에 반영하고 비트를 재분할 후 시트를 업데이트한다.
+        # 검수 카드는 비트(8초 클립)별로 보여줘 PO가 잘림 지점·길이를 미리 확인하게 한다.
+        script_review = ReviewRequest(
+            stage=Stage.SCRIPT, title="대본 검수(클립별)", preview=_beats_preview(run.script)
+        )
         script_decision = self.telegram.request(script_review)
         if script_decision == ReviewDecision.REVISE and script_review.revised_content:
             # 사용자가 텔레그램에서 직접 입력한 수정본이므로 팩트체크를 재실행하지 않는다.
             # PO가 내용을 직접 확인·수정했다는 전제 하에 신뢰하는 설계다.
             run.script.body = script_review.revised_content
+            run.script.beats = self.ai.split_beats(run.script.body)  # 수정본 → 비트 재분할
             self.store.update_script(run.script)
         elif script_decision != ReviewDecision.APPROVED:
             log.warning(
@@ -129,6 +151,7 @@ class Orchestrator:
                 break
             if video_decision == ReviewDecision.REVISE and video_review.revised_content:
                 run.script.body = video_review.revised_content
+                run.script.beats = self.ai.split_beats(run.script.body)  # 수정본 → 비트 재분할
                 self.store.update_script(run.script)
                 run.video = self.studio.produce(run.script)
                 continue
