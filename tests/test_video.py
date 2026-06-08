@@ -70,10 +70,11 @@ def _no_sleep(_seconds):
 
 
 class _Resp:
-    """httpx.Response 대역(status_code + json + content만 흉내).
+    """httpx.Response 대역(status_code + headers + json + content 흉내).
 
     `json_exc`를 주면 json() 호출 시 그 예외를 던진다 — HTTP 200에 비-JSON
     본문이 오는 경우(CDN/프록시 장애)를 시뮬레이션하기 위함이다.
+    `headers`는 302 Location 등 응답 헤더 시뮬레이션에 사용한다.
     """
 
     def __init__(
@@ -83,11 +84,13 @@ class _Resp:
         json_data=None,
         content: bytes = b"",
         json_exc: Exception | None = None,
+        headers: dict | None = None,
     ):
         self.status_code = status_code
         self._json = json_data if json_data is not None else {}
         self.content = content
         self._json_exc = json_exc
+        self.headers = dict(headers or {})
 
     def json(self):
         if self._json_exc is not None:
@@ -166,6 +169,17 @@ def test_prompt_builder_sanitizes_single_quotes_in_dialogue():
     assert "no additional animals, no people, no on-screen text" in prompt
 
 
+def test_prompt_builder_preserves_newlines_in_dialogue():
+    """대사 내 개행은 현재 보존된다 — Veo 프롬프트 호환성 의도적 설계.
+
+    제거가 필요하면 _sanitize_prompt_text를 함께 수정하고 이 단언을 갱신한다.
+    """
+    prompt = VeoPromptBuilder().build(_script(body="첫 줄\n둘째 줄"))
+    assert "첫 줄" in prompt
+    assert "둘째 줄" in prompt
+    assert "\n" in prompt  # 개행 보존 명시적 핀 — 제거 시 이 단언이 실패한다.
+
+
 def test_prompt_builder_truncates_overlong_dialogue():
     """대사 길이는 상한(_MAX_DIALOGUE_CHARS)으로 잘린다(주입 표면 제한)."""
     prompt = VeoPromptBuilder().build(_script(body="가" * 2000))
@@ -179,7 +193,7 @@ def test_frame_prompt_sanitizes_topic():
     prompt = VideoStudio._frame_prompt(script)
     assert "'" not in prompt
     assert "간식’" in prompt
-    assert len(prompt) < 500 + 300  # 주제가 _MAX_TOPIC_CHARS로 잘려 전체 길이가 유계.
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 300  # 주제 잘림 경계 핀.
     # 금지 요소 지시는 주입과 무관하게 유지된다.
     assert "No people, no additional animals, no on-screen text." in prompt
 
@@ -389,7 +403,10 @@ def test_nano_banana_malformed_json_raises_render_error(tmp_path):
 # --- 섹션 3: VeoClient ---
 
 _OP_NAME = "operations/op-secret-123"
-_VIDEO_URI = "https://files.example/veo/dl-secret.mp4"
+# 실제 Veo API는 Gemini Files API URI를 반환한다 — 테스트도 이를 반영.
+_VIDEO_URI = "https://generativelanguage.googleapis.com/v1beta/files/test-dl:download"
+# 외부 호스트(GCS) URI — API 키 미전송 테스트용.
+_GCS_VIDEO_URI = "https://storage.googleapis.com/veo-signed/test.mp4"
 
 
 def _veo_submit_response() -> _Resp:
@@ -431,6 +448,7 @@ class FakeVeoHttp:
         post_exc: Exception | None = None,
         get_responses: list | None = None,
         download_response: _Resp | Exception | None = None,
+        redirect_location: str | None = None,
     ):
         self.post_response = post_response or _veo_submit_response()
         self.post_exc = post_exc
@@ -438,10 +456,15 @@ class FakeVeoHttp:
         self.download_response = (
             download_response if download_response is not None else _Resp(content=b"FAKE-MP4-BYTES")
         )
+        # redirect_location 설정 시: 첫 다운로드 요청에서 302+Location을 반환하고,
+        # 이후 Location URL로의 요청에서 download_response를 반환한다.
+        self.redirect_location = redirect_location
+        self._redirect_served = False
         self.poll_count = 0
         self.poll_urls: list[str] = []
         self.download_urls: list[str] = []
         self.download_headers: list[dict | None] = []
+        self.download_follow_redirects: list[bool | None] = []
         self.closed = False
 
     def post(self, url, *, headers=None, json=None):
@@ -464,7 +487,7 @@ class FakeVeoHttp:
             return None
         return f"{video_module._GEMINI_BASE}/{name.lstrip('/')}"
 
-    def get(self, url, *, headers=None):
+    def get(self, url, *, headers=None, follow_redirects=None):
         if url == self._expected_poll_url():
             self.poll_count += 1
             self.poll_urls.append(url)
@@ -474,6 +497,12 @@ class FakeVeoHttp:
             return item
         self.download_urls.append(url)
         self.download_headers.append(headers)
+        self.download_follow_redirects.append(follow_redirects)
+        # redirect_location 설정 시: 첫 다운로드 요청에서 302를 반환하고
+        # Location URL로의 재요청에서 실제 download_response를 반환한다.
+        if self.redirect_location and not self._redirect_served:
+            self._redirect_served = True
+            return _Resp(status_code=302, headers={"location": self.redirect_location})
         if isinstance(self.download_response, Exception):
             raise self.download_response
         return self.download_response
@@ -879,13 +908,15 @@ def test_veo_client_poll_malformed_json_raises_render_error(tmp_path):
 
 
 def test_veo_client_download_sends_no_api_key_to_external_uri(tmp_path):
-    """외부 호스트 다운로드 URI로는 x-goog-api-key를 보내지 않는다(키 유출 방지)."""
-    fake = FakeVeoHttp(get_responses=[_veo_done_response()])  # uri=files.example
+    """GCS 등 외부 호스트 URI로는 x-goog-api-key를 보내지 않는다(키 유출 방지)."""
+    fake = FakeVeoHttp(get_responses=[_veo_done_response(uri=_GCS_VIDEO_URI)])
     client = _veo_client(tmp_path, fake)
     client.generate(_frame_file(tmp_path), "prompt")
-    assert fake.download_urls == [_VIDEO_URI]
+    assert fake.download_urls == [_GCS_VIDEO_URI]
     headers = fake.download_headers[0]
     assert not headers or "x-goog-api-key" not in {k.lower() for k in headers}
+    # 초기 GET도 follow_redirects=False — API 키가 외부 호스트로 새지 않도록.
+    assert fake.download_follow_redirects[0] is False
 
 
 def test_veo_client_download_sends_api_key_only_to_gemini_host(tmp_path):
@@ -897,6 +928,170 @@ def test_veo_client_download_sends_api_key_only_to_gemini_host(tmp_path):
     headers = fake.download_headers[0]
     assert headers is not None
     assert headers.get("x-goog-api-key") == "test-gemini-key"
+
+
+def test_veo_client_download_gemini_to_gemini_redirect_keeps_api_key(tmp_path):
+    """Gemini→Gemini 302 리다이렉트 시 두 번째 요청에도 API 키 헤더를 유지한다.
+
+    generativelanguage.googleapis.com 도메인 내 리다이렉트(지역 라우팅 등)에서
+    API 키를 누락하면 401이 발생하므로, Location이 _GEMINI_BASE로 시작할 때는
+    재전송해야 한다.
+    """
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/gemini-redir:download"
+    gemini_redirect = f"{video_module._GEMINI_BASE}/files/gemini-redir:download?region=us"
+    fake = FakeVeoHttp(
+        get_responses=[_veo_done_response(uri=gemini_uri)],
+        download_response=_Resp(content=b"REAL-MP4-BYTES"),
+        redirect_location=gemini_redirect,
+    )
+    client = _veo_client(tmp_path, fake)
+    path = client.generate(_frame_file(tmp_path), "prompt")
+    assert Path(path).read_bytes() == b"REAL-MP4-BYTES"
+    # 두 번째 요청(Gemini 리다이렉트 URL)에도 API 키 포함
+    assert fake.download_headers[1] is not None
+    assert fake.download_headers[1].get("x-goog-api-key") == "test-gemini-key"
+    # 두 번째 요청 URL이 리다이렉트 Location과 일치
+    assert fake.download_urls[1] == gemini_redirect
+
+
+def test_veo_client_download_follows_302_redirect(tmp_path):
+    """Gemini 파일 API가 302로 GCS에 리다이렉트하면 Location URL에서 영상을 받는다.
+
+    - 첫 GET(Gemini URL): API 키 헤더 포함, 302 + Location 반환
+    - 두 번째 GET(Location URL): API 키 헤더 없이 실제 영상 바이트 반환
+    - download_headers[0]에 API 키, download_headers[1]에는 키 없음
+    """
+    gcs_url = "https://storage.googleapis.com/veo-signed/video.mp4?X-Goog-Signature=abc"
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/redirect-test:download"
+    fake = FakeVeoHttp(
+        get_responses=[_veo_done_response(uri=gemini_uri)],
+        download_response=_Resp(content=b"REAL-MP4-BYTES"),
+        redirect_location=gcs_url,
+    )
+    client = _veo_client(tmp_path, fake)
+    path = client.generate(_frame_file(tmp_path), "prompt")
+
+    assert Path(path).read_bytes() == b"REAL-MP4-BYTES"
+    # 첫 요청(Gemini): API 키 포함
+    assert fake.download_headers[0] is not None
+    assert fake.download_headers[0].get("x-goog-api-key") == "test-gemini-key"
+    # 두 번째 요청(GCS): API 키 없음(자격증명 누출 방지)
+    second_headers = fake.download_headers[1]
+    assert not second_headers or "x-goog-api-key" not in {k.lower() for k in second_headers}
+    # 두 번째 요청 URL이 Location URL과 일치해야 한다.
+    assert fake.download_urls[1] == gcs_url
+    # 첫 요청은 반드시 follow_redirects=False — API 키 헤더가 GCS로 새지 않도록.
+    assert fake.download_follow_redirects[0] is False
+    # GCS 요청도 follow_redirects=False — 추가 hop 체인(SSRF) 차단.
+    assert fake.download_follow_redirects[1] is False
+
+
+@pytest.mark.parametrize(
+    "evil_location",
+    [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1/internal",
+        "file:///etc/passwd",
+        "ftp://storage.googleapis.com/evil",
+        "https://evil.example.com/video.mp4",
+    ],
+)
+def test_veo_client_download_rejects_unsafe_location(tmp_path, evil_location):
+    """Location 헤더가 허용 호스트/scheme 밖이면 SSRF 방어로 VideoRenderError를 낸다."""
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/evil-redirect:download"
+    fake = FakeVeoHttp(
+        get_responses=[_veo_done_response(uri=gemini_uri)],
+        redirect_location=evil_location,
+    )
+    client = _veo_client(tmp_path, fake)
+    with pytest.raises(VideoRenderError, match="Location URL"):
+        client.generate(_frame_file(tmp_path), "prompt")
+
+
+def test_veo_client_download_302_missing_location_raises(tmp_path):
+    """302 응답에 Location 헤더가 없으면 VideoRenderError를 낸다(가드 브랜치 핀)."""
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/no-location:download"
+
+    class _NoLocationRedirectHttp(FakeVeoHttp):
+        def get(self, url, *, headers=None, follow_redirects=None):
+            if url == self._expected_poll_url():
+                return super().get(url, headers=headers, follow_redirects=follow_redirects)
+            self.download_urls.append(url)
+            self.download_headers.append(headers)
+            self.download_follow_redirects.append(follow_redirects)
+            return _Resp(status_code=302, headers={})
+
+    fake = _NoLocationRedirectHttp(get_responses=[_veo_done_response(uri=gemini_uri)])
+    client = _veo_client(tmp_path, fake)
+    with pytest.raises(VideoRenderError, match="Location 헤더"):
+        client.generate(_frame_file(tmp_path), "prompt")
+
+
+def test_veo_client_download_rejects_chained_redirect(tmp_path):
+    """검증된 GCS URL이 다시 302를 반환하면 추가 hop을 차단하고 VideoRenderError를 낸다."""
+    gcs_url = "https://storage.googleapis.com/veo-signed/video.mp4"
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/chain-redirect:download"
+
+    class _ChainedRedirectHttp(FakeVeoHttp):
+        def get(self, url, *, headers=None, follow_redirects=None):
+            if url == self._expected_poll_url():
+                self.poll_count += 1
+                self.poll_urls.append(url)
+                item = self.get_responses.pop(0)
+                return item
+            self.download_urls.append(url)
+            self.download_headers.append(headers)
+            self.download_follow_redirects.append(follow_redirects)
+            if url == gemini_uri:
+                return _Resp(status_code=302, headers={"location": gcs_url})
+            # GCS URL에 대해 또 302를 반환 — 추가 hop 시뮬레이션
+            return _Resp(status_code=302, headers={"location": "https://cdn.example.com/"})
+
+    fake = _ChainedRedirectHttp(get_responses=[_veo_done_response(uri=gemini_uri)])
+    client = _veo_client(tmp_path, fake)
+    with pytest.raises(VideoRenderError, match="추가 리다이렉트"):
+        client.generate(_frame_file(tmp_path), "prompt")
+
+
+@pytest.mark.parametrize(
+    "evil_uri",
+    [
+        "https://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1/internal",
+        "https://evil.example.com/video.mp4",
+        "ftp://storage.googleapis.com/evil",
+    ],
+)
+def test_veo_client_download_rejects_unsafe_initial_uri(tmp_path, evil_uri):
+    """Veo 완료 응답의 초기 URI가 허용 호스트·scheme 밖이면 VideoRenderError를 낸다."""
+    fake = FakeVeoHttp(get_responses=[_veo_done_response(uri=evil_uri)])
+    client = _veo_client(tmp_path, fake)
+    with pytest.raises(VideoRenderError, match="Location URL"):
+        client.generate(_frame_file(tmp_path), "prompt")
+
+
+def test_veo_client_download_non_gemini_uri_302_to_gcs(tmp_path):
+    """비-Gemini 초기 URI(GCS)가 302 리다이렉트를 반환하면 올바르게 처리한다.
+
+    - 첫 GET(GCS URI): API 키 헤더 없음
+    - 두 번째 GET(Location URL): API 키 없이 영상 바이트 수신
+    """
+    gcs_redirect = "https://storage.googleapis.com/veo-cdn/redirected.mp4"
+    fake = FakeVeoHttp(
+        get_responses=[_veo_done_response(uri=_GCS_VIDEO_URI)],
+        download_response=_Resp(content=b"GCS-REDIRECT-BYTES"),
+        redirect_location=gcs_redirect,
+    )
+    client = _veo_client(tmp_path, fake)
+    path = client.generate(_frame_file(tmp_path), "prompt")
+    assert Path(path).read_bytes() == b"GCS-REDIRECT-BYTES"
+    # 첫 요청(GCS): API 키 없음
+    first_headers = fake.download_headers[0]
+    assert not first_headers or "x-goog-api-key" not in {k.lower() for k in (first_headers or {})}
+    assert fake.download_follow_redirects[0] is False
+    # 두 번째 요청(Location): API 키 없음, follow_redirects=False
+    assert fake.download_urls[1] == gcs_redirect
+    assert fake.download_follow_redirects[1] is False
 
 
 def test_fake_veo_http_routes_polls_without_operations_prefix(tmp_path):
@@ -1005,6 +1200,8 @@ def test_produce_end_to_end_fakes_fills_all_fields():
     frame_path, prompt = veo.calls[0]
     assert frame_path == "data/fake/frame_x.jpg"
     assert "'누띠는 무방부제예요!'" in prompt
+    # NanoBanana에 전달된 scene_prompt가 _frame_prompt 결과와 일치한다(배선 핀).
+    assert nano.calls[0][0] == VideoStudio._frame_prompt(script)
     # 주입된 클라이언트는 호출부 소유 — produce가 닫지 않는다.
     assert nano.close_count == 0
     assert veo.close_count == 0
@@ -1026,6 +1223,17 @@ def test_produce_passes_mascot_reference_image_to_nano():
 def test_produce_validate_config_missing_gemini_key_raises():
     """실 경로 + GEMINI_API_KEY 빈값이면 시작 시점에 ValueError로 빠르게 실패한다."""
     studio = VideoStudio(_live_settings())
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        studio.produce(_script())
+
+
+def test_produce_validate_config_partial_injection_still_requires_key():
+    """nano_client만 주입되고 veo_client=None이면 키 검사를 건너뛰지 않는다(OR 로직 핀).
+
+    needs_key = nano is None OR veo is None → 하나라도 None이면 키 필요.
+    AND로 변경되면 partial injection이 키 검사를 우회해 실 API를 호출할 수 있다.
+    """
+    studio = VideoStudio(_live_settings(), nano_client=FakeNanoBananaClient())
     with pytest.raises(ValueError, match="GEMINI_API_KEY"):
         studio.produce(_script())
 

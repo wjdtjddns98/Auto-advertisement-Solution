@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from nutti.config import Settings
@@ -43,6 +44,11 @@ _MAX_TOPIC_CHARS = 200
 # 어떤 경로 세그먼트를 쓰든(키 확보 전 미확정) 허용하되, 형태만 좁게 검증한다.
 _OP_NAME_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _MAX_OP_NAME_CHARS = 256
+# 302 리다이렉트 Location URL에서 허용할 호스트. _validate_op_name과 동일한
+# 방어 원칙: API 응답값(Location 헤더)은 신뢰 불가 입력.
+_SAFE_REDIRECT_HOSTS = frozenset(
+    {"storage.googleapis.com", "generativelanguage.googleapis.com"}
+)
 
 
 def _validate_op_name(op_name: str) -> str:
@@ -66,6 +72,23 @@ def _validate_op_name(op_name: str) -> str:
             f"Veo operation name 형식이 올바르지 않습니다 (길이 {len(op_name)})"
         )
     return normalized
+
+
+def _validate_redirect_location(location: str) -> None:
+    """302 리다이렉트 Location URL이 안전한 호스트인지 검증한다.
+
+    scheme=https + host가 _SAFE_REDIRECT_HOSTS 내에 있어야 한다.
+    _validate_op_name과 동일 원칙: API 응답값은 신뢰 불가 입력(SSRF 방어).
+    """
+    parsed = urlparse(location)
+    if parsed.scheme != "https":
+        raise VideoRenderError("Veo 다운로드: Location URL scheme 불허 (허용: https)")
+    host = (parsed.hostname or "").lower()
+    if not any(host == s or host.endswith(f".{s}") for s in _SAFE_REDIRECT_HOSTS):
+        raise VideoRenderError(
+            "Veo 다운로드: Location URL 호스트 불허"
+            " (허용: storage.googleapis.com, generativelanguage.googleapis.com)"
+        )
 
 
 def _sanitize_prompt_text(text: str, max_chars: int) -> str:
@@ -553,12 +576,38 @@ class VeoClient(_HttpClosingMixin):
         """완료된 영상을 즉시 내려받아 media_dir에 저장하고 경로를 반환한다.
 
         `x-goog-api-key`는 자격증명이므로 **Gemini API 도메인일 때만** 붙인다.
-        완료 응답의 URI는 서명된 GCS URL 등 외부 호스트일 수 있는데(자체 인증을
-        쿼리 파라미터로 들고 있음), 거기에 키 헤더를 보내면 해당 호스트의
-        액세스 로그·HTTP 중간자에게 키가 샌다(credential leak).
+        Gemini 파일 API는 실제 바이트를 GCS 서명 URL로 302 리다이렉트할 수 있다.
+        GCS 서명 URL은 쿼리파라미터로 자체 인증하므로 API 키 헤더 없이 재요청한다.
         """
+        # Veo 완료 응답의 URI도 API 응답값(신뢰 불가 입력) — scheme·host 검증 필수.
+        _validate_redirect_location(uri)
         headers = _gemini_headers(self.settings) if uri.startswith(_GEMINI_BASE) else None
-        resp = _safe_send(lambda: self._client().get(uri, headers=headers), "Veo 영상 다운로드")
+        # follow_redirects=False: 리다이렉트 대상이 GCS 등 외부 호스트일 때
+        # API 키 헤더가 새지 않도록 수동으로 처리한다.
+        resp = _safe_send(
+            lambda: self._client().get(uri, headers=headers, follow_redirects=False),
+            "Veo 영상 다운로드",
+        )
+        sc = getattr(resp, "status_code", None)
+        if not isinstance(sc, int):
+            raise VideoRenderError("Veo 영상 다운로드 응답에 유효한 status_code가 없습니다")
+        if 300 <= sc < 400:
+            location = (getattr(resp, "headers", {}) or {}).get("location", "")
+            if not location:
+                raise VideoRenderError("Veo 영상 다운로드: 리다이렉트 응답에 Location 헤더 없음")
+            # SSRF 방어: Location 헤더(API 응답값)는 신뢰 불가 — scheme·host 검증 필수.
+            _validate_redirect_location(location)
+            # Gemini 도메인 리다이렉트는 API 키 헤더를 유지해야 한다.
+            # GCS 서명 URL은 API 키 없이 쿼리파라미터로 자체 인증한다.
+            # follow_redirects=False: 검증된 Location 이후의 추가 hop을 차단(SSRF 체인 방지).
+            redir_headers = _gemini_headers(self.settings) if location.startswith(_GEMINI_BASE) else None
+            resp = _safe_send(
+                lambda: self._client().get(location, headers=redir_headers, follow_redirects=False),
+                "Veo 영상 다운로드(리다이렉트)",
+            )
+            r_sc = getattr(resp, "status_code", None)
+            if isinstance(r_sc, int) and 300 <= r_sc < 400:
+                raise VideoRenderError("Veo 다운로드: 허용 호스트 이후 추가 리다이렉트 금지")
         _raise_for_status(resp, "Veo 영상 다운로드")
         content = getattr(resp, "content", None)
         if not isinstance(content, (bytes, bytearray)) or not content:
