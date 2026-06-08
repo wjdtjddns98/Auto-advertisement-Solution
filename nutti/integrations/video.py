@@ -179,7 +179,7 @@ class VideoTimeoutError(VideoRenderError):
 def _gemini_headers(settings: Settings) -> dict:
     """Gemini API 인증 헤더. `x-goog-api-key` 방식이다(Bearer 아님).
 
-    이 헤더는 자격증명이므로 **Gemini API 도메인(_GEMINI_BASE) 요청에만** 붙인다 —
+    이 헤더는 자격증명이므로 **Gemini API 도메인(_GEMINI_HOST) 요청에만** 붙인다 —
     외부 호스트(서명된 GCS URL 등)로 보내면 그 호스트의 액세스 로그/중간자에게
     키가 샌다(VeoClient._download 참조).
     """
