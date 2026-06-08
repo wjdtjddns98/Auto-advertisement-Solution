@@ -162,7 +162,11 @@ class TelegramGate:
                 store.update_decision(review.id, decision)
                 try:
                     client.answer_callback(cb.get("id", ""))
-                    client.edit_message(chat_id, message_id, f"검수 완료: {decision.value}")
+                    # 미디어 메시지(영상 등)는 editMessageCaption, 텍스트는 editMessageText.
+                    if review.media_path:
+                        client.edit_caption(chat_id, message_id, f"검수 완료: {decision.value}")
+                    else:
+                        client.edit_message(chat_id, message_id, f"검수 완료: {decision.value}")
                 except Exception:  # UI 갱신은 best-effort
                     log.warning("telegram.ui_update_failed", review_id=review.id)
                 log.info(

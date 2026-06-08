@@ -113,10 +113,20 @@ class TelegramClient:
         self._call("answerCallbackQuery", {"callback_query_id": callback_query_id})
 
     def edit_message(self, chat_id: str, message_id: int, text: str) -> None:
-        """검수 결과를 반영해 기존 메시지를 수정한다(버튼 제거 효과)."""
+        """검수 결과를 반영해 기존 텍스트 메시지를 수정한다(버튼 제거 효과)."""
         self._call(
             "editMessageText",
             {"chat_id": chat_id, "message_id": message_id, "text": text},
+        )
+
+    def edit_caption(self, chat_id: str, message_id: int, caption: str) -> None:
+        """sendVideo 등 미디어 메시지의 캡션을 수정한다(버튼 제거 효과).
+
+        미디어 메시지는 editMessageText 대신 editMessageCaption을 사용해야 한다.
+        """
+        self._call(
+            "editMessageCaption",
+            {"chat_id": chat_id, "message_id": message_id, "caption": caption},
         )
 
     def send_message(self, chat_id: str, text: str) -> int:
