@@ -28,6 +28,10 @@ log = get_logger(__name__)
 
 # Gemini API 베이스 URL. 인증은 `x-goog-api-key` 헤더(Bearer 아님).
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+# 리다이렉트 Location 헤더 판별에 사용하는 Gemini 호스트 prefix.
+# /v1beta 뿐만 아니라 /download/v1beta 등 다른 경로로도 302가 올 수 있으므로
+# 호스트 레벨에서 비교한다.
+_GEMINI_HOST = "https://generativelanguage.googleapis.com"
 # 폴링 중 일시 오류(429 쿼터·5xx 백엔드 장애)의 최대 재시도 횟수와 backoff 기준(초).
 # 600s 폴링 윈도우에서 단 1회의 일시 오류로 작업을 영구 포기하지 않기 위한 장치다.
 _MAX_TRANSIENT_RETRIES = 3
@@ -175,7 +179,7 @@ class VideoTimeoutError(VideoRenderError):
 def _gemini_headers(settings: Settings) -> dict:
     """Gemini API 인증 헤더. `x-goog-api-key` 방식이다(Bearer 아님).
 
-    이 헤더는 자격증명이므로 **Gemini API 도메인(_GEMINI_BASE) 요청에만** 붙인다 —
+    이 헤더는 자격증명이므로 **Gemini API 도메인(_GEMINI_HOST) 요청에만** 붙인다 —
     외부 호스트(서명된 GCS URL 등)로 보내면 그 호스트의 액세스 로그/중간자에게
     키가 샌다(VeoClient._download 참조).
     """
@@ -581,7 +585,7 @@ class VeoClient(_HttpClosingMixin):
         """
         # Veo 완료 응답의 URI도 API 응답값(신뢰 불가 입력) — scheme·host 검증 필수.
         _validate_redirect_location(uri)
-        headers = _gemini_headers(self.settings) if uri.startswith(_GEMINI_BASE) else None
+        headers = _gemini_headers(self.settings) if uri.startswith(_GEMINI_HOST) else None
         # follow_redirects=False: 리다이렉트 대상이 GCS 등 외부 호스트일 때
         # API 키 헤더가 새지 않도록 수동으로 처리한다.
         resp = _safe_send(
@@ -600,7 +604,7 @@ class VeoClient(_HttpClosingMixin):
             # Gemini 도메인 리다이렉트는 API 키 헤더를 유지해야 한다.
             # GCS 서명 URL은 API 키 없이 쿼리파라미터로 자체 인증한다.
             # follow_redirects=False: 검증된 Location 이후의 추가 hop을 차단(SSRF 체인 방지).
-            redir_headers = _gemini_headers(self.settings) if location.startswith(_GEMINI_BASE) else None
+            redir_headers = _gemini_headers(self.settings) if location.startswith(_GEMINI_HOST) else None
             resp = _safe_send(
                 lambda: self._client().get(location, headers=redir_headers, follow_redirects=False),
                 "Veo 영상 다운로드(리다이렉트)",

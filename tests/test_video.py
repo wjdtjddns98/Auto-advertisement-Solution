@@ -930,6 +930,24 @@ def test_veo_client_download_sends_api_key_only_to_gemini_host(tmp_path):
     assert headers.get("x-goog-api-key") == "test-gemini-key"
 
 
+def test_veo_client_download_download_path_initial_uri_sends_api_key(tmp_path):
+    """/download/v1beta/... 경로가 초기 URI로 직접 반환될 때 API 키를 포함한다.
+
+    Veo 완료 응답이 /v1beta/... 대신 /download/v1beta/... 경로 URI를 직접
+    반환하는 경우에도 API 키 헤더를 전달해야 한다. (line 588 _GEMINI_HOST 체크)
+    """
+    download_path_uri = (
+        "https://generativelanguage.googleapis.com/download/v1beta"
+        "/files/direct-dl:download?alt=media"
+    )
+    fake = FakeVeoHttp(get_responses=[_veo_done_response(uri=download_path_uri)])
+    client = _veo_client(tmp_path, fake)
+    client.generate(_frame_file(tmp_path), "prompt")
+    headers = fake.download_headers[0]
+    assert headers is not None
+    assert headers.get("x-goog-api-key") == "test-gemini-key"
+
+
 def test_veo_client_download_gemini_to_gemini_redirect_keeps_api_key(tmp_path):
     """Gemini→Gemini 302 리다이렉트 시 두 번째 요청에도 API 키 헤더를 유지한다.
 
@@ -952,6 +970,33 @@ def test_veo_client_download_gemini_to_gemini_redirect_keeps_api_key(tmp_path):
     assert fake.download_headers[1].get("x-goog-api-key") == "test-gemini-key"
     # 두 번째 요청 URL이 리다이렉트 Location과 일치
     assert fake.download_urls[1] == gemini_redirect
+
+
+def test_veo_client_download_gemini_download_path_redirect_keeps_api_key(tmp_path):
+    """/download/v1beta/... 경로 302 리다이렉트 시 API 키를 유지한다.
+
+    실제 Gemini Files API는 /v1beta/files/..:download 요청에 대해
+    /download/v1beta/... 경로로 302를 반환한다. 이 경로는 _GEMINI_BASE로
+    시작하지 않지만 _GEMINI_HOST(호스트 레벨) 비교에는 해당하므로
+    API 키 헤더를 유지해야 한다.
+    """
+    gemini_uri = f"{video_module._GEMINI_BASE}/files/a7ui57u8i01t:download?alt=media"
+    download_path_redirect = (
+        "https://generativelanguage.googleapis.com/download/v1beta"
+        "/files/a7ui57u8i01t:download?alt=media"
+    )
+    fake = FakeVeoHttp(
+        get_responses=[_veo_done_response(uri=gemini_uri)],
+        download_response=_Resp(content=b"REAL-MP4-BYTES"),
+        redirect_location=download_path_redirect,
+    )
+    client = _veo_client(tmp_path, fake)
+    path = client.generate(_frame_file(tmp_path), "prompt")
+    assert Path(path).read_bytes() == b"REAL-MP4-BYTES"
+    # 두 번째 요청(/download/v1beta/... 경로)에도 API 키 포함
+    assert fake.download_headers[1] is not None
+    assert fake.download_headers[1].get("x-goog-api-key") == "test-gemini-key"
+    assert fake.download_urls[1] == download_path_redirect
 
 
 def test_veo_client_download_follows_302_redirect(tmp_path):

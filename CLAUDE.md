@@ -53,7 +53,16 @@
 5. **머지 정책**:
    - **dev로의 머지는 자동** — 단 적대적 리뷰어가 지적한 사항을 **고친 뒤 같은 리뷰어에게 재검증(approve) 받고 나서만** 머지. 수정만 하고 재승인 없이 머지 금지. CI fail/changes-needed면 고치고 재시도. 자기 PR은 `--approve` 불가(브랜치 보호 0 approvals라 머지는 됨) → `gh pr review --comment`로 코멘트.
    - **main으로의 머지(dev→main 릴리스)는 항상 PO 명시 승인 후에만.** 절대 임의 머지 금지.
-6. **완료 전 적대적 리뷰 루프**: `nutti-review` 워크플로로 차원별 리뷰 → 반박검증 → 확정 결함 수정 → clean까지 반복.
+6. **완료 전 적대적 리뷰 루프** — 규모에 따라 자동 선택, 매번 동일 전략 쓰지 않는다:
+
+   | 작업 규모 | 리뷰 전략 | 방법 |
+   |-----------|-----------|------|
+   | 신규 기능·아키텍처 변경·security-sensitive | `nutti-review` full (4차원 sonnet + 반박 haiku) | `Workflow({name:'nutti-review'})` |
+   | 버그픽스·1-3파일 수정 | 단일 `nutti-reviewer` 에이전트 1회 | `Agent({subagent_type:'nutti-reviewer',...})` |
+   | docstring·주석·설정값·테스트 문자열만 수정 | 리뷰 생략 | 직접 커밋 |
+
+   **재리뷰 기준**: 확정 결함 중 `high`/`critical`이 있으면 수정 후 재리뷰 필수.
+   `medium`/`low`만 남으면 수정 후 PR comment에 기록하고 재리뷰 없이 머지.
 7. **브랜치 보호 ACTIVE** (main·dev): PR 필수, CI 체크 통과 필수, force-push/삭제 금지.
    → **절대 `git push`로 main/dev 직접 푸시 금지** (거부됨). 항상 브랜치+PR+green CI 경유.
 
