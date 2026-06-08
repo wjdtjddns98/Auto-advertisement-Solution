@@ -100,12 +100,36 @@ class Orchestrator:
         run.script = self.ai.generate_script(topic, feedback=feedback)
         self._fact_check(run, topic, feedback)
         self.store.log_script(run.script)
-        self._gate(self.telegram, Stage.SCRIPT, "대본 검수", run.script.body)
+        # REVISE: 수정 내용이 있으면 script.body에 반영하고 시트를 업데이트한다.
+        script_review = ReviewRequest(stage=Stage.SCRIPT, title="대본 검수", preview=run.script.body)
+        script_decision = self.telegram.request(script_review)
+        if script_decision == ReviewDecision.REVISE and script_review.revised_content:
+            # 사용자가 텔레그램에서 직접 입력한 수정본이므로 팩트체크를 재실행하지 않는다.
+            # PO가 내용을 직접 확인·수정했다는 전제 하에 신뢰하는 설계다.
+            run.script.body = script_review.revised_content
+            self.store.update_script(run.script)
+        elif script_decision != ReviewDecision.APPROVED:
+            log.warning(
+                "pipeline.gate_blocked", stage=Stage.SCRIPT.value, decision=script_decision.value
+            )
+            raise GateRejected(Stage.SCRIPT, script_decision)
 
         # 2단계: 영상
         run.current_stage = Stage.VIDEO
         run.video = self.studio.produce(run.script)
-        self._gate(self.telegram, Stage.VIDEO, "영상 품질 검수", run.video.preview_url or "")
+        # VIDEO 단계: 영상 파일이 있으면 MP4를 텔레그램으로 직접 전송(인라인 재생).
+        video_review = ReviewRequest(
+            stage=Stage.VIDEO,
+            title="영상 품질 검수",
+            preview=run.video.preview_url or "",
+            media_path=run.video.video_path,
+        )
+        video_decision = self.telegram.request(video_review)
+        if video_decision not in (ReviewDecision.APPROVED,):
+            log.warning(
+                "pipeline.gate_blocked", stage=Stage.VIDEO.value, decision=video_decision.value
+            )
+            raise GateRejected(Stage.VIDEO, video_decision)
 
         # 3단계: 메타데이터
         run.current_stage = Stage.METADATA

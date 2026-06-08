@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from nutti.config import Settings
-from nutti.integrations.telegram import TelegramClient, TelegramTransientError
+from nutti.integrations.telegram import _BUTTONS, TelegramClient, TelegramTransientError
 from nutti.logging import get_logger
 from nutti.models import ReviewDecision, ReviewRequest
 from nutti.storage.reviews import JsonFileReviewStore, ReviewStore
@@ -96,7 +96,23 @@ class TelegramGate:
         chat_id = self.settings.telegram_chat_id
 
         # 1) 인라인 버튼 메시지 전송 + PENDING 상태 영속화
-        message_id = client.send_review(chat_id, review)
+        #    media_path가 있으면 영상 파일을 sendVideo로 전송, 없으면 텍스트 메시지.
+        if review.media_path:
+            inline_keyboard = [
+                [
+                    {"text": label, "callback_data": f"nutti:{review.id}:{value}"}
+                    for label, value in _BUTTONS
+                ]
+            ]
+            caption = f"{review.title}\n\n{review.preview}"
+            message_id = client.send_video(
+                chat_id,
+                review.media_path,
+                caption=caption,
+                reply_markup={"inline_keyboard": inline_keyboard},
+            )
+        else:
+            message_id = client.send_review(chat_id, review)
         review.message_id = message_id
         review.decision = ReviewDecision.PENDING
         store.save(review)
@@ -152,7 +168,75 @@ class TelegramGate:
                 log.info(
                     "telegram.decision", stage=review.stage.value, decision=decision.value
                 )
+
+                # REVISE: 수정 안내 메시지를 보내고 텍스트 입력 대기.
+                # 이미 소비한 시간을 전달해 총 대기가 review_timeout_sec를 넘지 않도록 한다.
+                if decision == ReviewDecision.REVISE:
+                    elapsed = self._clock() - start
+                    revised = self._wait_for_text_input(
+                        client, chat_id, offset, elapsed_sec=elapsed
+                    )
+                    if revised is not None:
+                        review.revised_content = revised
+                        log.info("telegram.revised_content_received", stage=review.stage.value)
+
                 return decision
+
+            self._sleep(self.settings.review_poll_interval_sec)
+
+    def _wait_for_text_input(
+        self,
+        client: TelegramClient,
+        chat_id: str,
+        offset: int | None,
+        *,
+        elapsed_sec: float = 0.0,
+    ) -> str | None:
+        """수정 안내 메시지를 보내고 사용자의 일반 텍스트 메시지를 수신 대기한다.
+
+        elapsed_sec: 콜백 폴링에서 이미 소비한 시간(초). 남은 시간 = review_timeout_sec - elapsed_sec.
+        타임아웃 내에 인가된 채팅에서 텍스트 메시지가 오면 반환하고,
+        타임아웃이 지나면 None을 반환한다.
+        """
+        try:
+            client.send_message(chat_id, "✏️ 수정할 대본 내용을 입력해 주세요.")
+        except Exception:  # 안내 메시지 실패는 best-effort
+            log.warning("telegram.revise_prompt_failed")
+
+        start = self._clock() - elapsed_sec  # elapsed만큼 앞당겨 총 타임아웃 내에서 소진
+        current_offset = offset
+        while True:
+            remaining = self.settings.review_timeout_sec - (self._clock() - start)
+            if remaining <= 0:
+                log.warning("telegram.revise_text_timeout")
+                return None
+
+            long_poll = max(0, min(50, int(remaining)))
+            try:
+                updates = client.get_updates(offset=current_offset, timeout=long_poll)
+            except TelegramTransientError as exc:
+                log.warning("telegram.revise_poll_transient", error=str(exc))
+                self._sleep(self.settings.review_poll_interval_sec)
+                continue
+
+            for update in updates:
+                current_offset = int(update.get("update_id", 0)) + 1
+                msg = update.get("message") or {}
+                text = msg.get("text", "")
+                if not text:
+                    continue
+                # 인가 확인: 설정된 검수 채팅에서 온 메시지만 수락.
+                msg_chat_id = str((msg.get("chat") or {}).get("id", ""))
+                if not msg_chat_id or msg_chat_id != str(chat_id):
+                    continue
+                # 수정 내용 접수 완료 표시(best-effort).
+                try:
+                    client.edit_message(
+                        chat_id, msg.get("message_id", 0), "✅ 수정 내용 접수 완료"
+                    )
+                except Exception:
+                    pass
+                return text
 
             self._sleep(self.settings.review_poll_interval_sec)
 

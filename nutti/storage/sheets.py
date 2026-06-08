@@ -11,7 +11,7 @@ from pathlib import Path
 
 from nutti.config import Settings
 from nutti.logging import get_logger
-from nutti.models import PipelineRun, Script
+from nutti.models import PipelineRun, Script, VideoAsset
 
 log = get_logger(__name__)
 
@@ -78,6 +78,51 @@ class SheetStore:
             return
         self._worksheet().append_row(["run", run.id, run.current_stage.value])
         log.info("sheets.log_run.remote", run_id=run.id)
+
+    def update_script(self, script: Script) -> None:
+        """수정된 대본을 시트에 script_update 행으로 추가한다.
+
+        인라인 수정(REVISE 결정 후 사용자 텍스트 입력)으로 변경된 대본을 기록한다.
+        """
+        if self._client is None:
+            row = {
+                "type": "script_update",
+                "script_id": script.id,
+                "topic": script.topic,
+                "body": script.body,
+                "updated_at": script.created_at.isoformat(),
+            }
+            self._memory.append(row)
+            log.info("sheets.update_script.local", script_id=script.id)
+            return
+        self._worksheet().append_row(
+            ["script_update", script.id, script.topic, script.body, script.created_at.isoformat()]
+        )
+        log.info("sheets.update_script.remote", script_id=script.id)
+
+    def log_video(self, video: VideoAsset) -> None:
+        """영상 산출물(경로·URL)을 시트에 기록한다."""
+        if self._client is None:
+            row = {
+                "type": "video",
+                "script_id": video.script_id,
+                "video_path": video.video_path or "",
+                "final_url": video.final_url or "",
+                "duration_sec": video.duration_sec,
+            }
+            self._memory.append(row)
+            log.info("sheets.log_video.local", script_id=video.script_id)
+            return
+        self._worksheet().append_row(
+            [
+                "video",
+                video.script_id,
+                video.video_path or "",
+                video.final_url or "",
+                video.duration_sec,
+            ]
+        )
+        log.info("sheets.log_video.remote", script_id=video.script_id)
 
     def all_rows(self) -> list[dict]:
         """로컬 폴백 저장소 내용(테스트/디버그용)."""

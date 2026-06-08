@@ -12,6 +12,9 @@ import httpx
 from nutti.logging import get_logger
 from nutti.models import ReviewDecision, ReviewRequest
 
+# sendVideo multipart 업로드에 사용하는 MIME 타입.
+_VIDEO_MIME = "video/mp4"
+
 log = get_logger(__name__)
 
 
@@ -115,3 +118,56 @@ class TelegramClient:
             "editMessageText",
             {"chat_id": chat_id, "message_id": message_id, "text": text},
         )
+
+    def send_message(self, chat_id: str, text: str) -> int:
+        """단순 텍스트 메시지를 전송하고 message_id를 반환한다(수정 안내용)."""
+        data = self._call("sendMessage", {"chat_id": chat_id, "text": text})
+        return int(data.get("result", {}).get("message_id", 0))
+
+    def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: str = "",
+        reply_markup: dict | None = None,
+    ) -> int:
+        """MP4 파일을 multipart/form-data로 업로드하고 인라인 버튼을 첨부한다.
+
+        텔레그램 sendVideo API는 파일 전송 시 JSON 대신 multipart/form-data를 사용해야
+        한다. _call의 json 전송 경로를 공유할 수 없어 직접 POST한다. 에러 분류·토큰 스크럽
+        로직은 _call과 동일하게 적용한다.
+        """
+        import json as _json
+
+        url = f"{self.base_url}/sendVideo"
+        fields: dict = {"chat_id": chat_id}
+        if caption:
+            fields["caption"] = caption
+        if reply_markup is not None:
+            fields["reply_markup"] = _json.dumps(reply_markup)
+
+        try:
+            with open(video_path, "rb") as f:
+                video_bytes = f.read()
+        except OSError as exc:
+            raise TelegramError(f"영상 파일 읽기 실패: {exc}") from None
+
+        files = {"video": ("video.mp4", video_bytes, _VIDEO_MIME)}
+        try:
+            resp = self.http.post(url, data=fields, files=files)
+            resp.raise_for_status()
+        except (httpx.TransportError, httpx.TooManyRedirects, httpx.DecodingError) as exc:
+            raise TelegramTransientError(self._scrub(str(exc))) from None
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            msg = self._scrub(str(exc))
+            if status == 429 or 500 <= status < 600:
+                raise TelegramTransientError(msg) from None
+            raise TelegramError(msg) from None
+        except httpx.HTTPError as exc:
+            raise TelegramError(self._scrub(str(exc))) from None
+
+        data = resp.json()
+        if not data.get("ok", False):
+            raise TelegramError(f"Telegram API 오류(sendVideo): {data.get('description')}")
+        return int(data.get("result", {}).get("message_id", 0))
