@@ -52,6 +52,8 @@ tests/
 `NUTTI_DRY_RUN=true`(기본값)이면 **외부 API 키 없이도 전 파이프라인이 시뮬레이션으로 동작**합니다.
 구조를 먼저 검증한 뒤, 실제 API 연동(`integrations/*.py`, `review/gates.py`의 `# TODO`)을 하나씩 채우면 됩니다.
 
+## 배포(VPS) → [docs/DEPLOY.md](docs/DEPLOY.md) 참고
+
 ## 시작하기
 
 ```bash
