@@ -46,6 +46,23 @@ class Settings(BaseSettings):
     veo_poll_interval_sec: float = Field(default=15.0, alias="NUTTI_VEO_POLL_INTERVAL_SEC")
     veo_timeout_sec: float = Field(default=600.0, alias="NUTTI_VEO_TIMEOUT_SEC")
 
+    # 영상 백엔드 선택: "veo"(기본, 네이티브 한국어 음성) | "kling"(무음 영상 + 한국어 TTS 보이스오버).
+    # Kling은 네이티브 한국어 음성이 불가(v3는 영어로 자동번역, v1.6/2.1은 무음)하므로,
+    # 무음 영상을 생성하고 Gemini TTS로 한국어 내레이션을 별도 합성해 mux한다(립싱크 포기·보이스오버).
+    video_backend: str = Field(default="veo", alias="NUTTI_VIDEO_BACKEND")
+    # 2단계-Kling: fal.ai Kling image-to-video(무음). FAL_KEY는 fal.ai 대시보드에서 발급.
+    fal_key: str = Field(default="", alias="FAL_KEY")
+    # 기본 v2.1 standard — 무음·최저가($0.084/s)·5·10초 길이. v3는 duration 자유지만 가격 미확정.
+    kling_model: str = Field(
+        default="fal-ai/kling-video/v2.1/standard/image-to-video", alias="NUTTI_KLING_MODEL"
+    )
+    kling_poll_interval_sec: float = Field(default=10.0, alias="NUTTI_KLING_POLL_INTERVAL_SEC")
+    kling_timeout_sec: float = Field(default=600.0, alias="NUTTI_KLING_TIMEOUT_SEC")
+    # 2단계-TTS: 한국어 보이스오버. Gemini TTS는 기존 GEMINI_API_KEY를 그대로 쓴다(신규 키 불요).
+    tts_model: str = Field(default="gemini-2.5-flash-preview-tts", alias="NUTTI_TTS_MODEL")
+    # Gemini 사전구성 음성 이름(한국어 발화 지원). 예: Kore, Puck, Charon, Aoede 등.
+    tts_voice: str = Field(default="Kore", alias="NUTTI_TTS_VOICE")
+
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
     google_service_account_json: str = Field(default="", alias="GOOGLE_SERVICE_ACCOUNT_JSON")

@@ -42,7 +42,7 @@ _MAX_DIALOGUE_CHARS = 500
 _MAX_TOPIC_CHARS = 200
 # 영상 길이 구성: 비트마다 독립 8초 클립을 생성해 ffmpeg로 잇는다(스티칭).
 # Veo 연장(extend)은 16:9 가로만 지원해 세로 쇼츠(9:16)엔 못 써서 스티칭을 택했다.
-# 비트 N개 → 8*N초. 기본 4비트 = 32초.
+# 비트 N개 → 8*N초. 기본 3비트 = 24초(veo 경로 기준).
 _CLIP_SEC = 8.0
 # Veo가 화면에 텍스트(특히 깨진 한글 자막)를 임의 렌더하는 것을 억제하는 negativePrompt.
 # 대사를 음성으로만 내보내기 위함 — 실측에서 이 파라미터로 자막이 사라짐을 확인.
@@ -717,6 +717,8 @@ class VideoStudio:
         *,
         nano_client=None,
         veo_client=None,
+        kling_client=None,
+        tts_client=None,
         sleep=None,
     ):
         # 실연동 클라이언트는 주입 가능하게 받는다(테스트에서 fake 주입 → 네트워크 불요).
@@ -724,6 +726,9 @@ class VideoStudio:
         self.settings = settings
         self._nano_client = nano_client
         self._veo_client = veo_client
+        # kling 백엔드(무음 영상 + 한국어 TTS 보이스오버)용 주입 클라이언트.
+        self._kling_client = kling_client
+        self._tts_client = tts_client
         # 폴링 대기용 sleep 주입(기본 time.sleep). 테스트에서 가짜 시계로 대체.
         self._sleep = sleep
 
@@ -738,6 +743,16 @@ class VideoStudio:
         인라인 주석이 값으로 파싱되는 패턴을 진짜 키로 오인하지 않기 위함이다.
         """
         if self.settings.dry_run:
+            return
+        # 시작 프레임은 백엔드 무관하게 NanoBanana(Gemini)로 만든다 → GEMINI_API_KEY 필수.
+        # kling 백엔드는 TTS도 Gemini를 쓰므로 동일 키로 충분하고, 추가로 FAL_KEY가 필요하다.
+        if self.settings.video_backend == "kling":
+            if self._nano_client is None and not _usable_key(self.settings.gemini_api_key):
+                raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 프레임/TTS에 필수입니다.")
+            if self._tts_client is None and not _usable_key(self.settings.gemini_api_key):
+                raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 TTS에 필수입니다.")
+            if self._kling_client is None and not _usable_key(self.settings.fal_key):
+                raise ValueError("FAL_KEY가 비어 있습니다 — kling 백엔드(dry_run=False) 시 필수입니다.")
             return
         needs_key = self._nano_client is None or self._veo_client is None
         if needs_key and not _usable_key(self.settings.gemini_api_key):
@@ -767,7 +782,11 @@ class VideoStudio:
             )
 
         frame_path = self._generate_frame(script)
-        video_path = self._produce_clips(frame_path, beats)
+        video_path, measured_sec = self._produce_clips(frame_path, beats)
+        # kling 백엔드는 클립이 5/10초이고 mux `-shortest`로 음성 길이에 맞춰 잘리므로,
+        # veo의 8.0×N 가정 대신 백엔드가 돌려준 실측 총길이를 쓴다(veo는 measured=None).
+        if measured_sec is not None:
+            duration = measured_sec
         return VideoAsset(
             script_id=script.id,
             frame_image_path=frame_path,
@@ -787,7 +806,37 @@ class VideoStudio:
             return beats
         return [script.body.strip() or script.topic]
 
-    def _produce_clips(self, frame_path: str, beats: list[str]) -> str:
+    def _produce_clips(self, frame_path: str, beats: list[str]) -> tuple[str, float | None]:
+        """비트별 클립을 생성해 ffmpeg로 이어붙인 (최종 경로, 실측 총길이초)를 반환한다(백엔드 분기).
+
+        `video_backend`가 "kling"이면 무음 Kling 영상 + 한국어 TTS 보이스오버 백엔드로
+        비트 클립을 만들고, 그 외(기본 "veo")는 Veo 네이티브 음성 경로를 쓴다.
+        실측 총길이초는 kling 경로에서만 채워지고(클립이 5/10초·음성 길이로 잘림),
+        veo 경로는 None을 돌려줘 호출부의 8.0×N 계산을 그대로 쓰게 한다.
+        """
+        if self.settings.video_backend == "kling":
+            return self._produce_clips_kling(frame_path, beats)
+        return self._produce_clips_veo(frame_path, beats), None
+
+    def _produce_clips_kling(self, frame_path: str, beats: list[str]) -> tuple[str, float]:
+        """Kling 무음 + 한국어 TTS 백엔드로 비트 클립을 만들고 스티칭한다.
+
+        무거운 의존(fal/TTS 클라이언트)을 import-time에 끌어오지 않도록 지연 import한다
+        (httpx·imageio_ffmpeg와 동일한 lazy 패턴 → veo-only 경로의 import 비용 0).
+        백엔드가 돌려준 실측 총길이초를 함께 반환해 duration_sec을 정확히 채운다.
+        """
+        from nutti.integrations.video_kling import KlingVoiceoverBackend
+
+        backend = KlingVoiceoverBackend(
+            self.settings,
+            kling_client=self._kling_client,
+            tts_client=self._tts_client,
+            sleep=self._sleep,
+        )
+        clips, total_sec = backend.produce_beat_clips(frame_path, beats)
+        return self._stitch(clips), total_sec
+
+    def _produce_clips_veo(self, frame_path: str, beats: list[str]) -> str:
         """각 비트를 독립 8초 클립으로 생성한 뒤 ffmpeg로 이어붙여 최종 경로를 반환한다.
 
         모든 클립이 같은 시작 프레임을 써서 마스코트 외형 일관성을 유지한다(음성은
