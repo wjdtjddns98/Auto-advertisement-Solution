@@ -242,9 +242,29 @@ def _json_or_raise(resp, what: str) -> dict:
     return data
 
 
-def _send_json(send, what: str) -> dict:
-    """전송 + 상태 검증 + JSON 파싱을 한 번에 — 어떤 실패든 VideoRenderError로."""
-    return _json_or_raise(_safe_send(send, what), what)
+def _send_json(send, what: str, *, sleep=None, max_transient_retries: int = 0) -> dict:
+    """전송 + 상태 검증 + JSON 파싱을 한 번에 — 어떤 실패든 VideoRenderError로.
+
+    `max_transient_retries > 0`이면 일시 오류(HTTP 429 또는 5xx)에 한해 지수
+    backoff(2·4·8초)로 그 횟수만큼 재시도한다 — 무료 티어 Gemini는 분당 한도
+    (RPM)가 낮아 풀 파이프라인이 단계를 연달아 호출하면 일시적 429가 흔히 난다.
+    폴링(_poll_once)과 동일한 분류(429 또는 5xx)·backoff를 쓴다. 기본값 0이면
+    재시도 없이 기존 동작(즉시 전파)을 유지한다(Veo 제출·Kling submit/result).
+    영구 오류(그 외 4xx)·전송/JSON 파싱 실패는 재시도 없이 즉시 전파한다.
+    `sleep`은 테스트가 가짜 시계를 주입하기 위한 훅(기본 time.sleep)이다.
+    """
+    _sleep = sleep if sleep is not None else time.sleep
+    attempts = 0
+    while True:
+        resp = _safe_send(send, what)
+        code = getattr(resp, "status_code", None)
+        transient = isinstance(code, int) and (code == 429 or code >= 500)
+        if transient and attempts < max_transient_retries:
+            attempts += 1
+            # 지수 backoff(2·4·8초). 가짜 sleep 주입 시 즉시 반환된다.
+            _sleep(_RETRY_BACKOFF_SEC * (2 ** (attempts - 1)))
+            continue
+        return _json_or_raise(resp, what)
 
 
 def _write_bytes(out_path: Path, data: bytes, what: str) -> None:
@@ -411,6 +431,8 @@ class NanoBananaClient(_HttpClosingMixin):
                     url, headers=_gemini_headers(self.settings), json=body
                 ),
                 "Gemini 프레임 생성",
+                sleep=self._sleep,
+                max_transient_retries=_MAX_TRANSIENT_RETRIES,
             )
             try:
                 image_bytes = self._extract_image_bytes(data)

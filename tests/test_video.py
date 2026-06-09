@@ -388,13 +388,43 @@ def test_nano_banana_generate_frame_exhausts_retries(tmp_path):
     assert fake.call_count == max_tries
 
 
+def test_nano_banana_generate_frame_retries_transient_429_then_succeeds(tmp_path):
+    """회귀: 프레임 생성 중 일시적 429(분당 한도)는 backoff 후 재시도해 성공한다.
+
+    무료 티어 Gemini는 RPM이 낮아 풀 파이프라인 연속 호출 시 일시적 429가 흔하다.
+    이전엔 HTTP 호출이 재시도 루프 밖이라 단발 429로 전체 작업이 죽었다.
+    """
+    ok = _nano_image_response()
+    fake = _MultiRespFake([_Resp(status_code=429), ok])
+    client = NanoBananaClient(
+        _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake, sleep=lambda _: None
+    )
+    path = client.generate_frame("a dog")
+    assert Path(path).exists()
+    assert fake.call_count == 2  # 429 1회 + 재시도 성공 1회
+
+
+def test_nano_banana_generate_frame_transient_429_exhausted_raises(tmp_path):
+    """회귀: 연속 429가 재시도 한도를 넘으면 VideoRenderError로 전파된다(무한루프 금지)."""
+    fake = FakeNanoBananaHttp(response=_Resp(status_code=429))
+    client = NanoBananaClient(
+        _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake, sleep=lambda _: None
+    )
+    with pytest.raises(VideoRenderError) as exc_info:
+        client.generate_frame("a dog")
+    assert "429" in str(exc_info.value)
+    # 최초 1회 + 일시 오류 재시도 _MAX_TRANSIENT_RETRIES회 = 4회 POST 후 포기.
+    assert len(fake.posts) == 1 + 3
+
+
 def test_nano_banana_error_message_redacts_url_and_body(tmp_path):
     """HTTP 오류 메시지에는 상태 코드만 — URL·응답 본문은 노출하지 않는다."""
     settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
     fake = FakeNanoBananaHttp(
         response=_Resp(status_code=500, json_data={"error": "internal-secret-detail"})
     )
-    client = NanoBananaClient(settings, http=fake)
+    # 5xx는 일시 오류로 재시도되므로 가짜 sleep을 주입해 backoff 대기 없이 빠르게 소진시킨다.
+    client = NanoBananaClient(settings, http=fake, sleep=lambda _: None)
     with pytest.raises(VideoRenderError) as exc_info:
         client.generate_frame("a dog")
     msg = str(exc_info.value)
