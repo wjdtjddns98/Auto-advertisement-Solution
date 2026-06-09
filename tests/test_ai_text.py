@@ -9,6 +9,7 @@ import pytest
 
 from nutti.config import Settings
 from nutti.integrations.ai_text import (
+    SCRIPT_SYSTEM_PROMPT,
     AITextClient,
     FactCheckResult,
     _clean_topic,
@@ -49,19 +50,30 @@ def test_generate_script_dry_run():
     assert script.fact_checked is True
 
 
-def test_generate_script_dry_run_fills_four_beats():
-    """dry_run 대본은 영상 비트 4개(8+7*3=29초)로 분할돼 채워진다."""
+def test_generate_script_dry_run_fills_three_beats():
+    """dry_run 대본은 영상 비트 3개(훅·핵심·마무리, veo 8*3=24초)로 분할돼 채워진다."""
     script = _client().generate_script("강아지 닭가슴살 간식 적정량")
-    assert len(script.beats) == 4
+    assert len(script.beats) == 3
     assert all(b.strip() for b in script.beats)
 
 
 def test_split_into_beats_by_lines():
-    assert _split_into_beats("훅\n설명1\n설명2\n마무리") == ["훅", "설명1", "설명2", "마무리"]
+    # 기본 n=3 — 정확히 3줄이면 그대로 3비트(훅·핵심·마무리).
+    assert _split_into_beats("훅\n핵심\n마무리") == ["훅", "핵심", "마무리"]
+
+
+def test_split_into_beats_default_n_is_three():
+    """기본 인자(n=3)로 3줄 입력이 정확히 3비트로 분할된다(4→3 마이그레이션 회귀 가드)."""
+    assert _split_into_beats("가\n나\n다") == ["가", "나", "다"]
+
+
+def test_script_system_prompt_specifies_three_beats():
+    """SCRIPT_SYSTEM_PROMPT가 '정확히 3'을 명시한다(4비트로 되돌리면 실패 — 리버트 가드)."""
+    assert "정확히 3" in SCRIPT_SYSTEM_PROMPT
 
 
 def test_split_into_beats_strips_bullets_and_numbers():
-    assert _split_into_beats("1. 훅\n2. 설명\n3. 설명2\n4. 끝") == ["훅", "설명", "설명2", "끝"]
+    assert _split_into_beats("1. 훅\n2. 핵심\n3. 마무리") == ["훅", "핵심", "마무리"]
 
 
 def test_split_into_beats_falls_back_to_sentences():
@@ -179,9 +191,9 @@ def test_fact_check_parse_failure_fails_safe():
 
 def test_generate_script_live_populates_beats():
     """라이브 Anthropic 경로도 beats를 채운다(되돌리면 영상이 8초 단일컷으로 퇴화 → 회귀 핀)."""
-    msg = _Msg([_Block("text", text="훅 문장\n설명1 문장\n설명2 문장\n마무리 문장")])
+    msg = _Msg([_Block("text", text="훅 문장\n핵심 문장\n마무리 문장")])
     script = _live_client(msg).generate_script("강아지 간식")
-    assert len(script.beats) == 4
+    assert len(script.beats) == 3
     assert script.beats[0] == "훅 문장"
     assert script.beats[-1] == "마무리 문장"
     # 안전 불변식: 생성 단계는 fact_checked=False여야 한다(오직 fact_check_script만 승격).
