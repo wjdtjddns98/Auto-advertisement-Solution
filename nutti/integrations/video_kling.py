@@ -277,6 +277,8 @@ class GeminiTtsClient(_HttpClosingMixin):
         data = _send_json(
             lambda: self._client().post(url, headers=_gemini_headers(self.settings), json=body),
             "Gemini TTS 합성",
+            sleep=self._sleep,
+            max_transient_retries=_MAX_TRANSIENT_RETRIES,
         )
         pcm, rate = self._extract_audio(data)
         wav = _pcm_to_wav_bytes(pcm, rate)
@@ -367,6 +369,12 @@ class KlingClient(_HttpClosingMixin):
         self._http = http
         self._sleep = sleep if sleep is not None else time.sleep
         self._model = _validate_model_id(settings.kling_model)
+        # fal 큐의 status/result 조회는 **앱 ID(앞 2세그먼트, 예: "fal-ai/kling-video")**만 쓴다.
+        # 전체 모델 경로(".../v2.1/standard/image-to-video")는 제출(POST)에만 유효하고,
+        # status/result(GET)에 그대로 붙이면 405(Method Not Allowed)가 난다 — fal 큐는
+        # 작업을 앱 단위로 추적하기 때문이다. 검증된 model_id에서 앞 2세그먼트만 떼어 구성한다.
+        _segs = self._model.split("/")
+        self._app_id = "/".join(_segs[:2]) if len(_segs) >= 2 else self._model
         self._interval = float(settings.kling_poll_interval_sec)
         if self._interval <= 0:
             raise ValueError(f"kling_poll_interval_sec는 0보다 커야 합니다(현재 {self._interval})")
@@ -421,7 +429,7 @@ class KlingClient(_HttpClosingMixin):
 
         경계는 `< timeout`(off-by-one 방지). 폴링/결과 URL은 request_id로 직접 구성한다.
         """
-        status_url = f"{_FAL_QUEUE_BASE}/{self._model}/requests/{request_id}/status"
+        status_url = f"{_FAL_QUEUE_BASE}/{self._app_id}/requests/{request_id}/status"
         elapsed = 0.0
         while elapsed < self._timeout:
             data, backoff_sec = self._status_once(status_url)
@@ -462,7 +470,7 @@ class KlingClient(_HttpClosingMixin):
 
     def _fetch_result_url(self, request_id: str) -> str:
         """완료된 작업의 결과를 받아 영상 URL을 방어적으로 추출·검증해 반환한다."""
-        result_url = f"{_FAL_QUEUE_BASE}/{self._model}/requests/{request_id}"
+        result_url = f"{_FAL_QUEUE_BASE}/{self._app_id}/requests/{request_id}"
         data = _send_json(
             lambda: self._client().get(result_url, headers=_fal_headers(self.settings)),
             "Kling 결과 조회",

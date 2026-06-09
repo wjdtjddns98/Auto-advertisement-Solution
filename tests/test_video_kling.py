@@ -569,6 +569,40 @@ def test_kling_client_generate_success_returns_path(tmp_path):
     assert len(fake.status_calls) == 3
 
 
+def test_kling_client_status_result_urls_use_app_id_not_full_model(tmp_path):
+    """회귀(405): status/result 조회는 앱 ID(fal-ai/kling-video)만 써야 한다.
+
+    제출(POST)은 전체 모델 경로(.../v2.1/standard/image-to-video)로 가지만, fal 큐의
+    status/result(GET)에 전체 경로를 붙이면 405가 난다. 제출은 full path, status·result는
+    app id만 쓰는지 URL을 직접 검증해 그 버그가 재발하지 않도록 고정한다.
+    """
+    fake = FakeKlingHttp(
+        post_response=_Resp(json_data={"request_id": "req-app-001"}),
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        get_result_response=_Resp(
+            json_data={"video": {"url": "https://fal.media/clips/v.mp4"}}
+        ),
+        download_response=_Resp(content=b"X"),
+    )
+    client = _kling_client(
+        tmp_path,
+        fake,
+        NUTTI_KLING_MODEL="fal-ai/kling-video/v2.1/standard/image-to-video",
+    )
+    client.generate(_frame_file(tmp_path), "a dog mascot", 5)
+    # 제출 URL은 전체 모델 경로를 그대로 쓴다.
+    submit_url = fake.post_calls[0][0]
+    assert submit_url.endswith("/fal-ai/kling-video/v2.1/standard/image-to-video")
+    # status·result URL은 앱 ID(fal-ai/kling-video)만 — 깊은 경로가 끼면 안 된다(405 원인).
+    status_url = fake.status_calls[0]
+    result_url = fake.result_calls[0]
+    assert "/fal-ai/kling-video/requests/req-app-001/status" in status_url
+    assert status_url.endswith("/fal-ai/kling-video/requests/req-app-001/status")
+    assert result_url.endswith("/fal-ai/kling-video/requests/req-app-001")
+    assert "/v2.1/standard/image-to-video/requests/" not in status_url
+    assert "/v2.1/standard/image-to-video/requests/" not in result_url
+
+
 def test_kling_client_error_status_raises_render_error(tmp_path):
     """status=ERROR면 VideoRenderError를 던진다."""
     fake = FakeKlingHttp(
@@ -959,6 +993,46 @@ def test_tts_synthesize_camelcase_inline_data(tmp_path):
     path, duration = client.synthesize("테스트")
     assert Path(path).exists()
     assert duration > 0
+
+
+class _MultiTtsHttp:
+    """post 호출마다 순서대로 다른 응답을 돌려주는 TTS fake(일시 오류 재시도 검증용)."""
+
+    def __init__(self, responses: list[_Resp]):
+        self._responses = iter(responses)
+        self.post_calls: list[tuple[str, dict | None]] = []
+        self.closed = False
+
+    def post(self, url, *, headers=None, json=None):
+        self.post_calls.append((url, json))
+        return next(self._responses)
+
+    def close(self):
+        self.closed = True
+
+
+def test_tts_synthesize_retries_transient_429_then_succeeds(tmp_path):
+    """회귀: TTS 합성 중 일시적 429(분당 한도)는 backoff 후 재시도해 성공한다.
+
+    TTS도 프레임과 동일한 Gemini generateContent라 RPM 한도에 걸릴 수 있다.
+    """
+    pcm = _make_pcm(100)
+    fake = _MultiTtsHttp([_Resp(status_code=429), _tts_audio_response(pcm)])
+    client = _tts_client(tmp_path, fake)
+    path, duration = client.synthesize("안녕하세요")
+    assert Path(path).exists()
+    assert duration > 0
+    assert len(fake.post_calls) == 2  # 429 1회 + 재시도 성공 1회
+
+
+def test_tts_synthesize_transient_429_exhausted_raises(tmp_path):
+    """회귀: 연속 429가 재시도 한도를 넘으면 VideoRenderError로 전파된다(무한루프 금지)."""
+    fake = FakeTtsHttp(response=_Resp(status_code=429))
+    client = _tts_client(tmp_path, fake)
+    with pytest.raises(VideoRenderError) as exc_info:
+        client.synthesize("안녕하세요")
+    assert "429" in str(exc_info.value)
+    assert len(fake.post_calls) == 1 + 3  # 최초 1회 + 일시 오류 재시도 3회
 
 
 def test_tts_synthesize_missing_audio_part_raises(tmp_path):
