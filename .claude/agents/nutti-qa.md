@@ -21,6 +21,12 @@ run, observe, and report.
 ## Output
 - **verdict**: PASS or FAIL (overall).
 - **evidence**: per-check command + result summary (paste the key lines).
-- **failures**: any failing tests/criteria with the actual error (so the developer can fix).
+- **failures**: actionable items a fix-developer can execute WITHOUT re-diagnosing — for each:
+  the exact failing test/criterion, the command to reproduce it, the error message, and the
+  file you suspect. (Your FAIL report feeds an automatic fix→re-QA loop; vague failures waste
+  a whole cycle.)
 Be skeptical: do not declare PASS without having actually run the commands. If a criterion
-can't be verified without API keys, mark it "blocked (needs keys)" rather than PASS.
+can't be verified without API keys, mark it "blocked (needs keys)" rather than PASS — blocked
+items do NOT make the verdict FAIL. Known environment artifact: if a test fails purely from
+sandbox network blocking (connection refused on localhost fixtures), note it as
+"env-artifact (CI는 통과)" instead of FAIL, and say so in evidence.

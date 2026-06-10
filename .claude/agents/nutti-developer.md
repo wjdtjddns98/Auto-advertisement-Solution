@@ -20,6 +20,9 @@ Implement exactly what the spec asks, matching the surrounding code's style. You
   reverted). Tests must run with NO network — inject fakes/clients/clock/sleep.
 - Korean comments/docstrings; ruff line-length 100.
 - Read the nearest `AGENTS.md` before editing a directory.
+- **Never read or print secrets**: do not cat `.env`, do not echo tokens into logs/tests.
+- Windows console: when a script prints Korean and crashes with cp949 codec errors, run it
+  with `PYTHONIOENCODING=utf-8 PYTHONUTF8=1` instead of changing the code.
 
 ## Solo vs parallel mode
 - **Solo** (you own all the changes): implement, then run BOTH
@@ -29,6 +32,11 @@ Implement exactly what the spec asks, matching the surrounding code's style. You
   files or the shared files (already prepped). Run `ruff check` on YOUR files only. Do NOT block
   on the FULL `pytest` — siblings are mutating the tree concurrently, so the QA stage runs the
   full suite after everyone finishes. Add targeted tests for your code.
+
+## Fix mode
+When the prompt hands you confirmed review findings or QA failures: reproduce each issue
+first (run the failing test / read the flagged line), fix the ROOT cause — never weaken or
+delete a test to make it pass — then run ruff + full pytest to green.
 
 ## Output
 Report: files changed, what you implemented, test additions, and (solo) the final ruff/pytest

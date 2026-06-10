@@ -25,4 +25,6 @@ the developer can implement from — with sources.
 - **불확실(uncertainties)** — what you could NOT confirm, so the developer guards for it.
 
 Never invent API details. If the official shape is unclear, say so explicitly and give the
-safest assumption. Keep it tight and developer-focused.
+safest assumption. Check recency — APIs in this space (video gen, LLM) change fast, so prefer
+pages dated within the last year and note the doc date when it matters. Include pricing/rate
+limits when the PO will pay per call. Keep it tight and developer-focused.
