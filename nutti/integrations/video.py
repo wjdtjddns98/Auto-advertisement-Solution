@@ -741,6 +741,7 @@ class VideoStudio:
         veo_client=None,
         kling_client=None,
         tts_client=None,
+        lipsync_client=None,
         sleep=None,
     ):
         # 실연동 클라이언트는 주입 가능하게 받는다(테스트에서 fake 주입 → 네트워크 불요).
@@ -751,6 +752,9 @@ class VideoStudio:
         # kling 백엔드(무음 영상 + 한국어 TTS 보이스오버)용 주입 클라이언트.
         self._kling_client = kling_client
         self._tts_client = tts_client
+        # lipsync 백엔드(ElevenLabs TTS + 립싱크 영상)용 주입 클라이언트.
+        # tts_client는 lipsync 경로에서도 재사용(ElevenLabsTtsClient 또는 fake).
+        self._lipsync_client = lipsync_client
         # 폴링 대기용 sleep 주입(기본 time.sleep). 테스트에서 가짜 시계로 대체.
         self._sleep = sleep
 
@@ -775,6 +779,22 @@ class VideoStudio:
                 raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 TTS에 필수입니다.")
             if self._kling_client is None and not _usable_key(self.settings.fal_key):
                 raise ValueError("FAL_KEY가 비어 있습니다 — kling 백엔드(dry_run=False) 시 필수입니다.")
+            return
+        if self.settings.video_backend == "lipsync":
+            # lipsync 백엔드: 시작 프레임(NanoBanana=Gemini) + ElevenLabs TTS + Hedra 립싱크
+            # 세 키 모두 필수이며, 클라이언트가 주입된 경우 해당 키 검사를 건너뛴다.
+            if self._nano_client is None and not _usable_key(self.settings.gemini_api_key):
+                raise ValueError(
+                    "GEMINI_API_KEY가 비어 있습니다 — lipsync 백엔드의 시작 프레임 생성에 필수입니다."
+                )
+            if self._tts_client is None and not _usable_key(self.settings.elevenlabs_api_key):
+                raise ValueError(
+                    "ELEVENLABS_API_KEY가 비어 있습니다 — lipsync 백엔드의 TTS에 필수입니다."
+                )
+            if self._lipsync_client is None and not _usable_key(self.settings.hedra_api_key):
+                raise ValueError(
+                    "HEDRA_API_KEY가 비어 있습니다 — lipsync 백엔드(dry_run=False) 시 필수입니다."
+                )
             return
         needs_key = self._nano_client is None or self._veo_client is None
         if needs_key and not _usable_key(self.settings.gemini_api_key):
@@ -832,12 +852,15 @@ class VideoStudio:
         """비트별 클립을 생성해 ffmpeg로 이어붙인 (최종 경로, 실측 총길이초)를 반환한다(백엔드 분기).
 
         `video_backend`가 "kling"이면 무음 Kling 영상 + 한국어 TTS 보이스오버 백엔드로
-        비트 클립을 만들고, 그 외(기본 "veo")는 Veo 네이티브 음성 경로를 쓴다.
-        실측 총길이초는 kling 경로에서만 채워지고(클립이 5/10초·음성 길이로 잘림),
+        비트 클립을 만들고, "lipsync"이면 ElevenLabs TTS + 립싱크 영상 백엔드를 쓴다.
+        그 외(기본 "veo")는 Veo 네이티브 음성 경로를 쓴다.
+        실측 총길이초는 kling/lipsync 경로에서만 채워지고(클립 길이가 음성 길이에 맞춰짐),
         veo 경로는 None을 돌려줘 호출부의 8.0×N 계산을 그대로 쓰게 한다.
         """
         if self.settings.video_backend == "kling":
             return self._produce_clips_kling(frame_path, beats)
+        if self.settings.video_backend == "lipsync":
+            return self._produce_clips_lipsync(frame_path, beats)
         return self._produce_clips_veo(frame_path, beats), None
 
     def _produce_clips_kling(self, frame_path: str, beats: list[str]) -> tuple[str, float]:
@@ -852,6 +875,26 @@ class VideoStudio:
         backend = KlingVoiceoverBackend(
             self.settings,
             kling_client=self._kling_client,
+            tts_client=self._tts_client,
+            sleep=self._sleep,
+        )
+        clips, total_sec = backend.produce_beat_clips(frame_path, beats)
+        return self._stitch(clips), total_sec
+
+    def _produce_clips_lipsync(self, frame_path: str, beats: list[str]) -> tuple[str, float]:
+        """ElevenLabs TTS + 립싱크 영상 백엔드로 비트 클립을 만들고 스티칭한다.
+
+        무거운 의존(video_lipsync·ElevenLabs)을 import-time에 끌어오지 않도록
+        지연 import한다(httpx·imageio_ffmpeg와 동일한 lazy 패턴).
+        tts_client는 lipsync 경로의 음성원으로 배선되며, lipsync_client는
+        음성으로 마스코트 입을 구동하는 립싱크 영상 백엔드다.
+        백엔드가 돌려준 실측 총길이초를 함께 반환해 duration_sec을 정확히 채운다.
+        """
+        from nutti.integrations.video_lipsync import LipsyncBackend
+
+        backend = LipsyncBackend(
+            self.settings,
+            lipsync_client=self._lipsync_client,
             tts_client=self._tts_client,
             sleep=self._sleep,
         )

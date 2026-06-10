@@ -63,6 +63,29 @@ class Settings(BaseSettings):
     # Gemini 사전구성 음성 이름(한국어 발화 지원). 예: Kore, Puck, Charon, Aoede 등.
     tts_voice: str = Field(default="Kore", alias="NUTTI_TTS_VOICE")
 
+    # 2단계-lipsync: ElevenLabs TTS(한국어 아이 목소리) + Hedra Character-3 립싱크 영상.
+    # video_backend="lipsync"일 때만 쓰며, dry_run에선 전혀 호출되지 않는다.
+    # ElevenLabs 전용 키 — api.elevenlabs.io에만 첨부(CDN 등 타 호스트 유출 금지).
+    elevenlabs_api_key: str = Field(default="", alias="ELEVENLABS_API_KEY")
+    elevenlabs_model_id: str = Field(
+        default="eleven_multilingual_v2", alias="NUTTI_ELEVENLABS_MODEL"
+    )
+    # 프리메이드(영숫자) 또는 사용자 생성/클론(UUIDv4, 하이픈 포함) voice_id 모두 허용.
+    elevenlabs_voice_id: str = Field(
+        default="21m00Tcm4TlvDq8ikWAM", alias="NUTTI_ELEVENLABS_VOICE_ID"
+    )
+    # Hedra 전용 키 — api.hedra.com에만 첨부(CDN 다운로드엔 미첨부, 키 격리).
+    hedra_api_key: str = Field(default="", alias="HEDRA_API_KEY")
+    lipsync_model: str = Field(default="character-3", alias="NUTTI_LIPSYNC_MODEL")
+    lipsync_poll_interval_sec: float = Field(
+        default=10.0, alias="NUTTI_LIPSYNC_POLL_INTERVAL_SEC"
+    )
+    lipsync_timeout_sec: float = Field(default=600.0, alias="NUTTI_LIPSYNC_TIMEOUT_SEC")
+    # 결과 영상 다운로드를 추가로 허용할 정확 호스트(콤마 구분). 기본 안전 호스트
+    # (api.hedra.com·hedra.com) 외에 라이브로 확인된 Hedra 전용 CDN 호스트만 넣는다 —
+    # 와일드카드/스킴/경로/포트가 든 항목은 파서가 버린다(SSRF 재유입 차단).
+    hedra_download_hosts: str = Field(default="", alias="NUTTI_HEDRA_DOWNLOAD_HOSTS")
+
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
     google_service_account_json: str = Field(default="", alias="GOOGLE_SERVICE_ACCOUNT_JSON")
