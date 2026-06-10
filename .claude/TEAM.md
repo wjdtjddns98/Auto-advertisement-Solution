@@ -7,7 +7,7 @@
 
 | 역할 | 에이전트 | 모델 | 하는 일 |
 |------|----------|------|---------|
-| 🧭 기획 보조 | `nutti-planner` | opus | PO 지시 → 구체 스펙·작업분해·수용기준·리서치 주제 |
+| 🧭 기획 보조 | `nutti-planner` | **opus** | PO 지시 → 구체 스펙·작업분해·수용기준·리서치 주제 (전체 설계) |
 | 🔬 리서치 | `nutti-researcher` | sonnet | 외부 API/SDK 조사 → 출처 포함 구현 노트 |
 | 💻 개발 | `nutti-developer` | **sonnet** | 스펙대로 구현 + 테스트. **workstream(기능)별 병렬**. opus는 옵트인 |
 | 🔍 코드리뷰 | `nutti-reviewer` | sonnet | 적대적 리뷰(결함·보안·회귀·테스트) |
@@ -25,10 +25,10 @@ Workflow({ name: 'nutti-team', args: '<원하는 기능/작업 한 줄>' })
 파이프라인:
 ```
 기획(planner) → [리서치·필요시 병렬]
-   → 공유파일 선처리(1명) → 개발(opus) ×N 병렬 (workstream=기능 단위, 파일 분리)
-   → 리뷰(reviewer) ↔ 수정(opus) 루프(최대 2회) → QA(qa, 전체 테스트) → 보고(reporter)
+   → 공유파일 선처리(1명) → 개발(sonnet) ×N 병렬 (workstream=기능 단위, 파일 분리)
+   → 리뷰(reviewer) ↔ 수정(sonnet) 루프(최대 2회) → QA(qa, 전체 테스트) → 보고(reporter)
 ```
-> planner가 작업을 **파일이 겹치지 않는 workstream**으로 쪼개고, workstream마다 opus 개발자
+> planner가 작업을 **파일이 겹치지 않는 workstream**으로 쪼개고, workstream마다 sonnet 개발자
 > 1명씩 **병렬**로 붙습니다. 공유 파일(models/config)은 먼저 1명이 선처리 → 충돌 방지.
 
 결과로 `plan / research / build / review_findings / qa / report_markdown`가 돌아옵니다.
@@ -42,7 +42,7 @@ DB에 기록(원하면).
 `Agent(subagent_type: 'nutti-researcher', prompt: 'Hedra Character-3 API 조사')` 등.
 
 ## 비용/모델 (economy 기본)
-- 기획·개발·수정 = **sonnet** (토큰 절감), 보고·반박검증 = **haiku**, 리뷰 차원 = sonnet.
+- **기획 = opus**(전체 설계 품질), 개발·수정 = **sonnet** (토큰 절감), 보고·반박검증 = **haiku**, 리뷰 차원 = sonnet.
 - **적대적 리뷰 유지** (차원별 sonnet → 반박검증 haiku → 확정 결함 → 수정) — 싼 개발자가 놓친 걸 리뷰가 잡음.
 
 ### PO 옵션 (지시문에 단어만 넣으면 됨)
