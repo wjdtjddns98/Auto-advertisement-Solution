@@ -35,8 +35,11 @@ data/
 .vscode/
 *.swp
 
-# Claude Code 로컬 설정(에이전트·워크플로는 추적, 로컬 설정만 제외)
+# Claude Code 로컬 설정(에이전트·워크플로·TEAM.md는 추적, 로컬 설정·자격증명·워크트리만 제외)
 .claude/settings.local.json
+.claude/settings.json
+.claude/worktrees/
+.claude/.credentials.json
 
 # OS 파일
 Thumbs.db
