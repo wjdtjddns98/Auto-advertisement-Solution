@@ -40,13 +40,8 @@ N8n 스케줄러가 `nutti run`(또는 파이썬 함수)을 호출하고, 실제
 `nutti/storage`)은 dry_run 분기에서 네트워크/SDK 없이 더미 결과를 반환해야 한다.
 실제 연동을 추가할 때도 이 계약을 깨지 말 것.
 
-### 개발 워크플로 (이 저장소의 표준 — 반드시 준수)
-- **브랜칭**: GitHub Flow + dev. `main`(프로덕션, 보호됨) ← `dev`(통합) ← `feat/*`·`fix/*`·`docs/*`.
-- **커밋 전 검증**: `./.venv/Scripts/python.exe -m ruff check .` 와 `-m pytest -q` 둘 다 green 필수.
-- **CI**: push/PR(main·dev)마다 `.github/workflows/ci.yml`이 ruff+pytest(3.11/3.12/3.13) 실행.
-- **PR**: `gh pr create --base dev`. **dev 머지는 자동**(단 리뷰어 재검증/approve 후에만). **main 머지는 PO 명시 승인 후에만.** 상세 정책은 루트 `CLAUDE.md` 참고.
-- **완료 전**: 멀티에이전트 적대적 코드리뷰 루프(리뷰 차원 → 반박검증 → 수정 → clean까지) 권장.
-- **에이전트 모델 라우팅**: 깊은 추론=opus, 표준=sonnet, 대량·기계적(검색·반박검증)=haiku.
+### 개발 워크플로 · 모델 라우팅
+브랜칭·커밋 전 검증·CI·PR·머지 정책·적대적 리뷰 루프·모델 라우팅은 루트 `CLAUDE.md`가 단일 출처 — 그것을 따른다.
 
 ### Testing Requirements
 - 모든 단위 테스트는 dry_run 또는 fake 주입으로 **네트워크 없이** 돌아야 한다.
