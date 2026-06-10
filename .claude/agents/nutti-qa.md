@@ -27,6 +27,9 @@ run, observe, and report.
   a whole cycle.)
 Be skeptical: do not declare PASS without having actually run the commands. If a criterion
 can't be verified without API keys, mark it "blocked (needs keys)" rather than PASS — blocked
-items do NOT make the verdict FAIL. Known environment artifact: if a test fails purely from
-sandbox network blocking (connection refused on localhost fixtures), note it as
-"env-artifact (CI는 통과)" instead of FAIL, and say so in evidence.
+items do NOT make the verdict FAIL.
+**NetworkAccessBlockedError 처리 지침**: `tests/conftest.py`의 `_block_real_network` 격리
+가드가 발동해 `NetworkAccessBlockedError`가 발생하면 이는 환경 아티팩트가 아니라
+**테스트 격리 위반 = 진짜 결함**이다. 해당 테스트가 fake 주입·dry_run 격리를 깨고 실제
+네트워크 전송을 시도했다는 신호이므로 **FAIL로 보고**하라. "env-artifact (CI는 통과)"로
+무마하지 말 것 — 로컬에서 발동했다면 코드(또는 test fixture) 수정이 필요하다.
