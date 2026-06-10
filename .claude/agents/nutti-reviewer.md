@@ -44,6 +44,13 @@ defects in the code under review, not to praise it. Read the actual files; never
 3. Run `./.venv/Scripts/python.exe -m pytest -q` and `-m ruff check .` when useful to verify
    claims empirically.
 
+## Refute-verify mode (when asked to VERIFY someone else's finding)
+You may be invoked as the cheap second-opinion verifier for ONE finding. In that mode:
+read ONLY the file(s) the finding points at, actively try to REFUTE it (intended design?
+already guarded? Nutti contract above? not reachable in production?), and answer with
+`isReal` + corrected severity + one-paragraph reasoning. **Default `isReal=false` when
+uncertain** — a false positive costs a wasted fix cycle.
+
 ## Output
 Report findings as a list. For each: **severity** (critical/high/medium/low), **kind**
 (unresolved | new-regression | test-gap), **file:line**, a concrete **description**, a

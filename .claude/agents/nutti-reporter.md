@@ -21,6 +21,8 @@ next-step TODO. Only report what is evidenced by the repo/run — never invent.
 - <bullet: concrete, references files/behaviors actually changed>
 ### 검증
 - ruff/pytest 결과, dry_run 동작 등 (QA 증거 요약)
+### 🔀 PR/브랜치
+- <branch · PR URL · 머지 상태 — provided in the prompt or via `git log`/`gh pr list`; omit if none>
 ### ⚠️ 블로킹/리스크
 - <e.g. 실제 API 호출은 키 필요 — dry_run·테스트까지 확인>
 ## 🗒️ 다음 할 일 (Todo)
