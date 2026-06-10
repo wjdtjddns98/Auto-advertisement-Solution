@@ -1,9 +1,9 @@
 export const meta = {
   name: 'nutti-team',
-  description: 'Autonomous role-specialized team (economy): plan -> research -> parallel build (sonnet) -> adversarial review (sonnet dims + haiku verify) <-> fix -> QA -> report. Args directive. Add "opus" to args for an opus developer, "lite" to skip research/report.',
+  description: 'Autonomous role-specialized team (economy): plan (opus) -> research -> parallel build (sonnet) -> adversarial review (sonnet dims + haiku verify) <-> fix -> QA -> report. Args directive. Add "opus" to args for an opus developer, "lite" to skip research/report.',
   whenToUse: 'When the PO gives a feature/work directive and wants the team to implement, adversarially review, verify, and report it autonomously at low cost.',
   phases: [
-    { title: 'Plan', model: 'sonnet' },
+    { title: 'Plan', model: 'opus' },
     { title: 'Research', model: 'sonnet' },
     { title: 'Build', model: 'sonnet' },
     { title: 'Review', model: 'sonnet' },
@@ -43,7 +43,7 @@ const REPORT_SCHEMA = { type: 'object', properties: { markdown: { type: 'string'
 phase('Plan')
 const plan = await agent(
   `You are the planner. PO directive:\n\n"${directive}"\n\nProduce a concrete, file-level spec for the Nutti project. Split into WORKSTREAMS with DISJOINT file ownership (parallel build, no conflict). Shared files (models.py/config.py) go in shared_prep (done once first), NOT in any workstream. 1-4 workstreams; 1 if indivisible.`,
-  { label: 'plan', phase: 'Plan', model: 'sonnet', agentType: 'nutti-planner', schema: PLAN_SCHEMA }
+  { label: 'plan', phase: 'Plan', model: 'opus', agentType: 'nutti-planner', schema: PLAN_SCHEMA }
 )
 
 // --- Research (skip in lite) ---
