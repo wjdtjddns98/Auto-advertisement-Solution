@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -49,7 +50,7 @@ class Settings(BaseSettings):
     # 영상 백엔드 선택: "veo"(기본, 네이티브 한국어 음성) | "kling"(무음 영상 + 한국어 TTS 보이스오버).
     # Kling은 네이티브 한국어 음성이 불가(v3는 영어로 자동번역, v1.6/2.1은 무음)하므로,
     # 무음 영상을 생성하고 Gemini TTS로 한국어 내레이션을 별도 합성해 mux한다(립싱크 포기·보이스오버).
-    video_backend: str = Field(default="veo", alias="NUTTI_VIDEO_BACKEND")
+    video_backend: Literal["veo", "kling"] = Field(default="veo", alias="NUTTI_VIDEO_BACKEND")
     # 2단계-Kling: fal.ai Kling image-to-video(무음). FAL_KEY는 fal.ai 대시보드에서 발급.
     fal_key: str = Field(default="", alias="FAL_KEY")
     # 기본 v2.1 standard — 무음·최저가($0.084/s)·5·10초 길이. v3는 duration 자유지만 가격 미확정.
@@ -63,8 +64,7 @@ class Settings(BaseSettings):
     # Gemini 사전구성 음성 이름(한국어 발화 지원). 예: Kore, Puck, Charon, Aoede 등.
     tts_voice: str = Field(default="Kore", alias="NUTTI_TTS_VOICE")
 
-    # 2단계-lipsync: ElevenLabs TTS(한국어 아이 목소리) + Hedra Character-3 립싱크 영상.
-    # video_backend="lipsync"일 때만 쓰며, dry_run에선 전혀 호출되지 않는다.
+    # ElevenLabs TTS(한국어 아이 목소리) — Kling LipSync 후처리에서 아이 목소리로 재사용 예정.
     # ElevenLabs 전용 키 — api.elevenlabs.io에만 첨부(CDN 등 타 호스트 유출 금지).
     elevenlabs_api_key: str = Field(default="", alias="ELEVENLABS_API_KEY")
     elevenlabs_model_id: str = Field(
@@ -74,17 +74,6 @@ class Settings(BaseSettings):
     elevenlabs_voice_id: str = Field(
         default="21m00Tcm4TlvDq8ikWAM", alias="NUTTI_ELEVENLABS_VOICE_ID"
     )
-    # Hedra 전용 키 — api.hedra.com에만 첨부(CDN 다운로드엔 미첨부, 키 격리).
-    hedra_api_key: str = Field(default="", alias="HEDRA_API_KEY")
-    lipsync_model: str = Field(default="character-3", alias="NUTTI_LIPSYNC_MODEL")
-    lipsync_poll_interval_sec: float = Field(
-        default=10.0, alias="NUTTI_LIPSYNC_POLL_INTERVAL_SEC"
-    )
-    lipsync_timeout_sec: float = Field(default=600.0, alias="NUTTI_LIPSYNC_TIMEOUT_SEC")
-    # 결과 영상 다운로드를 추가로 허용할 정확 호스트(콤마 구분). 기본 안전 호스트
-    # (api.hedra.com·hedra.com) 외에 라이브로 확인된 Hedra 전용 CDN 호스트만 넣는다 —
-    # 와일드카드/스킴/경로/포트가 든 항목은 파서가 버린다(SSRF 재유입 차단).
-    hedra_download_hosts: str = Field(default="", alias="NUTTI_HEDRA_DOWNLOAD_HOSTS")
 
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")

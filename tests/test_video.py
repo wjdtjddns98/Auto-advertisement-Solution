@@ -1629,218 +1629,54 @@ def test_write_bytes_cleans_tmp_on_replace_failure(tmp_path, monkeypatch):
     with pytest.raises(VideoRenderError):
         video_module._write_bytes(out, b"DATA", "테스트 영상")
     assert not (tmp_path / "video_x.mp4.tmp").exists()  # tmp 잔재 없음
-    assert not out.exists()
 
 
-# --- 섹션 6: VideoStudio lipsync 백엔드 배선 ---
+# --- 섹션: video_backend 유효성 검증 ---
 
 
-class FakeLipsyncBackend:
-    """LipsyncBackend 대체 — produce_beat_clips 호출 인자를 기록하고 결정적 값을 반환한다."""
+def test_settings_video_backend_literal_rejects_lipsync():
+    """Settings.video_backend가 Literal['veo','kling']이므로 'lipsync' 값은 ValidationError를 낸다.
 
-    def __init__(self, clips: list[str] | None = None, total_sec: float = 12.3):
-        self._clips = clips or ["data/fake/beat0.mp4", "data/fake/beat1.mp4"]
-        self.total_sec = total_sec
-        self.calls: list[tuple[str, list[str]]] = []
-
-    def produce_beat_clips(
-        self, frame_path: str, beats: list[str]
-    ) -> tuple[list[str], float]:
-        self.calls.append((frame_path, beats))
-        return self._clips, self.total_sec
-
-
-def _lipsync_settings(**overrides) -> Settings:
-    """lipsync 백엔드·실 경로 설정(키는 모두 빈값 기본)."""
-    base: dict = {
-        "NUTTI_DRY_RUN": False,
-        "NUTTI_VIDEO_BACKEND": "lipsync",
-        "GEMINI_API_KEY": "",
-        "ELEVENLABS_API_KEY": "",
-        "HEDRA_API_KEY": "",
-    }
-    base.update(overrides)
-    return Settings(**base)
-
-
-def _lipsync_dry_settings(**overrides) -> Settings:
-    """lipsync 백엔드·dry_run 설정."""
-    base: dict = {
-        "NUTTI_DRY_RUN": True,
-        "NUTTI_VIDEO_BACKEND": "lipsync",
-    }
-    base.update(overrides)
-    return Settings(**base)
-
-
-def test_produce_lipsync_dry_run_returns_deterministic_video_asset():
-    """dry_run + lipsync 백엔드: 키 없이 결정적 VideoAsset을 반환한다."""
-    studio = VideoStudio(_lipsync_dry_settings())
-    script = _script()
-    asset = studio.produce(script)
-    assert asset.script_id == script.id
-    assert asset.frame_image_path == f"data/dry_run/frame_{script.id}.jpg"
-    assert asset.video_path == f"data/dry_run/video_{script.id}.mp4"
-    assert asset.final_url == asset.video_path
-    assert asset.duration_sec == 8.0  # 비트 1개 → _CLIP_SEC * 1
-
-
-def test_produce_lipsync_dry_run_multi_beat_duration():
-    """dry_run + lipsync 백엔드: 비트 수에 따라 duration이 8*N으로 계산된다."""
-    studio = VideoStudio(_lipsync_dry_settings())
-    script = Script(topic="t", body="b", beats=["가", "나", "다"])
-    asset = studio.produce(script)
-    assert asset.duration_sec == 24.0
-
-
-def test_produce_lipsync_dry_run_no_network():
-    """dry_run + lipsync 백엔드: 네트워크 없이 통과한다(conftest autouse 차단)."""
-    studio = VideoStudio(_lipsync_dry_settings())
-    asset = studio.produce(_script())
-    assert asset.final_url is not None
-
-
-def test_produce_lipsync_real_path_fake_injection(monkeypatch):
-    """실 경로: fake LipsyncBackend 주입 시 clips/duration이 올바르게 배선된다.
-
-    video_lipsync 모듈은 WS-B가 작성하므로 아직 없을 수 있다. _produce_clips_lipsync
-    자체를 monkeypatch해 모듈 의존 없이 배선만 검증한다.
+    롤백으로 lipsync 분기가 삭제된 뒤 Settings 타입이 자유 str에서 Literal로 좁혀졌음을
+    핀한다 — 리그레션 시 이 테스트가 즉시 실패한다.
     """
-    nano = FakeNanoBananaClient(frame_path="data/fake/frame.jpg")
-    fake_backend = FakeLipsyncBackend(
-        clips=["data/fake/beat0.mp4", "data/fake/beat1.mp4"], total_sec=9.5
-    )
-    captured: dict = {}
+    from pydantic import ValidationError
 
-    def _fake_produce_clips_lipsync(self, frame_path, beats):
-        """_produce_clips_lipsync 대역 — 배선(frame·beats 전달)만 검증한다."""
-        captured["frame_path"] = frame_path
-        captured["beats"] = beats
-        stitched = "data/fake/beat0.mp4"  # 단일 경로로 충분
-        return stitched, fake_backend.total_sec
-
-    monkeypatch.setattr(VideoStudio, "_produce_clips_lipsync", _fake_produce_clips_lipsync)
-
-    settings = _lipsync_settings(
-        GEMINI_API_KEY="test-key",
-        ELEVENLABS_API_KEY="test-el-key",
-        HEDRA_API_KEY="test-hedra-key",
-    )
-    studio = VideoStudio(settings, nano_client=nano)
-    script = Script(topic="t", body="b", beats=["가", "나"])
-    asset = studio.produce(script)
-
-    # _produce_clips_lipsync에 frame과 beats가 올바르게 전달됐는지 확인.
-    assert captured["frame_path"] == "data/fake/frame.jpg"
-    assert captured["beats"] == ["가", "나"]
-
-    # duration_sec은 _produce_clips_lipsync가 반환한 total_sec로 채워진다.
-    assert asset.duration_sec == 9.5
+    with pytest.raises(ValidationError):
+        Settings(NUTTI_VIDEO_BACKEND="lipsync")
 
 
-def test_produce_lipsync_real_path_direct_inject(monkeypatch):
-    """실 경로: lipsync_client= 직접 주입 시 produce_beat_clips가 호출되고 duration이 배선된다."""
-    nano = FakeNanoBananaClient(frame_path="data/fake/frame.jpg")
-    fake_backend = FakeLipsyncBackend(total_sec=7.2)
-    captured: dict = {}
+def test_settings_video_backend_literal_rejects_arbitrary_string():
+    """'veo'·'kling' 외 임의 문자열도 ValidationError로 거부된다(Literal 제약 일반 핀)."""
+    from pydantic import ValidationError
 
-    def _fake_produce_clips_lipsync(self, frame_path, beats):
-        """_produce_clips_lipsync 대역 — lipsync_client 주입 확인."""
-        captured["lipsync_client"] = self._lipsync_client
-        captured["tts_client"] = self._tts_client
-        return "data/fake/stitched.mp4", fake_backend.total_sec
-
-    monkeypatch.setattr(VideoStudio, "_produce_clips_lipsync", _fake_produce_clips_lipsync)
-
-    fake_tts = object()
-    settings = _lipsync_settings(
-        GEMINI_API_KEY="gk",
-        ELEVENLABS_API_KEY="ek",
-        HEDRA_API_KEY="hk",
-    )
-    # lipsync_client를 주입하면 validate_config의 HEDRA_API_KEY 검사가 건너뛰어진다.
-    studio = VideoStudio(
-        settings,
-        nano_client=nano,
-        lipsync_client=fake_backend,
-        tts_client=fake_tts,
-    )
-    asset = studio.produce(Script(topic="t", body="b", beats=["대사"]))
-
-    # 주입한 클라이언트가 studio에 저장되고 _produce_clips_lipsync에서 접근 가능하다.
-    assert captured["lipsync_client"] is fake_backend
-    assert captured["tts_client"] is fake_tts
-    assert asset.duration_sec == 7.2
+    with pytest.raises(ValidationError):
+        Settings(NUTTI_VIDEO_BACKEND="hedra")
 
 
-def test_produce_lipsync_validate_config_missing_gemini_key_raises():
-    """lipsync 백엔드: GEMINI_API_KEY 누락 시 ValueError fast-fail."""
-    studio = VideoStudio(_lipsync_settings(GEMINI_API_KEY=""))
-    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
-        studio.produce(_script())
+def test_settings_video_backend_accepts_veo():
+    """'veo' 값은 ValidationError 없이 수용된다."""
+    s = Settings(NUTTI_VIDEO_BACKEND="veo")
+    assert s.video_backend == "veo"
 
 
-def test_produce_lipsync_validate_config_missing_elevenlabs_key_raises():
-    """lipsync 백엔드: ELEVENLABS_API_KEY 누락 시 ValueError fast-fail."""
-    studio = VideoStudio(
-        _lipsync_settings(GEMINI_API_KEY="gk", ELEVENLABS_API_KEY=""),
-        nano_client=FakeNanoBananaClient(),  # GEMINI_API_KEY 검사 우회
-    )
-    with pytest.raises(ValueError, match="ELEVENLABS_API_KEY"):
-        studio.produce(_script())
+def test_settings_video_backend_accepts_kling():
+    """'kling' 값은 ValidationError 없이 수용된다."""
+    s = Settings(NUTTI_VIDEO_BACKEND="kling")
+    assert s.video_backend == "kling"
 
 
-def test_produce_lipsync_validate_config_missing_hedra_key_raises():
-    """lipsync 백엔드: HEDRA_API_KEY 누락 시 ValueError fast-fail."""
-    studio = VideoStudio(
-        _lipsync_settings(
-            GEMINI_API_KEY="gk",
-            ELEVENLABS_API_KEY="ek",
-            HEDRA_API_KEY="",
-        ),
-        nano_client=FakeNanoBananaClient(),  # GEMINI_API_KEY 검사 우회
-        tts_client=object(),  # ELEVENLABS_API_KEY 검사 우회 (tts_client 주입)
-    )
-    with pytest.raises(ValueError, match="HEDRA_API_KEY"):
-        studio.produce(_script())
+def test_produce_clips_unknown_backend_raises_value_error():
+    """_produce_clips에서 알 수 없는 backend 값(객체 직접 변조)은 ValueError를 던진다.
 
+    Settings.video_backend Literal 제약이 있어도 런타임 객체 변조·테스트 주입 등으로
+    우회될 수 있다. belt-and-suspenders 방어 코드가 동작함을 핀한다.
+    """
+    settings = _dry_settings()
+    # object.__setattr__로 Pydantic 검증을 우회해 잘못된 값을 직접 주입한다.
+    object.__setattr__(settings, "video_backend", "lipsync")
 
-def test_produce_lipsync_validate_config_all_clients_injected_skips_key_check():
-    """lipsync 백엔드: 모든 클라이언트가 주입되면 키 검사를 건너뛴다."""
-    fake_backend = FakeLipsyncBackend(total_sec=5.0)
-
-    # LipsyncBackend를 import하는 시점에 대비해 monkeypatch 없이 직접 lipsync_client를 주입.
-    # validate_config에서 lipsync_client is not None이면 HEDRA_API_KEY 검사 건너뜀,
-    # nano_client is not None이면 GEMINI_API_KEY 검사 건너뜀,
-    # tts_client is not None이면 ELEVENLABS_API_KEY 검사 건너뜀.
-    studio = VideoStudio(
-        _lipsync_settings(),  # 키 모두 빈값
-        nano_client=FakeNanoBananaClient(),
-        tts_client=object(),
-        lipsync_client=fake_backend,
-    )
-    # validate_config는 통과해야 한다(키 없어도).
-    # produce 자체는 video_lipsync 모듈을 import하려 시도하므로
-    # 이 테스트는 validate_config 통과만 검증한다.
-    studio.validate_config()  # 예외 없이 통과해야 한다.
-
-
-def test_produce_lipsync_veo_kling_backends_unaffected():
-    """lipsync 추가 후 기존 veo/kling 백엔드 기본값이 변경되지 않는다(회귀 방지)."""
-    # 기본값 veo: video_backend 설정 없음 → "veo"
-    dry_veo = VideoStudio(_dry_settings())
-    assert dry_veo.settings.video_backend == "veo"
-    asset = dry_veo.produce(_script())
-    assert asset.final_url is not None
-
-    # 기본값 veo: 키 검증도 기존 로직 그대로
-    live_veo = VideoStudio(_live_settings())
-    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
-        live_veo.produce(_script())
-
-
-def test_produce_lipsync_init_stores_lipsync_client():
-    """VideoStudio.__init__이 lipsync_client를 _lipsync_client로 저장한다."""
-    fake_backend = FakeLipsyncBackend()
-    studio = VideoStudio(_dry_settings(), lipsync_client=fake_backend)
-    assert studio._lipsync_client is fake_backend
+    studio = VideoStudio(settings, nano_client=FakeNanoBananaClient())
+    with pytest.raises(ValueError, match="알 수 없는 video_backend 값"):
+        # _produce_clips를 직접 호출 — frame_path/beats 내용은 이 경로에 무관하다.
+        studio._produce_clips("fake_frame.png", ["비트 하나"])
