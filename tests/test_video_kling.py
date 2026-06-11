@@ -35,6 +35,7 @@ from nutti.integrations.video import (
 from nutti.integrations.video_kling import (
     GeminiTtsClient,
     KlingClient,
+    KlingLipSyncClient,
     KlingVoiceoverBackend,
     _parse_pcm_rate,
     _pcm_to_wav_bytes,
@@ -757,6 +758,41 @@ def test_kling_client_status_result_urls_use_app_id_not_full_model(tmp_path):
     assert result_url.endswith("/fal-ai/kling-video/requests/req-app-001")
     assert "/v2.1/standard/image-to-video/requests/" not in status_url
     assert "/v2.1/standard/image-to-video/requests/" not in result_url
+
+
+def test_lipsync_client_status_result_urls_use_app_id_not_full_model(tmp_path):
+    """회귀(405): LipSync status/result 조회도 앱 ID(fal-ai/kling-video)만 써야 한다.
+
+    fal 공식 문서는 전체 모델 경로를 안내하지만, 라이브에서 전체 경로
+    (.../lipsync/audio-to-video)로 GET하면 405가 난다(2026-06-11 실측 —
+    KlingClient의 test_kling_client_status_result_urls_use_app_id_not_full_model과
+    동일 결함의 LipSync 변종). 제출은 full path, status·result는 앱 ID만 쓰는지 고정한다.
+    """
+    fake = FakeKlingHttp(
+        post_response=_Resp(json_data={"request_id": "req-ls-001"}),
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        get_result_response=_Resp(
+            json_data={"video": {"url": "https://fal.media/clips/ls.mp4"}}
+        ),
+        download_response=_Resp(content=b"X"),
+    )
+    settings = _kling_settings(NUTTI_MEDIA_DIR=str(tmp_path))
+    client = KlingLipSyncClient(settings, http=fake, sleep=_no_sleep)
+    silent = tmp_path / "silent.mp4"
+    silent.write_bytes(b"FAKE-SILENT-MP4")
+    voice = tmp_path / "voice.wav"
+    voice.write_bytes(b"FAKE-WAV")
+    client.generate(str(silent), str(voice), video_sec=5.0, audio_sec=3.0)
+    # 제출 URL은 전체 모델 경로를 그대로 쓴다.
+    submit_url = fake.post_calls[0][0]
+    assert submit_url.endswith("/fal-ai/kling-video/lipsync/audio-to-video")
+    # status·result URL은 앱 ID만 — 깊은 경로(lipsync/audio-to-video)가 끼면 405.
+    status_url = fake.status_calls[0]
+    result_url = fake.result_calls[0]
+    assert status_url.endswith("/fal-ai/kling-video/requests/req-ls-001/status")
+    assert result_url.endswith("/fal-ai/kling-video/requests/req-ls-001")
+    assert "/lipsync/audio-to-video/requests/" not in status_url
+    assert "/lipsync/audio-to-video/requests/" not in result_url
 
 
 def test_kling_client_error_status_raises_render_error(tmp_path):
