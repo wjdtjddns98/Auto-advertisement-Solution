@@ -1418,10 +1418,16 @@ def test_pick_clip_duration_medium_audio_maps_to_10():
     assert _pick_clip_duration(10.0) == 10
 
 
-def test_pick_clip_duration_long_audio_caps_at_10():
-    """음성 > 10초 → 클립 10초로 cap."""
-    assert _pick_clip_duration(12.0) == 10
-    assert _pick_clip_duration(60.0) == 10
+def test_pick_clip_duration_long_audio_raises():
+    """음성 > 10초 → silent 잘림 대신 명시 VideoRenderError(과금 전 차단).
+
+    이 핀을 cap 반환으로 되돌리면 mux `-shortest`가 내레이션 뒷부분을 소리 없이
+    잘라내는 결함(2026-06-11 실측)이 재발한다.
+    """
+    with pytest.raises(VideoRenderError, match="초과"):
+        _pick_clip_duration(10.1)
+    with pytest.raises(VideoRenderError, match="초과"):
+        _pick_clip_duration(60.0)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1458,6 +1464,22 @@ def test_produce_beat_clips_calls_tts_and_kling_per_beat(monkeypatch, tmp_path):
     assert all(c[0] == "data/frame.jpg" for c in kling.calls)
     # clip_dur = _pick_clip_duration(4.0) = 5
     assert all(c[2] == 5 for c in kling.calls)
+
+
+def test_produce_beat_clips_overlong_narration_blocks_before_kling(tmp_path):
+    """내레이션 > 10초 비트는 Kling 호출(과금) 전에 VideoRenderError로 막힌다."""
+    kling = FakeKlingClient()
+    tts = FakeTtsClient(duration=10.5)  # 10초 캡 초과 → 가드 발동
+
+    settings = _kling_settings(NUTTI_MEDIA_DIR=str(tmp_path))
+    backend = KlingVoiceoverBackend(settings, kling_client=kling, tts_client=tts)
+
+    with pytest.raises(VideoRenderError, match="초과"):
+        backend.produce_beat_clips("data/frame.jpg", ["너무 긴 내레이션 비트"])
+
+    # TTS는 호출됐지만(길이를 알아야 하므로) Kling 영상 생성(진짜 비용)은 차단.
+    assert len(tts.calls) == 1
+    assert kling.calls == []
 
 
 def test_produce_beat_clips_returns_correct_order(monkeypatch, tmp_path):

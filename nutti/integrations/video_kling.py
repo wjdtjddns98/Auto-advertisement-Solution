@@ -168,13 +168,19 @@ def _pick_clip_duration(audio_sec: float) -> int:
     """내레이션 길이(초)를 Kling이 허용하는 클립 길이(5/10초)로 올림한다.
 
     내레이션보다 짧은 클립을 만들면 음성이 잘리므로, 음성 길이 이상인 가장 짧은
-    허용 길이를 고른다. 음성이 최대 허용(10초)을 넘으면 10초로 cap하고(이후 mux의
-    `-shortest`로 영상 길이에 맞춰 음성이 잘릴 수 있음 — 내레이션은 ~10초로 설계됨).
+    허용 길이를 고른다. 음성이 최대 허용(10초)을 넘으면 mux `-shortest`가 내레이션
+    뒷부분을 소리 없이 잘라낸다(2026-06-11 실측: 비트가 10초 캡에서 잘림) —
+    silent 잘림 대신 Kling 호출(과금) 전에 명시 에러로 막는다. 해결책은 대본
+    비트를 더 짧게(프롬프트 상한 45자) 재생성하는 것.
     """
     for d in _KLING_ALLOWED_DURATIONS:
         if audio_sec <= d:
             return d
-    return _KLING_ALLOWED_DURATIONS[-1]
+    raise VideoRenderError(
+        f"내레이션({audio_sec:.1f}초)이 Kling 클립 최대 길이"
+        f"({_KLING_ALLOWED_DURATIONS[-1]}초)를 초과합니다 — 그대로 진행하면 음성이"
+        " 소리 없이 잘립니다. 대본 비트를 45자 이내로 줄여 다시 생성하세요."
+    )
 
 
 def _guess_video_mime(path: str) -> str:
