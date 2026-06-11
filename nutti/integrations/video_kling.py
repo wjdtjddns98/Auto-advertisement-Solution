@@ -570,8 +570,9 @@ class KlingLipSyncClient(_HttpClosingMixin):
     `GET {base}/{model}/requests/{id}`에서 영상 URL을 검증·다운로드.
 
     KlingClient와의 차이:
-    - app_id 분리 없음: LipSync는 status/result GET에도 **전체 모델 경로**를 쓴다
-      (fal 공식 큐 문서 기준 — image-to-video의 2세그먼트 분리와 다름).
+    - has_audio 신호 처리(아래)와 입력 형태(영상+음성 data URI)만 다르고, 폴링 URL은
+      KlingClient와 동일하게 **앱 ID(앞 2세그먼트)**를 쓴다 — 당초 fal 공식 문서대로
+      전체 모델 경로를 썼으나 라이브에서 405가 났다(2026-06-11 실측, PR #31과 동일 증상).
     - has_audio 신호: fal LipSync 응답에는 출력 MP4의 오디오 포함 여부 필드가 없다.
       모델 목적상 출력에는 항상 음성이 입혀진다고 보고 has_audio=True를 기본으로
       반환하되, 응답에서 음성 부재를 시사하는 신호가 잡히면 False로 폴백한다
@@ -592,9 +593,12 @@ class KlingLipSyncClient(_HttpClosingMixin):
         self._model = _validate_model_id(
             settings.kling_lipsync_model, env_name="NUTTI_KLING_LIPSYNC_MODEL"
         )
-        # LipSync는 status/result 조회에도 전체 모델 경로를 쓴다(앱 ID 2세그먼트 분리
-        # 없음). 공식 fal 큐 문서: GET queue.fal.run/{model}/requests/{id}/status.
-        self._app_id = self._model
+        # status/result 조회는 앱 ID(앞 2세그먼트, "fal-ai/kling-video")만 쓴다.
+        # fal 공식 문서는 GET {base}/{model}/requests/{id}/status라고 안내하지만,
+        # 전체 모델 경로(.../lipsync/audio-to-video)를 붙이면 라이브에서 405가 난다
+        # (2026-06-11 실측 — KlingClient가 PR #31에서 겪은 것과 동일한 fal 큐 동작).
+        _segs = self._model.split("/")
+        self._app_id = "/".join(_segs[:2]) if len(_segs) >= 2 else self._model
         self._interval = float(settings.kling_poll_interval_sec)
         if self._interval <= 0:
             raise ValueError(f"kling_poll_interval_sec는 0보다 커야 합니다(현재 {self._interval})")
