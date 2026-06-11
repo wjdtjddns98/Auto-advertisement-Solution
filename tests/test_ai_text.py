@@ -72,6 +72,16 @@ def test_script_system_prompt_specifies_three_beats():
     assert "정확히 3" in SCRIPT_SYSTEM_PROMPT
 
 
+def test_script_system_prompt_pins_beat_char_cap():
+    """SCRIPT_SYSTEM_PROMPT가 비트당 45자 하드 상한을 명시한다(리버트 가드).
+
+    상한을 완화하면 내레이션이 Kling 10초 캡을 넘어 video_kling의 길이 가드에
+    걸린다(2026-06-11 대본 잘림 결함의 예방 절반이 이 프롬프트 상한).
+    """
+    assert "45자 이내" in SCRIPT_SYSTEM_PROMPT
+    assert "금지" in SCRIPT_SYSTEM_PROMPT
+
+
 def test_split_into_beats_strips_bullets_and_numbers():
     assert _split_into_beats("1. 훅\n2. 핵심\n3. 마무리") == ["훅", "핵심", "마무리"]
 
