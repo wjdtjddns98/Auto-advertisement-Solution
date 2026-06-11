@@ -1629,6 +1629,7 @@ def test_write_bytes_cleans_tmp_on_replace_failure(tmp_path, monkeypatch):
     with pytest.raises(VideoRenderError):
         video_module._write_bytes(out, b"DATA", "테스트 영상")
     assert not (tmp_path / "video_x.mp4.tmp").exists()  # tmp 잔재 없음
+    assert not out.exists()  # 원자적 쓰기 계약: 실패 시 대상 파일이 부분 상태로 남지 않는다
 
 
 # --- 섹션: video_backend 유효성 검증 ---
