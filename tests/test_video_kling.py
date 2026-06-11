@@ -342,6 +342,36 @@ class FakeNanoBananaClient:
         self.close_count += 1
 
 
+class FakeLipSyncClient:
+    """KlingLipSyncClient 대역 — generate 호출 인자를 기록하고 결정적 (경로, has_audio)를 반환한다."""
+
+    def __init__(self, tmp_path=None, has_audio: bool = True):
+        self._tmp_path = tmp_path
+        self._has_audio = has_audio
+        self.calls: list[tuple[str, str, dict]] = []
+        self.close_count = 0
+        self._n = 0
+
+    def generate(
+        self,
+        silent_video_path: str,
+        audio_path: str,
+        *,
+        video_sec=None,
+        audio_sec=None,
+    ) -> tuple[str, bool]:
+        self._n += 1
+        self.calls.append((silent_video_path, audio_path, {"video_sec": video_sec, "audio_sec": audio_sec}))
+        if self._tmp_path is not None:
+            out = self._tmp_path / f"lipsync_{self._n}.mp4"
+            out.write_bytes(b"\x00lipsync")
+            return str(out), self._has_audio
+        return f"data/fake/lipsync_{self._n}.mp4", self._has_audio
+
+    def close(self):
+        self.close_count += 1
+
+
 def test_videostudio_kling_backend_routes_to_kling_path(monkeypatch):
     """video_backend='kling'이면 _produce_clips가 KlingVoiceoverBackend 경로로 분기한다.
 
@@ -462,6 +492,132 @@ def test_videostudio_kling_validate_config_tts_branch_isolated_raises():
     )
     with pytest.raises(ValueError, match="kling 백엔드의 TTS에 필수"):
         studio.validate_config()
+
+
+def test_videostudio_kling_validate_config_elevenlabs_tts_missing_key_raises():
+    """kling_tts='elevenlabs' + ELEVENLABS_API_KEY 빈 값 → ValueError(키 분기 회귀 핀).
+
+    이 테스트가 없으면 video.py 783-788행의 elevenlabs 키 검사 분기를 삭제해도
+    기존 테스트가 모두 통과한다. nano_client·kling_client 주입으로 다른 검사를 건너뛰고
+    elevenlabs 분기만 발화하게 한다.
+    """
+    settings = _live_settings(
+        NUTTI_VIDEO_BACKEND="kling",
+        GEMINI_API_KEY="",
+        FAL_KEY="",
+        NUTTI_KLING_TTS="elevenlabs",
+        ELEVENLABS_API_KEY="",
+    )
+    studio = VideoStudio(
+        settings,
+        nano_client=FakeNanoBananaClient(),
+        kling_client=FakeKlingClient(),
+        # tts_client 미주입 → elevenlabs 키 검사 분기가 발화해야 한다
+    )
+    with pytest.raises(ValueError, match="ELEVENLABS_API_KEY"):
+        studio.validate_config()
+
+
+def test_videostudio_kling_validate_config_all_clients_injected_lipsync_passes():
+    """nano·tts·kling·lipsync 클라이언트 모두 주입 → kling_lipsync=true여도 키 검사 없이 통과."""
+    settings = _live_settings(
+        NUTTI_VIDEO_BACKEND="kling",
+        GEMINI_API_KEY="",
+        FAL_KEY="",
+        NUTTI_KLING_LIPSYNC=True,
+    )
+    studio = VideoStudio(
+        settings,
+        nano_client=FakeNanoBananaClient(),
+        kling_client=FakeKlingClient(),
+        tts_client=FakeTtsClient(),
+        kling_lipsync_client=FakeLipSyncClient(),
+    )
+    # 예외 없이 통과해야 한다
+    studio.validate_config()
+
+
+def test_kling_voiceover_backend_lipsync_client_injected_is_called(tmp_path, monkeypatch):
+    """kling_lipsync=True + 주입 fake lipsync 클라이언트가 실제로 호출됨을 검증한다.
+
+    이 테스트가 없으면 KlingVoiceoverBackend가 kling_lipsync_client를 무시해도
+    기존 테스트가 모두 통과한다(injection-bypass 회귀 핀).
+    """
+    settings = _kling_settings(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_KLING_LIPSYNC=True)
+
+    counter = {"n": 0}
+
+    class _FileTts:
+        def synthesize(self, beat):
+            counter["n"] += 1
+            p = tmp_path / f"voice_{counter['n']}.wav"
+            p.write_bytes(b"RIFFvoice")
+            return str(p), 4.0
+
+    class _FileKling:
+        def generate(self, frame, prompt, dur):
+            p = tmp_path / f"kling_{counter['n']}.mp4"
+            p.write_bytes(b"\x00silent")
+            return str(p)
+
+    lipsync_fake = FakeLipSyncClient(tmp_path)
+
+    backend = KlingVoiceoverBackend(
+        settings,
+        kling_client=_FileKling(),
+        tts_client=_FileTts(),
+        kling_lipsync_client=lipsync_fake,
+    )
+
+    clips, total_sec = backend.produce_beat_clips("frame.png", ["b1", "b2"])
+
+    # 주입된 fake lipsync 클라이언트가 각 비트마다 1회씩 호출됐어야 한다.
+    assert len(lipsync_fake.calls) == 2
+    # 결과 클립이 lipsync_fake가 반환한 경로와 일치해야 한다.
+    assert len(clips) == 2
+    # total_sec: has_audio=True 립싱크 출력은 silent 영상과 동일한 clip_dur를 유지한다.
+    # audio_sec=4.0, clip_dur=_pick_clip_duration(4.0)=5 → 5.0 × 2 = 10.0.
+    assert total_sec == pytest.approx(10.0)
+
+
+def test_kling_voiceover_backend_elevenlabs_tts_client_injected(tmp_path, monkeypatch):
+    """kling_tts='elevenlabs' + tts_client 주입 → 주입 클라이언트가 실제 호출됨을 검증한다.
+
+    tts_client가 주입되면 kling_tts 분기(ElevenLabsTtsClient 생성)가 건너뛰어지고
+    주입 fake가 그대로 사용된다. 이 테스트는 주입 우선 계약을 고정한다.
+    """
+    settings = _kling_settings(
+        NUTTI_MEDIA_DIR=str(tmp_path),
+        NUTTI_KLING_TTS="elevenlabs",
+    )
+
+    counter = {"n": 0}
+
+    class _FileKling:
+        def generate(self, frame, prompt, dur):
+            counter["n"] += 1
+            p = tmp_path / f"kling_{counter['n']}.mp4"
+            p.write_bytes(b"\x00silent")
+            return str(p)
+
+    fake_tts = FakeTtsClient()
+
+    def fake_mux(self, video_path, audio_path):
+        out = tmp_path / f"beat_{counter['n']}.mp4"
+        out.write_bytes(b"\x00muxed")
+        return str(out)
+
+    monkeypatch.setattr(KlingVoiceoverBackend, "_mux", fake_mux)
+    backend = KlingVoiceoverBackend(
+        settings,
+        kling_client=_FileKling(),
+        tts_client=fake_tts,  # 주입 fake → ElevenLabsTtsClient 생성 우회
+    )
+
+    clips, _ = backend.produce_beat_clips("frame.png", ["b1"])
+
+    assert len(clips) == 1
+    assert fake_tts.calls == ["b1"]
 
 
 def test_produce_beat_clips_cleans_intermediates_on_success(tmp_path, monkeypatch):
@@ -1488,3 +1644,146 @@ def test_mux_os_error_raises_render_error(tmp_path, monkeypatch):
     backend = KlingVoiceoverBackend(settings)
     with pytest.raises(VideoRenderError, match="OSError"):
         backend._mux("silent.mp4", "voice.wav")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 섹션 G. has_audio=False 립싱크 fallback 경로 — 누수·계산·정리 검증
+# ═══════════════════════════════════════════════════════════════════
+
+
+def test_lipsync_has_audio_false_fallback_mux_is_called(tmp_path, monkeypatch):
+    """has_audio=False 시 fallback _mux가 (lipsync_path, voice_path) 인자로 호출된다.
+
+    성공 경로: mux가 정상 반환 → 클립 목록에 mux 출력이 포함되고 lipsync 중간물은 삭제된다.
+    """
+    mux_calls: list[tuple[str, str]] = []
+
+    def fake_mux(self, video_path, audio_path):
+        mux_calls.append((video_path, audio_path))
+        out = tmp_path / "beat_muxed.mp4"
+        out.write_bytes(b"\x00muxed")
+        return str(out)
+
+    monkeypatch.setattr(KlingVoiceoverBackend, "_mux", fake_mux)
+
+    lipsync_fake = FakeLipSyncClient(tmp_path, has_audio=False)
+    settings = _kling_settings(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_KLING_LIPSYNC=True)
+
+    counter = {"n": 0}
+
+    class _FileTts:
+        def synthesize(self, beat):
+            counter["n"] += 1
+            p = tmp_path / f"voice_{counter['n']}.wav"
+            p.write_bytes(b"RIFFvoice")
+            return str(p), 3.0
+
+    class _FileKling:
+        def generate(self, frame, prompt, dur):
+            p = tmp_path / f"silent_{counter['n']}.mp4"
+            p.write_bytes(b"\x00silent")
+            return str(p)
+
+    backend = KlingVoiceoverBackend(
+        settings,
+        kling_client=_FileKling(),
+        tts_client=_FileTts(),
+        kling_lipsync_client=lipsync_fake,
+    )
+    clips, total_sec = backend.produce_beat_clips("frame.png", ["b1"])
+
+    # fallback mux가 호출됐어야 한다
+    assert len(mux_calls) == 1
+    lipsync_arg, voice_arg = mux_calls[0]
+    # mux 첫 번째 인자는 lipsync 중간물 경로
+    assert "lipsync_1.mp4" in lipsync_arg
+    # 결과 클립은 mux 출력 경로여야 한다
+    assert len(clips) == 1
+    assert clips[0].endswith("beat_muxed.mp4")
+    # has_audio=False fallback: total_sec = min(clip_dur, audio_sec) = min(5, 3) = 3.0
+    assert total_sec == pytest.approx(3.0)
+    # lipsync 중간물은 정리됐어야 한다
+    assert not (tmp_path / "lipsync_1.mp4").exists()
+
+
+def test_lipsync_has_audio_false_fallback_mux_fail_cleans_lipsync_file(tmp_path, monkeypatch):
+    """has_audio=False 시 fallback _mux가 VideoRenderError를 raise해도 lipsync 중간물이 삭제된다.
+
+    이 테스트가 없으면 _mux 실패 시 수백 MB lipsync 파일이 영구 누수된다(핵심 버그 핀).
+    """
+
+    def fake_mux_fail(self, video_path, audio_path):
+        raise VideoRenderError("내레이션 mux 실패: OSError")
+
+    monkeypatch.setattr(KlingVoiceoverBackend, "_mux", fake_mux_fail)
+
+    lipsync_fake = FakeLipSyncClient(tmp_path, has_audio=False)
+    settings = _kling_settings(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_KLING_LIPSYNC=True)
+
+    counter = {"n": 0}
+
+    class _FileTts:
+        def synthesize(self, beat):
+            counter["n"] += 1
+            p = tmp_path / f"voice_{counter['n']}.wav"
+            p.write_bytes(b"RIFFvoice")
+            return str(p), 3.0
+
+    class _FileKling:
+        def generate(self, frame, prompt, dur):
+            p = tmp_path / f"silent_{counter['n']}.mp4"
+            p.write_bytes(b"\x00silent")
+            return str(p)
+
+    backend = KlingVoiceoverBackend(
+        settings,
+        kling_client=_FileKling(),
+        tts_client=_FileTts(),
+        kling_lipsync_client=lipsync_fake,
+    )
+
+    with pytest.raises(VideoRenderError):
+        backend.produce_beat_clips("frame.png", ["b1"])
+
+    # _mux 실패 후에도 lipsync 중간물이 정리됐어야 한다 (누수 방지 검증)
+    assert not (tmp_path / "lipsync_1.mp4").exists()
+
+
+def test_lipsync_has_audio_true_total_sec_uses_clip_dur(tmp_path, monkeypatch):
+    """has_audio=True(정상 립싱크) 시 total_sec은 min(clip_dur, audio_sec)이 아닌 clip_dur를 사용한다.
+
+    audio_sec(3.0) < clip_dur(5) 인 경우: 기존 코드는 3.0을 반환해 총 길이가 과소 계산됐다.
+    수정 후 clip_dur(5.0)이 사용되어야 한다.
+    """
+    settings = _kling_settings(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_KLING_LIPSYNC=True)
+
+    # has_audio=True: 립싱크 출력에 음성 포함 → mux 불필요, clip_dur 길이 유지
+    lipsync_fake = FakeLipSyncClient(tmp_path, has_audio=True)
+
+    counter = {"n": 0}
+
+    class _FileTts:
+        def synthesize(self, beat):
+            counter["n"] += 1
+            p = tmp_path / f"voice_{counter['n']}.wav"
+            p.write_bytes(b"RIFFvoice")
+            # audio_sec=3.0 — clip_dur(5)보다 짧음 → 이전 코드는 3.0을 합산했다
+            return str(p), 3.0
+
+    class _FileKling:
+        def generate(self, frame, prompt, dur):
+            p = tmp_path / f"silent_{counter['n']}.mp4"
+            p.write_bytes(b"\x00silent")
+            return str(p)
+
+    backend = KlingVoiceoverBackend(
+        settings,
+        kling_client=_FileKling(),
+        tts_client=_FileTts(),
+        kling_lipsync_client=lipsync_fake,
+    )
+    clips, total_sec = backend.produce_beat_clips("frame.png", ["b1", "b2"])
+
+    # 2비트 × clip_dur(5.0) = 10.0 이어야 한다 (수정 전: 3.0 × 2 = 6.0)
+    assert total_sec == pytest.approx(10.0)
+    assert len(clips) == 2

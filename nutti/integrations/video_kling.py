@@ -72,6 +72,12 @@ _MAX_TRANSIENT_RETRIES = 3
 _RETRY_BACKOFF_SEC = 2.0
 # Kling standard(v1.6/2.1)가 허용하는 클립 길이(초). 내레이션 길이를 이 중 하나로 올림.
 _KLING_ALLOWED_DURATIONS = (5, 10)
+# LipSync 입력 길이 가드(초). fal.ai 문서: 영상 2~10초, 음성 2~60초. 위반 시 서버가
+# 거부하므로 제출 전 클라이언트에서 명확한 오류로 막아 불필요한 과금·왕복을 피한다.
+_LIPSYNC_MIN_VIDEO_SEC = 2.0
+_LIPSYNC_MAX_VIDEO_SEC = 10.0
+_LIPSYNC_MIN_AUDIO_SEC = 2.0
+_LIPSYNC_MAX_AUDIO_SEC = 60.0
 # TTS mimeType에 rate가 없을 때의 기본 샘플레이트(Gemini TTS는 24kHz mono 16-bit PCM).
 _DEFAULT_TTS_RATE = 24000
 
@@ -169,6 +175,34 @@ def _pick_clip_duration(audio_sec: float) -> int:
         if audio_sec <= d:
             return d
     return _KLING_ALLOWED_DURATIONS[-1]
+
+
+def _guess_video_mime(path: str) -> str:
+    """확장자로 영상 MIME 타입을 추정한다(.mov → video/quicktime, 그 외 mp4).
+
+    LipSync 제출 시 무음 클립을 base64 data URI(`data:{mime};base64,...`)로 보낼 때
+    쓴다. fal.ai LipSync는 mp4/mov 영상을 받으므로 두 가지만 구분한다.
+    """
+    suffix = Path(path).suffix.lower()
+    if suffix == ".mov":
+        return "video/quicktime"
+    return "video/mp4"
+
+
+def _guess_audio_mime(path: str) -> str:
+    """확장자로 음성 MIME 타입을 추정한다(.mp3/.ogg/.m4a/.aac/그 외 → wav).
+
+    LipSync 제출 시 TTS 음성을 base64 data URI로 보낼 때 쓴다. TTS는 WAV를
+    내므로 기본값은 audio/wav지만, ElevenLabs(mp3) 등 다른 소스도 대비한다.
+    """
+    suffix = Path(path).suffix.lower()
+    return {
+        ".mp3": "audio/mpeg",
+        ".ogg": "audio/ogg",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".wav": "audio/wav",
+    }.get(suffix, "audio/wav")
 
 
 def _pcm_to_wav_bytes(pcm: bytes, rate: int) -> bytes:
@@ -520,6 +554,276 @@ class KlingClient(_HttpClosingMixin):
         return str(out_path)
 
 
+class KlingLipSyncClient(_HttpClosingMixin):
+    """fal.ai Kling LipSync(audio-to-video) 클라이언트(무음 영상 + 음성 → 립싱크 영상).
+
+    무음 Kling 클립과 TTS 음성을 받아, fal 큐 REST로 마스코트 입을 음성에 동기화한
+    영상을 만든다. 흐름은 KlingClient와 동일: ① `POST {base}/{model}`로 제출
+    (video_url·audio_url base64 data URI) → ② request_id 폴링
+    (`GET {base}/{model}/requests/{id}/status`) → ③ COMPLETED면
+    `GET {base}/{model}/requests/{id}`에서 영상 URL을 검증·다운로드.
+
+    KlingClient와의 차이:
+    - app_id 분리 없음: LipSync는 status/result GET에도 **전체 모델 경로**를 쓴다
+      (fal 공식 큐 문서 기준 — image-to-video의 2세그먼트 분리와 다름).
+    - has_audio 신호: fal LipSync 응답에는 출력 MP4의 오디오 포함 여부 필드가 없다.
+      모델 목적상 출력에는 항상 음성이 입혀진다고 보고 has_audio=True를 기본으로
+      반환하되, 응답에서 음성 부재를 시사하는 신호가 잡히면 False로 폴백한다
+      (백엔드가 안전하게 mux로 되돌릴 수 있도록). TODO(live): 라이브에서 출력
+      MP4에 실제 오디오 트랙이 있는지 ffprobe로 1회 검증 후 이 가정을 확정한다.
+
+    재사용(KlingClient와 동일 계약): _fal_headers(큐 호스트 한정 자격증명),
+    _validate_request_id/_validate_model_id(URL 삽입 전 형식 검증),
+    _validate_fal_video_url(SSRF 호스트 검증), _send_json/_safe_send/_json_or_raise,
+    _read_bytes/_write_bytes, backoff 재시도. 오류 계약: HTTP/전송/JSON/쓰기 실패는
+    VideoRenderError, 폴링 초과는 VideoTimeoutError, redaction(상태 코드·타입명만).
+    """
+
+    def __init__(self, settings: Settings, *, http=None, sleep=None):
+        self.settings = settings
+        self._http = http
+        self._sleep = sleep if sleep is not None else time.sleep
+        self._model = _validate_model_id(
+            settings.kling_lipsync_model, env_name="NUTTI_KLING_LIPSYNC_MODEL"
+        )
+        # LipSync는 status/result 조회에도 전체 모델 경로를 쓴다(앱 ID 2세그먼트 분리
+        # 없음). 공식 fal 큐 문서: GET queue.fal.run/{model}/requests/{id}/status.
+        self._app_id = self._model
+        self._interval = float(settings.kling_poll_interval_sec)
+        if self._interval <= 0:
+            raise ValueError(f"kling_poll_interval_sec는 0보다 커야 합니다(현재 {self._interval})")
+        self._timeout = float(settings.kling_timeout_sec)
+        if self._timeout <= 0:
+            raise ValueError(f"kling_timeout_sec는 0보다 커야 합니다(현재 {self._timeout})")
+        self.poll_count = 0
+
+    def _client(self):
+        if self._http is not None:
+            return self._http
+        import httpx
+
+        self._http = httpx.Client(timeout=60.0)
+        return self._http
+
+    def generate(
+        self,
+        silent_video_path: str,
+        audio_path: str,
+        *,
+        video_sec: float | None = None,
+        audio_sec: float | None = None,
+    ) -> tuple[str, bool]:
+        """무음 영상 + 음성으로 립싱크 영상을 만들어 (로컬 경로, has_audio)를 반환한다.
+
+        video_sec/audio_sec를 주면 제출 전 길이 제약(영상 2~10초·음성 2~60초)을
+        검증한다(None이면 건너뜀 — 호출부가 이미 보장하는 경우). has_audio는 출력
+        MP4에 음성이 입혀졌는지 신호다(True면 백엔드가 mux를 생략).
+        """
+        self._guard_durations(video_sec, audio_sec)
+        request_id = self._submit(silent_video_path, audio_path)
+        video_url, has_audio = self._poll(request_id)
+        return self._download(video_url), has_audio
+
+    @staticmethod
+    def _guard_durations(video_sec: float | None, audio_sec: float | None) -> None:
+        """제출 전 입력 길이가 fal LipSync 제약을 만족하는지 검증한다(과금·왕복 절약).
+
+        영상 2~10초, 음성 2~60초. 위반 시 명확한 VideoRenderError로 즉시 막는다.
+        값이 None이면 그 항목은 검사하지 않는다.
+        """
+        if video_sec is not None and not (
+            _LIPSYNC_MIN_VIDEO_SEC <= video_sec <= _LIPSYNC_MAX_VIDEO_SEC
+        ):
+            raise VideoRenderError(
+                f"LipSync 영상 길이 제약 위반(허용 {_LIPSYNC_MIN_VIDEO_SEC:.0f}~"
+                f"{_LIPSYNC_MAX_VIDEO_SEC:.0f}초, 현재 {video_sec:.1f}초)"
+            )
+        if audio_sec is not None and not (
+            _LIPSYNC_MIN_AUDIO_SEC <= audio_sec <= _LIPSYNC_MAX_AUDIO_SEC
+        ):
+            raise VideoRenderError(
+                f"LipSync 음성 길이 제약 위반(허용 {_LIPSYNC_MIN_AUDIO_SEC:.0f}~"
+                f"{_LIPSYNC_MAX_AUDIO_SEC:.0f}초, 현재 {audio_sec:.1f}초)"
+            )
+
+    def _submit(self, silent_video_path: str, audio_path: str) -> str:
+        """LipSync 작업을 제출하고 검증된 request_id를 반환한다.
+
+        무음 영상·음성은 base64 data URI(`data:{mime};base64,...`)로 보낸다 — fal는
+        video_url/audio_url에 원격 URL과 data URI를 모두 허용한다(로컬 파일은 별도
+        업로드 없이 data URI가 간편). 필드명은 video/audio가 아니라 video_url/audio_url.
+        """
+        import base64
+
+        video_bytes = _read_bytes(silent_video_path, "LipSync 무음 영상")
+        audio_bytes = _read_bytes(audio_path, "LipSync 음성")
+        video_mime = _guess_video_mime(silent_video_path)
+        audio_mime = _guess_audio_mime(audio_path)
+        video_uri = f"data:{video_mime};base64,{base64.b64encode(video_bytes).decode('ascii')}"
+        audio_uri = f"data:{audio_mime};base64,{base64.b64encode(audio_bytes).decode('ascii')}"
+        body = {"video_url": video_uri, "audio_url": audio_uri}
+        url = f"{_FAL_QUEUE_BASE}/{self._model}"
+        data = _send_json(
+            lambda: self._client().post(url, headers=_fal_headers(self.settings), json=body),
+            "LipSync 작업 제출",
+        )
+        request_id = data.get("request_id")
+        if not request_id:
+            log.debug("lipsync.submit.missing_request_id", keys=list(data.keys()))
+            raise VideoRenderError(
+                f"LipSync 응답에 request_id가 없습니다 (응답 키: {list(data.keys())})"
+            )
+        return _validate_request_id(str(request_id))
+
+    def _poll(self, request_id: str) -> tuple[str, bool]:
+        """상태를 COMPLETED까지 폴링하고 (검증된 영상 URL, has_audio)를 반환한다.
+
+        경계는 `< timeout`(off-by-one 방지). 폴링/결과 URL은 request_id로 직접 구성한다.
+        """
+        status_url = f"{_FAL_QUEUE_BASE}/{self._app_id}/requests/{request_id}/status"
+        elapsed = 0.0
+        while elapsed < self._timeout:
+            data, backoff_sec = self._status_once(status_url)
+            elapsed += backoff_sec
+            status = data.get("status")
+            if status == "COMPLETED":
+                return self._fetch_result(request_id)
+            if status in ("IN_QUEUE", "IN_PROGRESS", None):
+                self._sleep(self._interval)
+                elapsed += self._interval
+                continue
+            # ERROR 등 종료 상태(미진행) — 명시적으로 실패한다(무한 폴링 방지).
+            raise VideoRenderError(f"LipSync 작업 실패: status={status}")
+        raise VideoTimeoutError(f"LipSync 폴링 타임아웃({self._timeout:.0f}s, 폴링 {self.poll_count}회)")
+
+    def _status_once(self, url: str) -> tuple[dict, float]:
+        """상태 1회 조회. 일시 오류(429/5xx)는 지수 backoff로 최대 3회 재시도.
+
+        반환은 (응답 dict, 재시도 backoff 합계 초) — backoff는 호출부가 timeout에 누적.
+        KlingClient._status_once와 동일 로직.
+        """
+        attempts = 0
+        backoff_total = 0.0
+        while True:
+            self.poll_count += 1
+            resp = _safe_send(
+                lambda: self._client().get(url, headers=_fal_headers(self.settings)),
+                "LipSync 상태 조회",
+            )
+            code = getattr(resp, "status_code", None)
+            transient = isinstance(code, int) and (code == 429 or code >= 500)
+            if transient and attempts < _MAX_TRANSIENT_RETRIES:
+                attempts += 1
+                wait = _RETRY_BACKOFF_SEC * (2 ** (attempts - 1))
+                self._sleep(wait)
+                backoff_total += wait
+                continue
+            return _json_or_raise(resp, "LipSync 상태 조회"), backoff_total
+
+    def _fetch_result(self, request_id: str) -> tuple[str, bool]:
+        """완료된 작업 결과에서 (검증된 영상 URL, has_audio)를 방어적으로 추출한다.
+
+        fal 큐는 오류를 별도 ERROR 상태가 아니라 COMPLETED 응답 안 `error` 필드로
+        담을 수 있으므로 결과 추출 전에 먼저 확인한다.
+        """
+        result_url = f"{_FAL_QUEUE_BASE}/{self._app_id}/requests/{request_id}"
+        data = _send_json(
+            lambda: self._client().get(result_url, headers=_fal_headers(self.settings)),
+            "LipSync 결과 조회",
+        )
+        error = data.get("error")
+        if error:
+            err_type = data.get("error_type") or "unknown"
+            log.debug("lipsync.result.error", error_type=err_type)
+            raise VideoRenderError(f"LipSync 작업 실패: error_type={err_type}")
+        uri = self._extract_video_url(data)
+        if not uri:
+            log.debug("lipsync.result.missing_url", keys=list(data.keys()))
+            raise VideoRenderError(
+                f"LipSync 결과에 영상 URL이 없습니다 (응답 키: {list(data.keys())})"
+            )
+        _validate_fal_video_url(uri)
+        return uri, self._extract_has_audio(data)
+
+    @staticmethod
+    def _extract_video_url(data: dict) -> str | None:
+        """결과에서 출력 영상 URL을 방어적으로 추출한다(snake/camelCase·중첩 모두 시도).
+
+        문서상 출력은 `video.url`이지만(KlingClient와 동일), 스키마 변종(`output.url`,
+        최상위 `url`)도 순서대로 시도한다. TODO(live): 라이브 응답 1건으로 실제 키 확정.
+        """
+        for key in ("video", "output"):
+            node = data.get(key)
+            if isinstance(node, dict):
+                uri = node.get("url")
+                if uri:
+                    return str(uri)
+        top = data.get("url")
+        return str(top) if top else None
+
+    @staticmethod
+    def _extract_has_audio(data: dict) -> bool:
+        """출력 MP4에 음성이 입혀졌는지 신호를 추출한다(없으면 True 가정).
+
+        fal LipSync 응답에는 오디오 포함 여부 전용 필드가 없다. 모델 목적상 출력에는
+        항상 음성이 입혀지므로 기본은 True(=백엔드가 mux 생략). 다만 응답에서 음성
+        부재를 명시하는 신호(`has_audio=False`, `audio=None`, content_type이 영상이
+        아닌 경우 등)가 잡히면 False로 폴백해 백엔드가 안전하게 기존 mux로 되돌리게
+        한다. TODO(live): 라이브에서 출력 MP4를 ffprobe로 검사해 이 가정을 확정.
+        """
+        # 명시적 has_audio 플래그(snake/camelCase)가 있으면 그대로 따른다.
+        for key in ("has_audio", "hasAudio"):
+            if key in data and isinstance(data[key], bool):
+                return data[key]
+        # video 노드 안의 명시적 플래그도 확인.
+        video = data.get("video")
+        if isinstance(video, dict):
+            for key in ("has_audio", "hasAudio"):
+                if key in video and isinstance(video[key], bool):
+                    return video[key]
+            ctype = video.get("content_type") or video.get("contentType")
+            # content_type이 영상이 아닌 값이면(예: image/*) 음성 보장 불가 → 폴백.
+            if isinstance(ctype, str) and ctype and not ctype.startswith("video/"):
+                return False
+        # 신호 없음 → 항상 음성 포함 가정(모델 계약). 백엔드가 mux를 생략한다.
+        return True
+
+    def _download(self, uri: str) -> str:
+        """검증된 영상 URL에서 바이트를 내려받아 media_dir에 저장하고 경로를 반환한다.
+
+        KlingClient._download와 동일: CDN(fal.media)은 키 없이 받고(자격증명 미첨부),
+        리다이렉트는 한 hop만 허용하며 그 Location도 호스트를 재검증한다(SSRF 체인 차단).
+        """
+        _validate_fal_video_url(uri)
+        resp = _safe_send(
+            lambda: self._client().get(uri, follow_redirects=False),
+            "LipSync 영상 다운로드",
+        )
+        sc = getattr(resp, "status_code", None)
+        if not isinstance(sc, int):
+            raise VideoRenderError("LipSync 영상 다운로드 응답에 유효한 status_code가 없습니다")
+        if 300 <= sc < 400:
+            location = (getattr(resp, "headers", {}) or {}).get("location", "")
+            if not location:
+                raise VideoRenderError("LipSync 영상 다운로드: 리다이렉트 응답에 Location 헤더 없음")
+            _validate_fal_video_url(location)
+            resp = _safe_send(
+                lambda: self._client().get(location, follow_redirects=False),
+                "LipSync 영상 다운로드(리다이렉트)",
+            )
+            r_sc = getattr(resp, "status_code", None)
+            if isinstance(r_sc, int) and 300 <= r_sc < 400:
+                raise VideoRenderError("LipSync 다운로드: 허용 호스트 이후 추가 리다이렉트 금지")
+        _raise_for_status(resp, "LipSync 영상 다운로드")
+        content = getattr(resp, "content", None)
+        if not isinstance(content, (bytes, bytearray)) or not content:
+            raise VideoRenderError("LipSync 다운로드 응답에 영상 바이트가 없습니다")
+        out_path = Path(self.settings.nutti_media_dir) / f"lipsync_{uuid4().hex[:12]}.mp4"
+        _write_bytes(out_path, bytes(content), "LipSync 영상")
+        log.info("lipsync.video.saved", path=str(out_path))
+        return str(out_path)
+
+
 class KlingVoiceoverBackend:
     """비트별 [Kling 무음 클립 + 한국어 TTS] → mux → 비트 클립 리스트를 만드는 백엔드.
 
@@ -528,48 +832,113 @@ class KlingVoiceoverBackend:
     1회 닫는다(연결 풀 누수 방지). mux/스티칭용 ffmpeg는 imageio-ffmpeg 번들을 쓴다.
     """
 
-    def __init__(self, settings: Settings, *, kling_client=None, tts_client=None, sleep=None):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        kling_client=None,
+        tts_client=None,
+        kling_lipsync_client=None,
+        sleep=None,
+    ):
         self.settings = settings
         self._kling_client = kling_client
         self._tts_client = tts_client
+        # kling_lipsync=true 시 mux 대신 fal LipSync 후처리에 쓰는 클라이언트.
+        # 미주입이면 실 경로에서 지연 생성하고 finally에서 1회 닫는다.
+        self._kling_lipsync_client = kling_lipsync_client
         self._sleep = sleep
 
     def produce_beat_clips(self, frame_path: str, beats: list[str]) -> tuple[list[str], float]:
-        """각 비트를 [무음 영상 + 내레이션] mux 클립으로 만들어 (경로 리스트, 총길이초)를 반환한다.
+        """각 비트를 [무음 영상 + 내레이션] mux/립싱크 클립으로 만들어 (경로 리스트, 총길이초)를 반환한다.
 
         총길이초는 각 비트 클립의 실측 길이 합이다. mux는 `-shortest`로 출력을 두
         입력 중 짧은 쪽에 맞추므로 비트 클립 길이 ≈ min(무음 영상 길이=clip_dur,
         내레이션 길이=audio_sec)다. veo 경로의 8.0×N 가정과 달리 kling은 클립이
         5/10초이고 음성 길이로 잘리므로, 상위(VideoStudio)가 duration_sec을 실측에
         맞추도록 이 합계를 함께 반환한다(ffprobe 없이 audio_sec/clip_dur로 계산).
+
+        kling_tts 분기:
+          - 'gemini'(기본): GeminiTtsClient로 내레이션 합성.
+          - 'elevenlabs': ElevenLabsTtsClient(아이 목소리)로 합성.
+        kling_lipsync=true이면 mux 대신 KlingLipSyncClient로 립싱크 후처리를 수행한다.
         """
         builder = KlingPromptBuilder()
         kling = self._kling_client
         tts = self._tts_client
-        owned_kling = owned_tts = None
+        lipsync = self._kling_lipsync_client
+        owned_kling = owned_tts = owned_lipsync = None
         if kling is None:
             kling = owned_kling = KlingClient(self.settings, sleep=self._sleep)
         if tts is None:
-            tts = owned_tts = GeminiTtsClient(self.settings, sleep=self._sleep)
+            # kling_tts 설정에 따라 TTS 클라이언트를 분기한다.
+            if self.settings.kling_tts == "elevenlabs":
+                from nutti.integrations.tts_elevenlabs import ElevenLabsTtsClient
+
+                tts = owned_tts = ElevenLabsTtsClient(self.settings, sleep=self._sleep)
+            else:
+                tts = owned_tts = GeminiTtsClient(self.settings, sleep=self._sleep)
+        if self.settings.kling_lipsync and lipsync is None:
+            lipsync = owned_lipsync = KlingLipSyncClient(self.settings, sleep=self._sleep)
         clips: list[str] = []
         total_sec = 0.0
         try:
             for i, beat in enumerate(beats, start=1):
                 voice_path, audio_sec = tts.synthesize(beat)
                 silent_path: str | None = None
+                # 립싱크 중간 산출물: None으로 초기화해 finally에서 안전하게 정리한다.
+                lipsync_intermediate: str | None = None
+                # kling.generate 이전에 예외가 발생해도 finally가 참조할 수 있도록 미리 초기화.
+                clip_is_lipsync = False
                 try:
                     clip_dur = _pick_clip_duration(audio_sec)
                     silent_path = kling.generate(frame_path, builder.build_beat(beat), clip_dur)
-                    muxed = self._mux(silent_path, voice_path)
+                    if self.settings.kling_lipsync and lipsync is not None:
+                        # 립싱크 모드: mux 대신 fal LipSync로 마스코트 입을 음성에 맞춘다.
+                        # KlingLipSyncClient.generate → (로컬 경로, has_audio).
+                        # has_audio=True이면 출력에 음성이 포함된 것이므로 mux 불필요.
+                        lipsync_path, has_audio = lipsync.generate(
+                            silent_path,
+                            voice_path,
+                            video_sec=float(clip_dur),
+                            audio_sec=float(audio_sec),
+                        )
+                        # 즉시 추적: _mux 실패 시에도 finally에서 정리할 수 있도록 기록.
+                        lipsync_intermediate = lipsync_path
+                        if has_audio:
+                            # 립싱크 출력에 음성 포함 → WAV 별도 mux 불필요.
+                            muxed = lipsync_path
+                            clip_is_lipsync = True
+                        else:
+                            # 립싱크 결과에 음성 없음(예상치 못한 경우) → 안전 fallback: mux.
+                            log.warning(
+                                "lipsync.no_audio_fallback",
+                                beat=i,
+                                of=len(beats),
+                            )
+                            muxed = self._mux(lipsync_path, voice_path)
+                            # mux 성공: lipsync 중간물을 여기서 제거할 수도 있지만
+                            # finally가 lipsync_intermediate를 항상 정리하므로 생략한다.
+                    else:
+                        muxed = self._mux(silent_path, voice_path)
                 finally:
-                    # 비트 중간 산출물(무음 영상·내레이션 WAV)은 mux 성공/실패와
-                    # 무관하게 더 필요 없으므로 즉시 정리한다(수백 MB 누적·leak 방지).
+                    # 비트 중간 산출물(무음 영상·내레이션 WAV·립싱크 중간물)은
+                    # mux/립싱크 성공/실패와 무관하게 더 필요 없으므로 즉시 정리한다
+                    # (수백 MB 누적·leak 방지).
                     # kling.generate가 실패하면 silent_path는 None이라 voice만 정리된다.
+                    # has_audio=True 시 lipsync_intermediate == muxed가 되므로,
+                    # muxed 자체를 삭제하지 않도록 clip_is_lipsync를 확인한다.
                     _unlink_quiet(voice_path)
                     _unlink_quiet(silent_path)
-                # mux -shortest 출력 길이 ≈ 두 입력 중 짧은 쪽(보통 내레이션=audio_sec,
-                # 음성이 clip_dur보다 길면 영상 길이로 잘림).
-                total_sec += min(float(clip_dur), float(audio_sec))
+                    if not clip_is_lipsync:
+                        # has_audio=False fallback 또는 예외 발생: 중간 립싱크 파일 정리.
+                        _unlink_quiet(lipsync_intermediate)
+                # mux -shortest 출력 길이 ≈ 두 입력 중 짧은 쪽(보통 내레이션=audio_sec).
+                # 립싱크 has_audio=True 출력은 silent 영상과 동일한 clip_dur를 유지한다.
+                if clip_is_lipsync:
+                    total_sec += float(clip_dur)
+                else:
+                    total_sec += min(float(clip_dur), float(audio_sec))
                 log.info("video.kling.clip.done", path=muxed, beat=i, of=len(beats))
                 clips.append(muxed)
         except BaseException:
@@ -583,6 +952,8 @@ class KlingVoiceoverBackend:
                 _close_owned(owned_kling)
             if owned_tts is not None:
                 _close_owned(owned_tts)
+            if owned_lipsync is not None:
+                _close_owned(owned_lipsync)
         return clips, total_sec
 
     def _mux(self, video_path: str, audio_path: str) -> str:

@@ -75,6 +75,21 @@ class Settings(BaseSettings):
         default="21m00Tcm4TlvDq8ikWAM", alias="NUTTI_ELEVENLABS_VOICE_ID"
     )
 
+    # ---- Kling LipSync 후처리 ----
+    # true면 무음 Kling 클립 생성 후 TTS 음성으로 fal.ai LipSync 처리한다.
+    # false(기본)면 기존 보이스오버(mux) 동작을 그대로 유지한다.
+    kling_lipsync: bool = Field(default=False, alias="NUTTI_KLING_LIPSYNC")
+    # LipSync 후처리에 사용할 TTS 소스. "gemini"(기본, GEMINI_API_KEY 재사용) |
+    # "elevenlabs"(아이 목소리, ELEVENLABS_API_KEY 필요).
+    kling_tts: Literal["gemini", "elevenlabs"] = Field(
+        default="gemini", alias="NUTTI_KLING_TTS"
+    )
+    # fal.ai Kling LipSync 모델 경로. 변경 시 _validate_model_id가 형식을 검증한다.
+    kling_lipsync_model: str = Field(
+        default="fal-ai/kling-video/lipsync/audio-to-video",
+        alias="NUTTI_KLING_LIPSYNC_MODEL",
+    )
+
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
     google_service_account_json: str = Field(default="", alias="GOOGLE_SERVICE_ACCOUNT_JSON")

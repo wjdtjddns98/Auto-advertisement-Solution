@@ -741,6 +741,7 @@ class VideoStudio:
         veo_client=None,
         kling_client=None,
         tts_client=None,
+        kling_lipsync_client=None,
         sleep=None,
     ):
         # 실연동 클라이언트는 주입 가능하게 받는다(테스트에서 fake 주입 → 네트워크 불요).
@@ -751,6 +752,9 @@ class VideoStudio:
         # kling 백엔드(무음 영상 + 한국어 TTS 보이스오버)용 주입 클라이언트.
         self._kling_client = kling_client
         self._tts_client = tts_client
+        # Kling LipSync 후처리(NUTTI_KLING_LIPSYNC=true)용 주입 클라이언트.
+        # 미주입 시 백엔드(KlingVoiceoverBackend)가 실 경로에서 지연 생성한다.
+        self._kling_lipsync_client = kling_lipsync_client
         # 폴링 대기용 sleep 주입(기본 time.sleep). 테스트에서 가짜 시계로 대체.
         self._sleep = sleep
 
@@ -767,14 +771,28 @@ class VideoStudio:
         if self.settings.dry_run:
             return
         # 시작 프레임은 백엔드 무관하게 NanoBanana(Gemini)로 만든다 → GEMINI_API_KEY 필수.
-        # kling 백엔드는 TTS도 Gemini를 쓰므로 동일 키로 충분하고, 추가로 FAL_KEY가 필요하다.
+        # kling 백엔드는 추가로 FAL_KEY가 필요하다(TTS 소스는 kling_tts로 분기 — 아래 참조).
         if self.settings.video_backend == "kling":
             if self._nano_client is None and not _usable_key(self.settings.gemini_api_key):
-                raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 프레임/TTS에 필수입니다.")
-            if self._tts_client is None and not _usable_key(self.settings.gemini_api_key):
-                raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 TTS에 필수입니다.")
+                raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 프레임에 필수입니다.")
+            # TTS 소스 키 검증: kling_tts에 따라 필요한 키가 다르다.
+            # · gemini(기본): TTS도 Gemini generateContent라 GEMINI_API_KEY 재사용.
+            # · elevenlabs: 아이 목소리 합성에 ELEVENLABS_API_KEY 필수(타 호스트 유출 금지 키).
+            # tts_client를 직접 주입하면 소스 무관하게 이 키 검사를 건너뛴다(테스트/대체 구현 허용).
+            if self._tts_client is None:
+                if self.settings.kling_tts == "elevenlabs":
+                    if not _usable_key(self.settings.elevenlabs_api_key):
+                        raise ValueError(
+                            "ELEVENLABS_API_KEY가 비어 있습니다 — "
+                            "kling 백엔드의 TTS(kling_tts=elevenlabs)에 필수입니다."
+                        )
+                elif not _usable_key(self.settings.gemini_api_key):
+                    raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 TTS에 필수입니다.")
             if self._kling_client is None and not _usable_key(self.settings.fal_key):
                 raise ValueError("FAL_KEY가 비어 있습니다 — kling 백엔드(dry_run=False) 시 필수입니다.")
+            # LipSync 후처리(kling_lipsync=true)도 fal.ai 큐를 쓰므로 FAL_KEY 요구는 위에서 충족된다.
+            # LipSync 클라이언트(kling_lipsync_client) 주입 여부와 무관하게 프레임용 GEMINI_API_KEY·
+            # FAL_KEY 요구는 유지된다(무음 클립 생성은 여전히 Kling=fal, 프레임은 Gemini).
             return
         needs_key = self._nano_client is None or self._veo_client is None
         if needs_key and not _usable_key(self.settings.gemini_api_key):
@@ -842,10 +860,8 @@ class VideoStudio:
             return self._produce_clips_veo(frame_path, beats), None
         # Settings.video_backend는 Literal["veo","kling"]이므로 여기는 도달 불가.
         # 직접 객체 변조·테스트 주입 등 런타임 우회 대비용 명시적 거부.
-        raise ValueError(
-            f"알 수 없는 video_backend 값: {self.settings.video_backend!r}. "
-            "'veo' 또는 'kling' 중 하나여야 합니다."
-        )
+        # 설정 값을 메시지에 포함하면 monkey-patch된 임의 문자열이 로그/텔레그램으로 누출될 수 있다.
+        raise ValueError("알 수 없는 video_backend 값입니다 — 'veo' 또는 'kling' 중 하나여야 합니다.")
 
     def _produce_clips_kling(self, frame_path: str, beats: list[str]) -> tuple[str, float]:
         """Kling 무음 + 한국어 TTS 백엔드로 비트 클립을 만들고 스티칭한다.
@@ -860,6 +876,7 @@ class VideoStudio:
             self.settings,
             kling_client=self._kling_client,
             tts_client=self._tts_client,
+            kling_lipsync_client=self._kling_lipsync_client,
             sleep=self._sleep,
         )
         clips, total_sec = backend.produce_beat_clips(frame_path, beats)
