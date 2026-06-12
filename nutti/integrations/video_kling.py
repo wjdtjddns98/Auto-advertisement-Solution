@@ -889,6 +889,10 @@ class KlingVoiceoverBackend:
                 from nutti.integrations.tts_elevenlabs import ElevenLabsTtsClient
 
                 tts = owned_tts = ElevenLabsTtsClient(self.settings, sleep=self._sleep)
+            elif self.settings.kling_tts == "supertone":
+                from nutti.integrations.tts_supertone import SupertoneTtsClient
+
+                tts = owned_tts = SupertoneTtsClient(self.settings, sleep=self._sleep)
             else:
                 tts = owned_tts = GeminiTtsClient(self.settings, sleep=self._sleep)
         if self.settings.kling_lipsync and lipsync is None:

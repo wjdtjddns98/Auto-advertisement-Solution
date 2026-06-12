@@ -75,13 +75,25 @@ class Settings(BaseSettings):
         default="21m00Tcm4TlvDq8ikWAM", alias="NUTTI_ELEVENLABS_VOICE_ID"
     )
 
+    # Supertone TTS(한국어 캐릭터 보이스, 2026-06-12 PO 선정) — kling_tts="supertone" 시 사용.
+    # Supertone 전용 키 — supertoneapi.com에만 첨부(타 호스트 유출 금지).
+    supertone_api_key: str = Field(default="", alias="SUPERTONE_API_KEY")
+    # 콤마 구분 복수 voice_id — 영상 1편마다 대본 기반으로 결정적으로 1개 선택(로테이션).
+    # 기본값 = PO가 고른 2종: Cheeky(건방진 마법사 소녀)·Aiko.
+    supertone_voice_ids: str = Field(
+        default="d40bae491c78a65f2f8488,ac449f240c2732b7f0b8bb",
+        alias="NUTTI_SUPERTONE_VOICE_IDS",
+    )
+    # Supertone 합성 모델. sona_speech_2 = 플래그십(샘플 검증 완료).
+    supertone_model: str = Field(default="sona_speech_2", alias="NUTTI_SUPERTONE_MODEL")
+
     # ---- Kling LipSync 후처리 ----
     # true면 무음 Kling 클립 생성 후 TTS 음성으로 fal.ai LipSync 처리한다.
     # false(기본)면 기존 보이스오버(mux) 동작을 그대로 유지한다.
     kling_lipsync: bool = Field(default=False, alias="NUTTI_KLING_LIPSYNC")
-    # LipSync 후처리에 사용할 TTS 소스. "gemini"(기본, GEMINI_API_KEY 재사용) |
-    # "elevenlabs"(아이 목소리, ELEVENLABS_API_KEY 필요).
-    kling_tts: Literal["gemini", "elevenlabs"] = Field(
+    # kling 백엔드 내레이션의 TTS 소스. "gemini"(기본, GEMINI_API_KEY 재사용) |
+    # "elevenlabs"(ELEVENLABS_API_KEY 필요) | "supertone"(SUPERTONE_API_KEY 필요).
+    kling_tts: Literal["gemini", "elevenlabs", "supertone"] = Field(
         default="gemini", alias="NUTTI_KLING_TTS"
     )
     # fal.ai Kling LipSync 모델 경로. 변경 시 _validate_model_id가 형식을 검증한다.

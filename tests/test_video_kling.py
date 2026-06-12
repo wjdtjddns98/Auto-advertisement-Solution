@@ -520,6 +520,29 @@ def test_videostudio_kling_validate_config_elevenlabs_tts_missing_key_raises():
         studio.validate_config()
 
 
+def test_videostudio_kling_validate_config_supertone_tts_missing_key_raises():
+    """kling_tts='supertone' + SUPERTONE_API_KEY 빈 값 → ValueError(키 분기 회귀 핀).
+
+    elevenlabs 키 검사 핀과 동일 구조 — 이 테스트가 없으면 video.py의 supertone
+    키 검사 분기를 삭제해도 기존 테스트가 모두 통과한다.
+    """
+    settings = _live_settings(
+        NUTTI_VIDEO_BACKEND="kling",
+        GEMINI_API_KEY="",
+        FAL_KEY="",
+        NUTTI_KLING_TTS="supertone",
+        SUPERTONE_API_KEY="",
+    )
+    studio = VideoStudio(
+        settings,
+        nano_client=FakeNanoBananaClient(),
+        kling_client=FakeKlingClient(),
+        # tts_client 미주입 → supertone 키 검사 분기가 발화해야 한다
+    )
+    with pytest.raises(ValueError, match="SUPERTONE_API_KEY"):
+        studio.validate_config()
+
+
 def test_videostudio_kling_validate_config_all_clients_injected_lipsync_passes():
     """nano·tts·kling·lipsync 클라이언트 모두 주입 → kling_lipsync=true여도 키 검사 없이 통과."""
     settings = _live_settings(
@@ -620,6 +643,51 @@ def test_kling_voiceover_backend_elevenlabs_tts_client_injected(tmp_path, monkey
 
     assert len(clips) == 1
     assert fake_tts.calls == ["b1"]
+
+
+def test_kling_voiceover_backend_supertone_branch_lazily_constructs_client(tmp_path, monkeypatch):
+    """kling_tts='supertone' + tts_client 미주입 → SupertoneTtsClient가 지연 생성·호출된다.
+
+    이 핀이 없으면 video_kling.py의 supertone 분기를 지워도(gemini로 폴백) 기존
+    테스트가 모두 통과한다 — kling_lipsync 분기 죽은 코드 사례(PR #39 리뷰)와 동일 교훈.
+    """
+    import nutti.integrations.tts_supertone as st_module
+
+    settings = _kling_settings(
+        NUTTI_MEDIA_DIR=str(tmp_path),
+        NUTTI_KLING_TTS="supertone",
+        SUPERTONE_API_KEY="test-st-key",
+    )
+
+    constructed: list[object] = []
+
+    class _FakeSupertone:
+        def __init__(self, s, *, sleep=None):
+            constructed.append(self)
+            self.calls: list[str] = []
+            self.close_count = 0
+
+        def synthesize(self, text):
+            self.calls.append(text)
+            return "data/fake/st_voice.wav", 4.0
+
+        def close(self):
+            self.close_count += 1
+
+    monkeypatch.setattr(st_module, "SupertoneTtsClient", _FakeSupertone)
+
+    def fake_mux(self, v, a):
+        return "data/fake/beat_st.mp4"
+
+    monkeypatch.setattr(KlingVoiceoverBackend, "_mux", fake_mux)
+    backend = KlingVoiceoverBackend(settings, kling_client=FakeKlingClient())
+    clips, _ = backend.produce_beat_clips("frame.png", ["b1", "b2"])
+
+    assert len(clips) == 2
+    # supertone 분기가 발화해 fake가 생성·비트별 호출·정확히 1회 close됐어야 한다.
+    assert len(constructed) == 1
+    assert constructed[0].calls == ["b1", "b2"]
+    assert constructed[0].close_count == 1
 
 
 def test_produce_beat_clips_cleans_intermediates_on_success(tmp_path, monkeypatch):
