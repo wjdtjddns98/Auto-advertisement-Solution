@@ -243,19 +243,28 @@ class KlingPromptBuilder:
     # =========================== PO 수정 구역 (Kling 연출) ===========================
     # Kling 무음 영상의 "움직임·카메라·금지요소"를 바꾸려면 아래 영어 템플릿을 고친다.
     # 마스코트는 말하는 연출로 움직이고 음성은 TTS mux — _TALKING을 빼면 입이 안 움직인다.
+    # 2026-06-12 실테스트 PO 피드백("말하는 분위기가 아니다")으로 강화: 입 움직임을
+    # 클립 전체에 걸친 '가장 중요한 단일 요구사항'으로 반복 명시하고, 닫힌 입을 금지한다.
     _MOTION = (
-        "A photorealistic dog mascot in a cozy warmly lit studio, looking at the camera and "
-        "enthusiastically talking to the viewer, friendly expressive face, occasional small "
-        "head gestures while talking."
+        "A photorealistic dog mascot in a cozy warmly lit studio, facing the camera and "
+        "speaking non-stop directly to the viewer like an energetic TV show host delivering "
+        "lines, very expressive animated face, lively eyebrows and ears, small emphatic head "
+        "nods on key words."
     )
-    _CAMERA = "Camera: locked-off tripod, medium close-up, eye-level, no camera movement."
+    _CAMERA = (
+        "Camera: locked-off tripod, medium close-up framing the face so the mouth is large "
+        "and clearly visible, eye-level, no camera movement."
+    )
     _TALKING = (
-        "The dog's mouth is clearly moving as if speaking, with natural lip and jaw movements "
-        "(narration audio is added separately; approximate sync is fine)."
+        "Most important requirement: the dog's mouth is clearly moving in continuous speech "
+        "for the entire duration of the clip — jaw opening and closing repeatedly, visible "
+        "lip articulation, like an actively talking news anchor. The mouth must never stay "
+        "closed or resting (narration audio is added separately; approximate sync is fine)."
     )
     _NEGATIVE = (
         "Strictly no additional animals, no people. Absolutely no text, subtitles, captions, "
-        "letters, words, or writing anywhere in the frame."
+        "letters, words, or writing anywhere in the frame. The dog must not be silent, "
+        "still, or merely smiling with a closed mouth."
     )
     # ========================= PO 수정 구역 끝 (Kling 연출) =========================
 
