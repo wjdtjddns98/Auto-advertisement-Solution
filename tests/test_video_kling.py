@@ -1510,20 +1510,22 @@ def test_pcm_to_wav_bytes_riff_header():
 
 
 def test_kling_prompt_builder_talking_mascot_pins():
-    """말하는 마스코트 연출 핀(2026-06-12 PO 승인 + 같은 날 강화): 입 움직임 + 자막 금지.
+    """말하는 마스코트 연출 핀(2026-06-12 PO 육안 튜닝 3차): 자연스러운 발화 + 자막 금지.
 
     Kling LipSync가 강아지 얼굴을 인식하지 못해(face_detection_error) 생성 프롬프트로
-    입을 움직이는 방식으로 전환했다. 실테스트에서 PO가 "말하는 분위기가 아니다"라고
-    피드백해 클립 전체 연속 발화·닫힌 입 금지로 강화했다 — 약한 버전으로 되돌리면 실패.
+    입을 움직이는 방식으로 전환했다. 강도 연혁: ①약함("말하는 분위기가 아니다") →
+    ②과함("너무 과해") → ③현재: 클립 내내 말하되 차분·과장 금지. 양극단으로 되돌리면 실패.
     """
     p = KlingPromptBuilder().build_beat("오늘의 간식 이야기")
-    # 강화된 말하는 연출: 클립 전체에 걸친 연속 입 움직임을 '최우선 요구사항'으로 명시.
-    assert "mouth is clearly moving" in p
-    assert "Most important requirement" in p
-    assert "entire duration" in p
-    assert "never stay" in p  # 닫힌 입 금지
-    # 무발화 시절 문구가 되살아나면 안 된다(리버트 가드).
+    # 말하는 연출 유지: 클립 내내 입이 움직이되, 차분·자연스럽게(과장 금지).
+    assert "mouth keeps moving naturally" in p
+    assert "throughout the clip" in p
+    assert "never exaggerated" in p
+    # ①약함 시절(무발화) 문구가 되살아나면 안 된다(리버트 가드).
     assert "NOT talking" not in p
+    # ②과함 시절(PR#46) 문구가 되살아나면 안 된다(리버트 가드).
+    assert "non-stop" not in p
+    assert "Most important requirement" not in p
     # 자막·글자 금지와 비트 무드 큐는 유지된다.
     assert "no text, subtitles" in p
     assert "오늘의 간식 이야기" in p
