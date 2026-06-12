@@ -37,7 +37,7 @@ def main() -> None:
     print(f"[설정] dry_run={s.dry_run}  backend={s.video_backend}  "
           f"fal={'O' if s.fal_key else 'X'}  gemini={'O' if s.gemini_api_key else 'X'}")
     if s.dry_run:
-        raise SystemExit("dry_run=True 상태 — .env에서 NUTTI_DRY_RUN=false로 바꿔야 실제 생성됩니다.")
+        raise SystemExit("dry_run=True 상태 - .env에서 NUTTI_DRY_RUN=false로 바꿔야 실제 생성됩니다.")
 
     studio = VideoStudio(s)
     t0 = time.monotonic()
@@ -52,9 +52,10 @@ def main() -> None:
     vp = asset.video_path
     if vp and Path(vp).exists():
         size_mb = Path(vp).stat().st_size / 1_000_000
-        print(f"  파일크기   : {size_mb:.2f} MB  (존재 확인 ✅)")
+        # 이모지 금지: Windows 콘솔(cp949)에서 UnicodeEncodeError로 마지막 줄이 깨진다(2026-06-12 실측).
+        print(f"  파일크기   : {size_mb:.2f} MB  (존재 확인 OK)")
     else:
-        print("  ⚠️  영상 파일이 디스크에 없음 — 경로 확인 필요")
+        print("  [경고] 영상 파일이 디스크에 없음 - 경로 확인 필요")
 
 
 if __name__ == "__main__":
