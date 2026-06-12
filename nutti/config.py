@@ -39,7 +39,9 @@ class Settings(BaseSettings):
     gemini_image_model: str = Field(
         default="gemini-2.5-flash-preview-05-20", alias="NUTTI_GEMINI_IMAGE_MODEL"
     )
-    veo_model: str = Field(default="veo-3.1-fast-generate-preview", alias="NUTTI_VEO_MODEL")
+    # 기본 Lite($0.05/초·720p): 2026-06-12 probe에서 한국어 발화·자막 없음 PO 합격.
+    # Lite는 negativePrompt 미지원(VeoClient가 모델명으로 분기). 상향 시 fast/standard로.
+    veo_model: str = Field(default="veo-3.1-lite-generate-preview", alias="NUTTI_VEO_MODEL")
     # 마스코트 레퍼런스 이미지 경로(없으면 텍스트 프롬프트만으로 시작 프레임 생성).
     nutti_mascot_image: str = Field(default="", alias="NUTTI_MASCOT_IMAGE")
     # 생성된 프레임/영상을 저장하는 로컬 디렉터리(Veo 산출물은 48시간 후 삭제되므로 즉시 저장).

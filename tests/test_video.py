@@ -1413,15 +1413,37 @@ def test_build_beat_audio_only_no_caption():
 
 
 def test_veo_client_submit_includes_negative_prompt(tmp_path):
-    """generate 제출 바디에 자막 억제 negativePrompt와 9:16 aspectRatio가 포함된다."""
+    """non-lite 모델: 제출 바디에 자막 억제 negativePrompt와 9:16 aspectRatio가 포함된다."""
     fake = FakeVeoHttp(get_responses=[_veo_done_response()])
-    client = _veo_client(tmp_path, fake)
+    client = _veo_client(tmp_path, fake, NUTTI_VEO_MODEL="veo-3.1-fast-generate-preview")
     client.generate(_frame_file(tmp_path), "prompt")
     params = fake.post_bodies[0]["parameters"]
     assert params["aspectRatio"] == "9:16"
     assert "subtitles" in params["negativePrompt"]
     # image-to-video라 instances에 image가 있고 video(연장)는 없다.
     assert "image" in fake.post_bodies[0]["instances"][0]
+
+
+def test_veo_client_submit_lite_omits_negative_prompt(tmp_path):
+    """lite 모델: negativePrompt를 보내지 않는다(보내면 400 거부 — 2026-06-12 실측 핀).
+
+    aspectRatio 9:16은 lite에서도 유지된다(probe에서 720×1280 출력 확인).
+    """
+    fake = FakeVeoHttp(get_responses=[_veo_done_response()])
+    client = _veo_client(tmp_path, fake, NUTTI_VEO_MODEL="veo-3.1-lite-generate-preview")
+    client.generate(_frame_file(tmp_path), "prompt")
+    params = fake.post_bodies[0]["parameters"]
+    assert params["aspectRatio"] == "9:16"
+    assert "negativePrompt" not in params
+
+
+def test_default_veo_model_is_lite(tmp_path):
+    """기본 Veo 모델은 Lite다(2026-06-12 PO probe 합격 — $0.05/초 비용 가드 핀).
+
+    기본값을 fast/standard로 되돌리면 편당 비용이 2~8배가 되므로 의도적 변경에만 허용.
+    """
+    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
+    assert "lite" in settings.veo_model
 
 
 def test_stitch_single_clip_returns_as_is(tmp_path):

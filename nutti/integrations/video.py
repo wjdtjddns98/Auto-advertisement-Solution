@@ -382,12 +382,16 @@ class NanoBananaClient(_HttpClosingMixin):
         self._sleep = sleep if sleep is not None else time.sleep
 
     def _client(self):
-        """httpx 클라이언트를 지연 확보(주입 우선). dry_run에선 호출되지 않는다."""
+        """httpx 클라이언트를 지연 확보(주입 우선). dry_run에선 호출되지 않는다.
+
+        이미지 생성(generateContent)은 동기 응답이라 생성 시간만큼 응답이 늦는다 —
+        60초에서 ReadTimeout이 실측 2회 발생(2026-06-12)해 120초로 늘렸다.
+        """
         if self._http is not None:
             return self._http
         import httpx
 
-        self._http = httpx.Client(timeout=60.0)
+        self._http = httpx.Client(timeout=120.0)
         return self._http
 
     # Gemini 이미지 API는 간헐적으로 이미지 파트 없이 응답한다(알려진 flakiness).
@@ -567,6 +571,13 @@ class VeoClient(_HttpClosingMixin):
         import base64
 
         frame_bytes = _read_bytes(frame_path, "Veo 시작 프레임")
+        params: dict = {"aspectRatio": "9:16"}
+        # Veo 3.1 Lite는 negativePrompt를 보내면 HTTP 400으로 거부한다
+        # ("`negativePrompt` isn't supported by this model", 2026-06-12 실측).
+        # Lite에서는 프롬프트 본문의 자막 금지 문구(_NEGATIVE·'no on-screen text')가
+        # 1차 방어로 남는다 — Lite probe 실측에서 자막 없음 확인(PO 판정 ③).
+        if self._supports_negative_prompt():
+            params["negativePrompt"] = _VEO_NEGATIVE_PROMPT
         body = {
             "instances": [
                 {
@@ -577,9 +588,17 @@ class VeoClient(_HttpClosingMixin):
                     },
                 }
             ],
-            "parameters": {"aspectRatio": "9:16", "negativePrompt": _VEO_NEGATIVE_PROMPT},
+            "parameters": params,
         }
         return self._submit_body(body)
+
+    def _supports_negative_prompt(self) -> bool:
+        """현재 설정 모델이 negativePrompt 파라미터를 받는지 여부(모델명 기반).
+
+        veo-3.1-lite-generate-preview는 미지원(400 거부, 2026-06-12 실측)이므로
+        모델명에 'lite'가 포함되면 미지원으로 본다. standard/fast는 지원.
+        """
+        return "lite" not in self.settings.veo_model.lower()
 
     def _submit_body(self, body: dict) -> str:
         """predictLongRunning 본문을 제출하고 검증된 operation name을 반환한다.
