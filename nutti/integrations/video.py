@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import re
 import time
+import zlib
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -309,11 +311,63 @@ def _guess_image_mime(path: str) -> str:
     return "image/jpeg"
 
 
+class EpisodeStyle(NamedTuple):
+    """편 단위 연출 스타일(의상·장소상황).
+
+    한 편 안에서는 시작 프레임과 모든 비트 프롬프트가 같은 스타일을 공유해
+    시각 일관성을 유지하고, 편이 바뀌면 다른 조합이 나와 채널이 단조롭지 않게 한다.
+    """
+
+    outfit: str
+    setting: str
+
+
+# ======================= PO 수정 구역 (편별 연출 로테이션) =======================
+# 편마다 마스코트의 "옷"과 "장소·상황"이 바뀐다(2026-06-12 PO 지시 — 매번 다른 옷,
+# 다른 장소·상황에서 인터뷰하는 느낌). 항목을 추가/삭제하면 조합 수가 바뀐다
+# (현재 6×6=36 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
+# 대사 인용 구분자와 충돌해 주입 방어 검증이 깨진다(U+2019는 허용).
+_EPISODE_OUTFITS = [
+    "a tiny yellow raincoat",
+    "a cozy cream knitted sweater",
+    "a crisp little navy suit with a red bow tie",
+    "a sporty grey hoodie",
+    "a light blue denim jacket",
+    "a fluffy red scarf with a matching beanie",
+]
+_EPISODE_SETTINGS = [
+    "standing on a busy city sidewalk like a street interview",
+    "sitting on a cozy living room sofa under warm lamps",
+    "sitting on a park bench on a sunny afternoon",
+    "standing at a bright modern kitchen counter",
+    "standing in front of a cute pet shop entrance",
+    "sitting at a tidy home office desk like a news anchor",
+]
+# ===================== PO 수정 구역 끝 (편별 연출 로테이션) =====================
+
+
+def pick_episode_style(script_id: str) -> EpisodeStyle:
+    """script.id의 CRC32로 의상·장소상황을 결정적으로 고른다(같은 편=같은 스타일).
+
+    의상과 장소는 서로 다른 salt로 해시해 독립적으로 조합된다 — 같은 salt를 쓰면
+    리스트 길이가 같을 때 인덱스가 동기화돼 조합 다양성이 리스트 길이로 줄어든다.
+    Supertone 보이스 로테이션(tts_supertone)과 같은 결정적 선택 패턴.
+    """
+    outfit_idx = zlib.crc32(f"outfit:{script_id}".encode()) % len(_EPISODE_OUTFITS)
+    setting_idx = zlib.crc32(f"setting:{script_id}".encode()) % len(_EPISODE_SETTINGS)
+    return EpisodeStyle(_EPISODE_OUTFITS[outfit_idx], _EPISODE_SETTINGS[setting_idx])
+
+
 class VeoPromptBuilder:
     """Veo 3.1 image-to-video 프롬프트 빌더(비트별 클립·네이티브 한국어 음성).
 
-    규칙(연구 노트 기반):
+    규칙(연구 노트 + 2026-06-12 실테스트 PO 피드백 기반):
     - 대사는 작은따옴표로 인용해 Veo 네이티브 음성으로 발화시킨다(별도 TTS 불요).
+    - 페르소나·목소리 묘사를 모든 비트에 동일하게 박는다 — 클립이 독립 생성되므로
+      목소리 일관성은 프롬프트가 유일한 통제 수단(실테스트에서 비트마다 목소리가
+      달라지는 문제 확인 → 상세 고정 묘사로 드리프트 완화).
+    - 인터뷰 마이크를 화면 밖에서 들이대는 길거리 인터뷰 구도(참고: "오줌싸개 강아지의
+      억울한 변명"·"조회수 두자리 강아지의 한마디" 류 쇼츠).
     - 카메라는 고정(locked-off tripod)·medium close-up·eye-level — 흔들림/컷 전환 방지.
     - 깨짐 주원인(추가 동물·사람·화면 내 텍스트)을 명시적으로 금지한다.
     - 포맷: photorealistic · 9:16 세로 · 각 비트는 8초 단일컷(여러 비트는 ffmpeg로 스티칭).
@@ -321,11 +375,29 @@ class VeoPromptBuilder:
 
     # =========================== PO 수정 구역 (영상 연출) ===========================
     # 영상의 "연기·카메라·말투"를 바꾸려면 아래 영어 템플릿을 고친다.
+    # · _PERSONA: 마스코트 캐릭터(능청·과장 리액션). 개성을 바꾸려면 여기를 수정
+    # · _VOICE: 목소리 고정 묘사 — 비트 간 목소리 일관성의 핵심. 모든 클립에 동일하게
+    #   들어가야 하므로 함부로 빼지 말 것. 목소리 톤을 바꾸려면 묘사 내용만 교체
+    # · _MIC: 화면 밖 인터뷰 마이크 연출(사람은 화면에 안 나옴)
     # · _SPEAKING_OFF / _SPEAKING_DIRECT: 마스코트가 누구에게 말하는지(인터뷰 톤 vs 정면)
     # · _CAMERA: 카메라 워크(고정·클로즈업). 흔들면 립싱크/일관성 깨짐 위험 ↑
     # · _NEGATIVE: 금지 요소(사람·다른 동물·화면 자막/글자). Veo가 깨진 한글 자막을
     #   임의로 박는 걸 막는 핵심 방어 — 함부로 빼지 말 것(_VEO_NEGATIVE_PROMPT와 이중 방어)
+    # 모든 템플릿에 ASCII 작은따옴표(') 금지 — 대사 인용 구분자와 충돌(주입 방어 깨짐).
     # 한국어로 "이렇게 바꾸고 싶다"만 정해도 됨 — 영어 반영은 개발자에게 요청 권장.
+    _PERSONA = (
+        "Nutti, a cheeky and expressive dog mascot with a big personality, reacting with "
+        "lively, exaggerated comedic facial expressions like a guest in a street interview"
+    )
+    _VOICE = (
+        "Voice (must be EXACTLY the same voice in every clip of this series): a bright, "
+        "cute young female Korean voice, slightly high-pitched, cheeky and energetic, "
+        "speaking at a lively natural pace."
+    )
+    _MIC = (
+        "A handheld interview microphone is pointed at the mascot from off-screen; "
+        "the person holding it stays completely out of frame."
+    )
     _SPEAKING_OFF = "speaking in Korean to an off-screen interviewer"
     _SPEAKING_DIRECT = "speaking in Korean directly to the camera"
     _CAMERA = "Camera: locked-off tripod shot, medium close-up, eye-level, no camera movement."
@@ -335,17 +407,33 @@ class VeoPromptBuilder:
     )
     # ========================= PO 수정 구역 끝 (영상 연출) =========================
 
-    def build(self, script: Script, *, off_screen_interviewer: bool = True) -> str:
+    def build(
+        self,
+        script: Script,
+        *,
+        off_screen_interviewer: bool = True,
+        style: EpisodeStyle | None = None,
+    ) -> str:
         """대본에서 단일컷 Veo 프롬프트를 만든다(하위호환·단일 비트 폴백).
 
         본문이 비면 주제로 폴백(빈 인용 방지). 멀티비트 경로는 `build_beat`를 쓴다.
         """
         text = script.body.strip() or script.topic
-        return self.build_beat(text, off_screen_interviewer=off_screen_interviewer)
+        return self.build_beat(text, off_screen_interviewer=off_screen_interviewer, style=style)
 
-    def build_beat(self, dialogue_text: str, *, off_screen_interviewer: bool = True) -> str:
+    def build_beat(
+        self,
+        dialogue_text: str,
+        *,
+        off_screen_interviewer: bool = True,
+        style: EpisodeStyle | None = None,
+    ) -> str:
         """비트 대사 한 토막으로 8초 단일컷 Veo 프롬프트를 만든다.
 
+        페르소나·고정 목소리 묘사는 항상 포함되고, `style`이 주어지면 의상·장소상황
+        문장이 추가된다(편 안에서 모든 비트가 같은 style을 받아 장면 연속성 유지).
+        인터뷰 마이크 연출(_MIC)은 off_screen_interviewer=True일 때만 붙는다 —
+        정면 발화 모드는 마이크 없는 1인 방송 톤.
         대사는 음성(spoken audio only)으로만 발화시키고 화면 자막을 금지한다 — Veo가
         한글 자막을 임의 렌더하면 깨진 글자로 나오기 때문(negativePrompt와 이중 방어).
         대사는 `_sanitize_prompt_text`로 정제한다 — 작은따옴표가 있으면 인용 구분자를
@@ -353,9 +441,15 @@ class VeoPromptBuilder:
         """
         dialogue = _sanitize_prompt_text(dialogue_text.strip() or "", _MAX_DIALOGUE_CHARS)
         speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
+        scene = ""
+        if style is not None:
+            scene = f"The mascot wears {style.outfit}, {style.setting}. "
+        mic = f"{self._MIC} " if off_screen_interviewer else ""
         return (
-            f"A photorealistic dog mascot {speaking}, saying (as spoken audio only, "
-            f"no on-screen text): '{dialogue}'. "
+            f"A photorealistic shot of {self._PERSONA}, {speaking}, "
+            f"saying (as spoken audio only, no on-screen text): '{dialogue}'. "
+            f"{scene}{mic}"
+            f"{self._VOICE} "
             f"{self._CAMERA} "
             "Format: vertical 9:16, single continuous 8-second shot. "
             f"{self._NEGATIVE}"
@@ -848,7 +942,9 @@ class VideoStudio:
             )
 
         frame_path = self._generate_frame(script)
-        video_path, measured_sec = self._produce_clips(frame_path, beats)
+        # 프레임과 비트 클립이 같은 편별 스타일(의상·장소)을 공유해야 장면이 이어진다.
+        style = pick_episode_style(script.id)
+        video_path, measured_sec = self._produce_clips(frame_path, beats, style)
         # kling 백엔드는 클립이 5/10초이고 mux `-shortest`로 음성 길이에 맞춰 잘리므로,
         # veo의 8.0×N 가정 대신 백엔드가 돌려준 실측 총길이를 쓴다(veo는 measured=None).
         if measured_sec is not None:
@@ -872,18 +968,21 @@ class VideoStudio:
             return beats
         return [script.body.strip() or script.topic]
 
-    def _produce_clips(self, frame_path: str, beats: list[str]) -> tuple[str, float | None]:
+    def _produce_clips(
+        self, frame_path: str, beats: list[str], style: EpisodeStyle
+    ) -> tuple[str, float | None]:
         """비트별 클립을 생성해 ffmpeg로 이어붙인 (최종 경로, 실측 총길이초)를 반환한다(백엔드 분기).
 
         `video_backend`가 "kling"이면 무음 Kling 영상 + 한국어 TTS 보이스오버 백엔드로
-        비트 클립을 만든다. 그 외(기본 "veo")는 Veo 네이티브 음성 경로를 쓴다.
+        비트 클립을 만든다(편별 스타일 미적용 — 프롬프트 체계가 달라 veo 전용).
+        그 외(기본 "veo")는 Veo 네이티브 음성 경로를 쓰고 스타일을 비트 프롬프트에 반영한다.
         실측 총길이초는 kling 경로에서만 채워지고(클립 길이가 음성 길이에 맞춰짐),
         veo 경로는 None을 돌려줘 호출부의 8.0×N 계산을 그대로 쓰게 한다.
         """
         if self.settings.video_backend == "kling":
             return self._produce_clips_kling(frame_path, beats)
         if self.settings.video_backend == "veo":
-            return self._produce_clips_veo(frame_path, beats), None
+            return self._produce_clips_veo(frame_path, beats, style), None
         # Settings.video_backend는 Literal["veo","kling"]이므로 여기는 도달 불가.
         # 직접 객체 변조·테스트 주입 등 런타임 우회 대비용 명시적 거부.
         # 설정 값을 메시지에 포함하면 monkey-patch된 임의 문자열이 로그/텔레그램으로 누출될 수 있다.
@@ -908,11 +1007,12 @@ class VideoStudio:
         clips, total_sec = backend.produce_beat_clips(frame_path, beats)
         return self._stitch(clips), total_sec
 
-    def _produce_clips_veo(self, frame_path: str, beats: list[str]) -> str:
+    def _produce_clips_veo(self, frame_path: str, beats: list[str], style: EpisodeStyle) -> str:
         """각 비트를 독립 8초 클립으로 생성한 뒤 ffmpeg로 이어붙여 최종 경로를 반환한다.
 
-        모든 클립이 같은 시작 프레임을 써서 마스코트 외형 일관성을 유지한다(음성은
-        클립마다 독립 생성됨 — 8초 경계에서 톤이 끊길 수 있다). Veo 클라이언트는
+        모든 클립이 같은 시작 프레임과 같은 편별 스타일(의상·장소)을 써서 시각
+        일관성을 유지한다. 음성은 클립마다 독립 생성되므로 프롬프트의 고정 목소리
+        묘사(_VOICE)가 비트 간 일관성의 유일한 통제 수단이다. Veo 클라이언트는
         한 번만 확보해 재사용하고, 자체 생성분만 finally에서 정확히 1회 닫는다
         (주입분은 소유자가 닫는다 — 연결 풀 누수 방지).
         """
@@ -924,7 +1024,7 @@ class VideoStudio:
         try:
             clips: list[str] = []
             for i, beat in enumerate(beats, start=1):
-                clip = client.generate(frame_path, builder.build_beat(beat))
+                clip = client.generate(frame_path, builder.build_beat(beat, style=style))
                 log.info("video.veo.clip.done", path=clip, beat=i, of=len(beats))
                 clips.append(clip)
         finally:
@@ -1000,15 +1100,20 @@ class VideoStudio:
         (작은따옴표 치환 + 길이 제한 — 간접 프롬프트 주입 심층 방어).
         """
         topic = _sanitize_prompt_text(script.topic, _MAX_TOPIC_CHARS)
+        # 의상·장소상황은 편별 로테이션(_EPISODE_OUTFITS/_EPISODE_SETTINGS)에서 결정적으로
+        # 선택된다 — 비트 클립 프롬프트와 같은 스타일을 공유해야 장면이 이어진다.
+        style = pick_episode_style(script.id)
         # ===================== PO 수정 구역 (첫 장면 비주얼) =====================
-        # 영상 "첫 장면의 배경·조명·구도"를 바꾸려면 아래 영어 묘사를 고친다.
-        # 예: "cozy, warmly lit studio"(아늑한 스튜디오) → "modern kitchen counter"(주방).
-        # 마스코트 외형 자체는 NUTTI_MASCOT_IMAGE(레퍼런스 이미지)가 결정한다 — 여긴 배경/구도.
-        # 한국어로 원하는 그림만 정해도 됨 — 영어 반영은 개발자에게 요청 권장.
+        # 영상 "첫 장면의 구도·표정·마이크 연출"을 바꾸려면 아래 영어 묘사를 고친다.
+        # 배경·의상은 위 로테이션 리스트(PO 수정 구역 — 편별 연출 로테이션)에서 고친다.
+        # 마스코트 외형 자체는 NUTTI_MASCOT_IMAGE(레퍼런스 이미지)가 결정한다 — 여긴 구도/연출.
+        # ASCII 작은따옴표(') 금지(주입 방어 검증과 충돌). 한국어로 원하는 그림만 정해도 됨.
         return (
             "A photorealistic vertical 9:16 starting frame for a short-form video: "
-            "the Nutti dog mascot sitting in a cozy, warmly lit studio, "
-            f"looking at the camera. Topic: {topic}. "
+            f"the Nutti dog mascot wearing {style.outfit}, {style.setting}, "
+            "looking at the camera with a cheeky, expressive face, like a guest in a "
+            "street interview. A handheld interview microphone is pointed at the mascot "
+            f"from off-screen; the person holding it is not visible. Topic: {topic}. "
             "No people, no additional animals, no on-screen text."
         )
         # =================== PO 수정 구역 끝 (첫 장면 비주얼) ===================
