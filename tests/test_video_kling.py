@@ -36,6 +36,7 @@ from nutti.integrations.video_kling import (
     GeminiTtsClient,
     KlingClient,
     KlingLipSyncClient,
+    KlingPromptBuilder,
     KlingVoiceoverBackend,
     _parse_pcm_rate,
     _pcm_to_wav_bytes,
@@ -1438,6 +1439,23 @@ def test_pcm_to_wav_bytes_riff_header():
 # ═══════════════════════════════════════════════════════════════════
 # 섹션 E. 순수 헬퍼
 # ═══════════════════════════════════════════════════════════════════
+
+
+def test_kling_prompt_builder_talking_mascot_pins():
+    """말하는 마스코트 연출 핀(2026-06-12 PO 승인): 입 움직임 지시 + 자막 금지 유지.
+
+    Kling LipSync가 강아지 얼굴을 인식하지 못해(face_detection_error) 생성 프롬프트로
+    입을 움직이는 방식으로 전환했다. 무발화(NOT talking) 문구로 되돌리면 실패한다.
+    """
+    p = KlingPromptBuilder().build_beat("오늘의 간식 이야기")
+    # 말하는 연출: 입·턱 움직임을 명시한다.
+    assert "mouth is clearly moving" in p
+    assert "talking" in p
+    # 무발화 시절 문구가 되살아나면 안 된다(리버트 가드).
+    assert "NOT talking" not in p
+    # 자막·글자 금지와 비트 무드 큐는 유지된다.
+    assert "no text, subtitles" in p
+    assert "오늘의 간식 이야기" in p
 
 
 def test_pick_clip_duration_short_audio_maps_to_5():

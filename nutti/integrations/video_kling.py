@@ -230,25 +230,28 @@ def _pcm_to_wav_bytes(pcm: bytes, rate: int) -> bytes:
 
 
 class KlingPromptBuilder:
-    """Kling 무음 클립용 프롬프트 빌더(보이스오버 포맷 — 마스코트는 말하지 않는다).
+    """Kling 무음 클립용 프롬프트 빌더(말하는 마스코트 + 별도 TTS 내레이션).
 
-    Veo와 달리 대사를 발화시키지 않는다(음성은 별도 TTS). 마스코트가 장면 안에서
-    자연스럽게 움직이되 ① 말하거나 입을 움직이지 말 것 ② 화면에 글자/자막 금지
-    ③ 추가 동물·사람 금지를 명시한다. 비트 텍스트(내레이션 내용)는 장면 분위기
-    힌트로만 쓰고, 주입 방어를 위해 `_sanitize_prompt_text`로 정제한다.
+    영상 자체는 무음이고 음성은 별도 TTS를 mux한다. 마스코트는 카메라를 보며
+    **말하는 연출**(입·턱 움직임 명시)을 한다 — Kling LipSync가 강아지 얼굴을
+    인식하지 못해(2026-06-11 face_detection_error) 후처리 립싱크 대신 채택한 방식.
+    음절 단위 동기화는 아니고 "말하는 분위기"까지가 한계(2026-06-12 PO 육안 승인).
+    ① 화면에 글자/자막 금지 ② 추가 동물·사람 금지를 명시하고, 비트 텍스트
+    (내레이션 내용)는 장면 분위기 힌트로만 쓰며 `_sanitize_prompt_text`로 정제한다.
     """
 
     # =========================== PO 수정 구역 (Kling 연출) ===========================
     # Kling 무음 영상의 "움직임·카메라·금지요소"를 바꾸려면 아래 영어 템플릿을 고친다.
-    # 마스코트는 보이스오버 위에서 움직이기만 한다(말하지 않음) — _NO_SPEAK를 빼지 말 것.
+    # 마스코트는 말하는 연출로 움직이고 음성은 TTS mux — _TALKING을 빼면 입이 안 움직인다.
     _MOTION = (
-        "A photorealistic dog mascot in a cozy warmly lit studio, making subtle natural "
-        "movements (gentle head tilt, blinking, looking around), calm and friendly."
+        "A photorealistic dog mascot in a cozy warmly lit studio, looking at the camera and "
+        "enthusiastically talking to the viewer, friendly expressive face, occasional small "
+        "head gestures while talking."
     )
     _CAMERA = "Camera: locked-off tripod, medium close-up, eye-level, no camera movement."
-    _NO_SPEAK = (
-        "The dog is NOT talking and does NOT move its mouth to speak (voiceover narration is "
-        "added separately). Mouth stays closed or natural."
+    _TALKING = (
+        "The dog's mouth is clearly moving as if speaking, with natural lip and jaw movements "
+        "(narration audio is added separately; approximate sync is fine)."
     )
     _NEGATIVE = (
         "Strictly no additional animals, no people. Absolutely no text, subtitles, captions, "
@@ -257,15 +260,15 @@ class KlingPromptBuilder:
     # ========================= PO 수정 구역 끝 (Kling 연출) =========================
 
     def build_beat(self, beat_text: str) -> str:
-        """비트 1개의 무음 Kling 프롬프트를 만든다(말하지 않는 마스코트 + 자막 금지).
+        """비트 1개의 무음 Kling 프롬프트를 만든다(말하는 마스코트 + 자막 금지).
 
-        beat_text는 내레이션 내용이라 발화시키지 않고 장면 톤 힌트로만 둔다 —
-        실제로는 _MOTION의 고정 연출이 주가 되고, 정제된 비트는 짧은 무드 큐로 붙인다.
+        beat_text는 내레이션 내용이라 그대로 발화시키지 않고 장면 톤 힌트로만 둔다 —
+        실제로는 _MOTION·_TALKING의 고정 연출이 주가 되고, 정제된 비트는 짧은 무드 큐로 붙는다.
         """
         mood = _sanitize_prompt_text(beat_text.strip() or "", _MAX_SCENE_CHARS)
         return (
-            f"{self._MOTION} Scene mood (do not render as text, do not speak it): '{mood}'. "
-            f"{self._CAMERA} {self._NO_SPEAK} "
+            f"{self._MOTION} Scene mood (do not render as text): '{mood}'. "
+            f"{self._CAMERA} {self._TALKING} "
             "Format: vertical 9:16. "
             f"{self._NEGATIVE}"
         )
