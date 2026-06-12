@@ -34,6 +34,8 @@ CANDIDATES = [
 ]
 
 s = Settings()
+if s.dry_run:
+    raise SystemExit("dry_run=True 상태 — .env에서 NUTTI_DRY_RUN=false로 바꿔야 실제 합성됩니다.")
 h = {"xi-api-key": s.elevenlabs_api_key}
 out_dir = Path(s.nutti_media_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
