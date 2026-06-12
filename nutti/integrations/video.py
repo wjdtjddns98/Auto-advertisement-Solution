@@ -777,7 +777,8 @@ class VideoStudio:
                 raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 프레임에 필수입니다.")
             # TTS 소스 키 검증: kling_tts에 따라 필요한 키가 다르다.
             # · gemini(기본): TTS도 Gemini generateContent라 GEMINI_API_KEY 재사용.
-            # · elevenlabs: 아이 목소리 합성에 ELEVENLABS_API_KEY 필수(타 호스트 유출 금지 키).
+            # · elevenlabs: ELEVENLABS_API_KEY 필수(타 호스트 유출 금지 키).
+            # · supertone: SUPERTONE_API_KEY 필수(supertoneapi.com 전용 키).
             # tts_client를 직접 주입하면 소스 무관하게 이 키 검사를 건너뛴다(테스트/대체 구현 허용).
             if self._tts_client is None:
                 if self.settings.kling_tts == "elevenlabs":
@@ -785,6 +786,12 @@ class VideoStudio:
                         raise ValueError(
                             "ELEVENLABS_API_KEY가 비어 있습니다 — "
                             "kling 백엔드의 TTS(kling_tts=elevenlabs)에 필수입니다."
+                        )
+                elif self.settings.kling_tts == "supertone":
+                    if not _usable_key(self.settings.supertone_api_key):
+                        raise ValueError(
+                            "SUPERTONE_API_KEY가 비어 있습니다 — "
+                            "kling 백엔드의 TTS(kling_tts=supertone)에 필수입니다."
                         )
                 elif not _usable_key(self.settings.gemini_api_key):
                     raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 TTS에 필수입니다.")
