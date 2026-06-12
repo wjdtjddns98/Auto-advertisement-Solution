@@ -941,9 +941,11 @@ class VideoStudio:
                 duration_sec=duration,
             )
 
-        frame_path = self._generate_frame(script)
-        # 프레임과 비트 클립이 같은 편별 스타일(의상·장소)을 공유해야 장면이 이어진다.
+        # 편별 스타일(의상·장소)은 여기서 정확히 한 번 계산해 프레임과 비트 클립에
+        # 같은 값을 명시적으로 전달한다 — 두 곳에서 독립 계산하면 향후 호출 경로가
+        # 갈릴 때 프레임과 클립의 장면이 어긋날 수 있다(리뷰 지적, PR #52).
         style = pick_episode_style(script.id)
+        frame_path = self._generate_frame(script, style)
         video_path, measured_sec = self._produce_clips(frame_path, beats, style)
         # kling 백엔드는 클립이 5/10초이고 mux `-shortest`로 음성 길이에 맞춰 잘리므로,
         # veo의 8.0×N 가정 대신 백엔드가 돌려준 실측 총길이를 쓴다(veo는 measured=None).
@@ -1071,9 +1073,11 @@ class VideoStudio:
         log.info("video.stitched", path=str(out_path), clips=len(clips))
         return str(out_path)
 
-    def _generate_frame(self, script: Script) -> str:
+    def _generate_frame(self, script: Script, style: EpisodeStyle) -> str:
         """NanoBanana로 시작 프레임을 생성한다(마스코트 레퍼런스 이미지 선택 첨부).
 
+        `style`은 produce()에서 한 번 계산된 편별 스타일 — 비트 클립과 동일한
+        의상·장소가 프레임에 들어가야 장면이 이어진다.
         주입된 클라이언트는 소유자가 닫고, 여기서 만든 것만 finally에서 닫는다
         (httpx 연결 풀 누수 방지). 주입분은 owned=None으로 둬 close하지 않는다.
         """
@@ -1083,7 +1087,7 @@ class VideoStudio:
             client = owned = NanoBananaClient(self.settings, sleep=self._sleep)
         try:
             path = client.generate_frame(
-                self._frame_prompt(script),
+                self._frame_prompt(script, style),
                 reference_image_path=self.settings.nutti_mascot_image or None,
             )
         finally:
@@ -1093,16 +1097,15 @@ class VideoStudio:
         return path
 
     @staticmethod
-    def _frame_prompt(script: Script) -> str:
+    def _frame_prompt(script: Script, style: EpisodeStyle) -> str:
         """시작 프레임 생성용 장면 프롬프트(마스코트·세로 9:16·금지 요소 명시).
 
+        `style`은 호출부(produce)가 한 번 계산해 비트 클립과 공유하는 편별
+        의상·장소 — 여기서 독립 계산하지 않는다(프레임-클립 장면 일치 계약).
         주제도 AI 생성 텍스트이므로 `_sanitize_prompt_text`로 정제해 삽입한다
         (작은따옴표 치환 + 길이 제한 — 간접 프롬프트 주입 심층 방어).
         """
         topic = _sanitize_prompt_text(script.topic, _MAX_TOPIC_CHARS)
-        # 의상·장소상황은 편별 로테이션(_EPISODE_OUTFITS/_EPISODE_SETTINGS)에서 결정적으로
-        # 선택된다 — 비트 클립 프롬프트와 같은 스타일을 공유해야 장면이 이어진다.
-        style = pick_episode_style(script.id)
         # ===================== PO 수정 구역 (첫 장면 비주얼) =====================
         # 영상 "첫 장면의 구도·표정·마이크 연출"을 바꾸려면 아래 영어 묘사를 고친다.
         # 배경·의상은 위 로테이션 리스트(PO 수정 구역 — 편별 연출 로테이션)에서 고친다.
