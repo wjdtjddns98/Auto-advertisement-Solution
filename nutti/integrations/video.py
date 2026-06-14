@@ -391,7 +391,7 @@ class VeoPromptBuilder:
     )
     _VOICE = (
         "Voice (must be EXACTLY the same voice in every clip of this series): a bright, "
-        "cute young female Korean voice, slightly high-pitched, cheeky and energetic, "
+        "cute Little girl Korean voice, slightly high-pitched, cheeky and energetic, "
         "speaking at a lively natural pace."
     )
     _MIC = (
