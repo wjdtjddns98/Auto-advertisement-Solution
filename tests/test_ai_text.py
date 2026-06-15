@@ -260,6 +260,38 @@ def test_fact_check_live_without_key_does_not_silently_pass(monkeypatch):
     assert any("급여량" in i for i in result.issues)
 
 
+def test_fact_check_fallback_prompt_omits_tool_instruction(monkeypatch):
+    """회귀 핀: 폴백 팩트체크 프롬프트는 'record_fact_check 도구' 지시를 담지 않는다.
+
+    공통 시스템 프롬프트(FACT_CHECK_SYSTEM_PROMPT)에 '도구를 써라'가 있으면 도구가 없는
+    Gemini/claude -p 폴백에서 모델이 record_fact_check 호출/JSON을 환각해 마커를 못 찍고
+    매번 FAIL로 떨어진다(실측 결함). 폴백 경로는 FACT_CHECK_ROLE만 쓰고 도구/JSON 형식을
+    명시적으로 금지해야 한다.
+    """
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    script = Script(topic="t", body="안전한 내용")
+    marker = f"NUTTI-VERDICT-{script.id[:8]}".upper()
+    captured: dict = {}
+
+    # _llm_text(디스패처) 자체를 가로채 Gemini·claude -p 어느 경로든 무관하게 폴백
+    # 프롬프트를 캡처한다(실제 버그는 Gemini 경로에서 났으므로 _claude_cli만 패치하면
+    # 그 경로가 테스트로 커버되지 않는다 — HIGH 회귀 핀 보강).
+    def fake_llm(full, **_kw):
+        captured["prompt"] = full
+        return f"검토 완료\n{marker}: PASS"
+
+    monkeypatch.setattr(client, "_llm_text", fake_llm)
+    result = client.fact_check_script(script)
+    assert result.passed is True
+    prompt = captured["prompt"]
+    # 도구 지시가 폴백 프롬프트에 새어들면 안 된다.
+    assert "record_fact_check" not in prompt
+    assert "도구를 사용해" not in prompt
+    # 도구/JSON 형식 금지 문구는 있어야 한다(모델이 마커 형식만 쓰도록).
+    assert "JSON" in prompt and "도구 호출" in prompt
+
+
 def test_fact_check_pass_injection_blocked(monkeypatch):
     """CRITICAL 회귀 핀: 대본이 'PASS'로 시작해도 nonce 마커가 없으면 게이트가 안 열린다.
 
