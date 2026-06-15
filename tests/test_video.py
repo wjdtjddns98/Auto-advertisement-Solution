@@ -553,12 +553,18 @@ class FakeVeoHttp:
         self,
         *,
         post_response: _Resp | None = None,
+        post_responses: list | None = None,
         post_exc: Exception | None = None,
         get_responses: list | None = None,
         download_response: _Resp | Exception | None = None,
         redirect_location: str | None = None,
     ):
         self.post_response = post_response or _veo_submit_response()
+        # post_responses 지정 시 제출(POST)이 순서대로 응답을 돌려준다(간헐 400 재시도
+        # 테스트용). 폴링 라우팅 키는 최종 성공 제출인 post_response의 name으로 계산하므로,
+        # 시퀀스의 마지막 성공 응답과 post_response를 같은 객체로 주면 폴링이 매칭된다.
+        self.post_responses = list(post_responses) if post_responses else None
+        self.post_count = 0
         self.post_exc = post_exc
         self.get_responses = list(get_responses or [])
         self.download_response = (
@@ -578,8 +584,14 @@ class FakeVeoHttp:
 
     def post(self, url, *, headers=None, json=None):
         self.post_bodies.append(json)
+        self.post_count += 1
         if self.post_exc is not None:
             raise self.post_exc
+        if self.post_responses:
+            item = self.post_responses.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
         return self.post_response
 
     def _expected_poll_url(self) -> str | None:
@@ -900,6 +912,47 @@ def test_veo_client_poll_permanent_4xx_does_not_retry(tmp_path):
         client.generate(_frame_file(tmp_path), "prompt")
     assert "404" in str(exc_info.value)
     assert fake.poll_count == 1
+
+
+def test_veo_client_submit_retries_intermittent_400_then_succeeds(tmp_path):
+    """회귀: Veo 제출의 간헐 400은 backoff 재시도로 완주한다(extend 다중 비트 보호).
+
+    2026-06-15 유료 실측: 동일 extend body가 한 호출은 HTTP 400, 직후 재시도는
+    200 + operation name으로 비결정적으로 갈렸다. 제출이 400을 영구 오류로 즉시
+    전파하면 extend 3연속(4비트) 완주율이 운에 좌우되므로, 제출 경로는 retry_400을
+    켜 400도 일시 오류로 재시도한다. 첫 제출 400 → 재시도 성공 → 폴링/다운로드 정상.
+    """
+    ok = _veo_submit_response()
+    fake = FakeVeoHttp(
+        post_responses=[_Resp(status_code=400), ok],
+        post_response=ok,  # 폴링 라우팅 키 = 최종 성공 제출의 name
+        get_responses=[_veo_done_response()],
+    )
+    sleeps: list[float] = []
+    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
+    client = VeoClient(settings, http=fake, sleep=sleeps.append)
+    path = client.generate(_frame_file(tmp_path), "prompt")
+    assert Path(path).read_bytes() == b"FAKE-MP4-BYTES"
+    assert fake.post_count == 2  # 400 1회 + 재시도 성공 1회.
+    assert len(sleeps) >= 1 and sleeps[0] > 0  # 재시도 전 backoff 대기.
+
+
+def test_send_json_400_not_retried_without_flag():
+    """기본(retry_400=False)은 400을 영구 오류로 즉시 전파한다(폴링·다운로드·Kling 보호).
+
+    retry_400은 Veo 제출 경로에서만 켜는 옵트인이다 — 다른 경로의 400(잘못된 입력)이
+    조용히 재시도되지 않도록 기본은 비재시도임을 핀한다.
+    """
+    calls = {"n": 0}
+
+    def _send():
+        calls["n"] += 1
+        return _Resp(status_code=400)
+
+    with pytest.raises(VideoRenderError) as exc_info:
+        video_module._send_json(_send, "x", sleep=_no_sleep, max_transient_retries=3)
+    assert "400" in str(exc_info.value)
+    assert calls["n"] == 1  # 재시도 없이 정확히 1회.
 
 
 def test_veo_client_transport_error_raises_render_error(tmp_path):
