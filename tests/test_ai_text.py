@@ -274,11 +274,14 @@ def test_fact_check_fallback_prompt_omits_tool_instruction(monkeypatch):
     marker = f"NUTTI-VERDICT-{script.id[:8]}".upper()
     captured: dict = {}
 
-    def fake_cli(full):
+    # _llm_text(디스패처) 자체를 가로채 Gemini·claude -p 어느 경로든 무관하게 폴백
+    # 프롬프트를 캡처한다(실제 버그는 Gemini 경로에서 났으므로 _claude_cli만 패치하면
+    # 그 경로가 테스트로 커버되지 않는다 — HIGH 회귀 핀 보강).
+    def fake_llm(full, **_kw):
         captured["prompt"] = full
         return f"검토 완료\n{marker}: PASS"
 
-    monkeypatch.setattr(client, "_claude_cli", fake_cli)
+    monkeypatch.setattr(client, "_llm_text", fake_llm)
     result = client.fact_check_script(script)
     assert result.passed is True
     prompt = captured["prompt"]
