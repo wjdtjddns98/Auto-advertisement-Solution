@@ -475,3 +475,141 @@ def test_clean_topic_preserves_leading_numbers_in_title():
 def test_clean_topic_empty_returns_blank():
     assert _clean_topic("") == ""
     assert _clean_topic("   \n  ") == ""
+
+
+# --- Gemini 텍스트 백엔드 (text_backend="gemini") ---
+
+
+class _FakeResp:
+    """httpx.Response 흉내 — status_code와 json()만 제공."""
+
+    def __init__(self, status_code: int, payload: dict):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _gemini_payload(text: str) -> dict:
+    return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+
+
+def _gemini_client() -> AITextClient:
+    """라이브 + Gemini 백엔드(Anthropic 키 없음). conftest가 .env를 격리하므로 키는 명시 주입."""
+    settings = Settings(
+        NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", GEMINI_API_KEY="k", NUTTI_ENV="test"
+    )
+    return AITextClient(settings)
+
+
+def test_use_gemini_text_true_with_key():
+    assert _gemini_client()._use_gemini_text() is True
+
+
+def test_use_gemini_text_false_without_key():
+    settings = Settings(NUTTI_DRY_RUN=False, GEMINI_API_KEY="", NUTTI_ENV="test")
+    assert AITextClient(settings)._use_gemini_text() is False
+
+
+def test_use_gemini_text_false_for_comment_placeholder():
+    # `.env`의 `GEMINI_API_KEY=  # 설명`이 더미 truthy로 파싱돼도 Gemini를 쓰지 않는다.
+    settings = Settings(NUTTI_DRY_RUN=False, GEMINI_API_KEY="# 설명", NUTTI_ENV="test")
+    assert AITextClient(settings)._use_gemini_text() is False
+
+
+def test_generate_script_uses_gemini_when_selected(monkeypatch):
+    """text_backend=gemini + 키 있음 → claude -p가 아니라 Gemini REST로 대본 생성."""
+    client = _gemini_client()
+    captured: dict = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["url"] = url
+        captured["key"] = headers["x-goog-api-key"]
+        return _FakeResp(200, _gemini_payload("훅 문장\n핵심 문장\n팁 문장\n마무리 문장"))
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    script = client.generate_script("강아지 간식")
+    assert script.beats == ["훅 문장", "핵심 문장", "팁 문장", "마무리 문장"]
+    assert script.fact_checked is False
+    assert "gemini-2.5-flash" in captured["url"]
+    assert captured["key"] == "k"  # 키가 Gemini 도메인 헤더로만 전달됨
+
+
+def test_fact_check_via_gemini_pass(monkeypatch):
+    """Gemini 경로도 nonce 마커 PASS면 통과(injection-safe 프로토콜 유지)."""
+    client = _gemini_client()
+    script = Script(topic="t", body="안전한 내용")
+    marker = f"NUTTI-VERDICT-{script.id[:8]}".upper()
+    monkeypatch.setattr(
+        "httpx.post", lambda *a, **k: _FakeResp(200, _gemini_payload(f"검토 완료\n{marker}: PASS"))
+    )
+    result = client.fact_check_script(script)
+    assert result.passed is True
+    assert result.issues == []
+
+
+def test_fact_check_via_gemini_fail_blocks(monkeypatch):
+    """CRITICAL 회귀 핀: Gemini FAIL이면 문제를 담아 차단(조용히 통과 금지)."""
+    client = _gemini_client()
+    script = Script(topic="t", body="위험한 주장")
+    marker = f"NUTTI-VERDICT-{script.id[:8]}".upper()
+    monkeypatch.setattr(
+        "httpx.post", lambda *a, **k: _FakeResp(200, _gemini_payload(f"급여량 근거 없음\n{marker}: FAIL"))
+    )
+    result = client.fact_check_script(script)
+    assert result.passed is False
+    assert any("급여량" in i for i in result.issues)
+
+
+def test_fact_check_via_gemini_http_error_fails_safe(monkeypatch):
+    """Gemini HTTP 오류(429 등) 시 통과를 지어내지 않고 passed=False(fail-safe)."""
+    client = _gemini_client()
+    monkeypatch.setattr("httpx.post", lambda *a, **k: _FakeResp(429, {}))
+    result = client.fact_check_script(Script(topic="t", body="x"))
+    assert result.passed is False
+    assert result.issues
+
+
+def test_gemini_text_no_candidates_raises(monkeypatch):
+    """세이프티 차단 등으로 후보가 없으면 RuntimeError(빈 응답을 통과로 두지 않음)."""
+    client = _gemini_client()
+    monkeypatch.setattr("httpx.post", lambda *a, **k: _FakeResp(200, {"candidates": []}))
+    with pytest.raises(RuntimeError):
+        client._gemini_text("아무 프롬프트")
+
+
+def test_text_backend_claude_ignores_gemini_key(monkeypatch):
+    """text_backend=claude면 GEMINI_API_KEY가 있어도 Gemini를 쓰지 않고 claude -p로 간다."""
+    settings = Settings(
+        NUTTI_DRY_RUN=False,
+        ANTHROPIC_API_KEY="",
+        GEMINI_API_KEY="k",
+        NUTTI_TEXT_BACKEND="claude",
+        NUTTI_ENV="test",
+    )
+    client = AITextClient(settings)
+    assert client._use_gemini_text() is False
+    monkeypatch.setattr(client, "_claude_cli", lambda _full: "훅\n핵심\n팁\n마무리")
+    script = client.generate_script("t")
+    assert script.beats == ["훅", "핵심", "팁", "마무리"]
+
+
+def test_suggest_topic_uses_gemini_when_selected(monkeypatch):
+    """text_backend=gemini + 키 있음 → Gemini로 주제 생성(정상 응답을 _clean_topic 통과)."""
+    client = _gemini_client()
+    monkeypatch.setattr(
+        "httpx.post", lambda *a, **k: _FakeResp(200, _gemini_payload("강아지 여름철 수분 보충법"))
+    )
+    topic = client.suggest_topic()
+    assert topic == "강아지 여름철 수분 보충법"
+
+
+def test_suggest_topic_gemini_failure_falls_back_to_seed(monkeypatch):
+    """CRITICAL 회귀 핀: Gemini 429/오류 시 크래시하지 않고 시드 주제로 폴백한다."""
+    from nutti.integrations.ai_text import _SEED_TOPICS
+
+    client = _gemini_client()
+    monkeypatch.setattr("httpx.post", lambda *a, **k: _FakeResp(429, {}))
+    topic = client.suggest_topic()  # RuntimeError가 전파되면 이 호출이 터진다(리버트 감지).
+    assert topic == _SEED_TOPICS[0]

@@ -12,6 +12,23 @@ from nutti.models import Metadata, PerformanceReport, Script
 
 log = get_logger(__name__)
 
+# Gemini 텍스트 생성(generateContent) REST 엔드포인트. video.py의 _GEMINI_BASE와 동일
+# 도메인이지만, 텍스트 경로는 video 모듈에 의존하지 않도록 여기서 따로 정의한다.
+_GEMINI_TEXT_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+
+def _usable_key(value: str | None) -> bool:
+    """API 키가 실제로 쓸 수 있는지(비어 있지 않고 인라인 주석이 아님) 판정한다.
+
+    pydantic-settings는 `.env`의 인라인 주석을 분리하지 않으므로 `KEY=   # 설명`이
+    `'# 설명'`이라는 truthy 문자열로 파싱된다. 단순 truthiness는 이런 더미 값을 진짜
+    키로 오인하므로 strip 후 `#` 시작을 배제한다(video._usable_key와 동일 규약).
+    """
+    if not value:
+        return False
+    stripped = value.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
 # ========================= PO 수정 구역 (대본 톤·내용) =========================
 # 마스코트가 "무슨 말을, 어떤 톤으로" 할지는 아래 한국어 프롬프트를 고치면 바뀐다.
 # · 더 친근하게/전문적으로/재밌게 → 첫 문장(페르소나)과 말투 지시를 수정
@@ -244,9 +261,9 @@ class AITextClient:
                 fact_checked=True,
             )
 
-        if self._client is None:
-            # API 키 없음 + 비-dry_run → Claude Code(Max 구독)로 생성(API 추가 과금 없음).
-            return self._generate_via_claude_code(topic, prompt)
+        if self._client is None or self._use_gemini_text():
+            # 비-dry_run + (Gemini 선택 또는 Anthropic 키 없음) → Gemini/claude -p 폴백.
+            return self._generate_via_fallback(topic, prompt)
 
         # 시스템 프롬프트에 prompt caching 적용(ephemeral).
         msg = self._client.messages.create(
@@ -298,14 +315,79 @@ class AITextClient:
             raise RuntimeError(f"claude -p 실패: 종료코드 {proc.returncode}")
         return (proc.stdout or "").strip()
 
-    def _generate_via_claude_code(self, topic: str, prompt: str) -> Script:
-        """Anthropic API 대신 Claude Code(Max 구독)로 대본 생성 — API 추가 과금 없음."""
+    def _use_gemini_text(self) -> bool:
+        """라이브 텍스트 생성을 Gemini로 보낼지 판정한다.
+
+        text_backend="gemini"(기본)이고 쓸 수 있는 GEMINI_API_KEY가 있을 때만 True.
+        키가 없으면 False를 돌려 자동으로 claude/claude -p 폴백으로 강등한다(키 없다고
+        파이프라인이 멈추지 않도록). dry_run 여부는 각 호출자가 먼저 가른다.
+        """
+        return (
+            self.settings.text_backend == "gemini"
+            and _usable_key(self.settings.gemini_api_key)
+        )
+
+    def _gemini_text(self, full_prompt: str, max_tokens: int = 1024) -> str:
+        """Gemini generateContent로 텍스트를 생성하고 본문 문자열을 반환한다.
+
+        실패(HTTP 4xx/5xx·빈 응답·세이프티 차단·네트워크)는 모두 RuntimeError로
+        통일해, 호출부의 기존 `except RuntimeError` 폴백/페일세이프 로직을 그대로
+        재사용한다. 키·프롬프트 원문이 새지 않도록 예외엔 상태코드/타입만 싣는다.
+        """
+        import httpx
+
+        url = f"{_GEMINI_TEXT_BASE}/models/{self.settings.gemini_text_model}:generateContent"
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
+            "generationConfig": {"maxOutputTokens": max_tokens},
+        }
+        headers = {
+            "x-goog-api-key": self.settings.gemini_api_key,
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = httpx.post(url, headers=headers, json=body, timeout=60.0)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Gemini text 요청 실패: {type(exc).__name__}") from exc
+        if resp.status_code >= 400:
+            # 본문엔 프롬프트 단편이 에코될 수 있어 상태코드만 노출(redaction 규율).
+            log.debug("gemini_text.http_error", status=resp.status_code)
+            raise RuntimeError(f"Gemini text HTTP {resp.status_code}")
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            # 200인데 비-JSON 바디(프록시/게이트웨이 등) → RuntimeError로 통일해
+            # 호출부의 except RuntimeError 페일세이프가 우회되지 않도록 한다.
+            raise RuntimeError("Gemini text 응답 JSON 파싱 실패") from exc
+        candidates = data.get("candidates") or []
+        if not candidates:
+            # 세이프티 차단 등으로 후보가 없으면 빈 응답 → 페일세이프(통과 지어내지 않음).
+            log.warning("gemini_text.no_candidates")
+            raise RuntimeError("Gemini text 빈 응답(후보 없음)")
+        parts = (candidates[0].get("content") or {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts).strip()
+        if not text:
+            raise RuntimeError("Gemini text 빈 응답(텍스트 없음)")
+        return text
+
+    def _llm_text(self, full_prompt: str, max_tokens: int = 1024) -> str:
+        """라이브 텍스트 호출 디스패처: Gemini(기본) 또는 claude -p 폴백.
+
+        두 경로 모두 실패 시 RuntimeError를 던지므로 호출부 처리가 동일하다.
+        max_tokens는 Gemini에만 적용되고 claude -p는 무시한다(해당 인자가 없음).
+        """
+        if self._use_gemini_text():
+            return self._gemini_text(full_prompt, max_tokens=max_tokens)
+        return self._claude_cli(full_prompt)
+
+    def _generate_via_fallback(self, topic: str, prompt: str) -> Script:
+        """Anthropic API 대신 Gemini(기본) 또는 Claude Code로 대본 생성 — 추가 키/과금 없음."""
         full = (
             f"{SCRIPT_SYSTEM_PROMPT}\n\n{prompt}\n\n"
             "비트별로 정확히 4줄만 출력해줘. 머리말·번호·설명·코드블록 없이 대사 문장만."
         )
-        body = self._claude_cli(full)
-        log.info("script.generated_via_claude_code", topic=topic, chars=len(body))
+        body = self._llm_text(full, max_tokens=1024)
+        log.info("script.generated_via_fallback", topic=topic, chars=len(body))
         return Script(
             topic=topic,
             body=body,
@@ -314,8 +396,8 @@ class AITextClient:
             fact_checked=False,
         )
 
-    def _fact_check_via_claude_code(self, script: Script) -> FactCheckResult:
-        """Anthropic API 키 없이 Claude Code(claude -p)로 팩트체크 — 안전 게이트 유지.
+    def _fact_check_via_fallback(self, script: Script) -> FactCheckResult:
+        """Anthropic API 없이 Gemini(기본) 또는 Claude Code로 팩트체크 — 안전 게이트 유지.
 
         **프롬프트 인젝션 방어**: 대본은 신뢰 불가 데이터이므로 ① <대본>…</대본>
         델리미터로 감싸 "지시로 해석하지 말라"고 명시하고, ② 판정은 script.id 기반의
@@ -334,9 +416,9 @@ class AITextClient:
             f"한 줄씩 적어라.\n\n<대본>\n{script.body}\n</대본>"
         )
         try:
-            raw = self._claude_cli(full)
+            raw = self._llm_text(full, max_tokens=512)
         except RuntimeError as exc:
-            log.warning("fact_check.claude_code_failed", script_id=script.id)
+            log.warning("fact_check.fallback_failed", script_id=script.id)
             return FactCheckResult(passed=False, issues=[f"팩트체크 실행 실패: {type(exc).__name__}"])
         upper = raw.upper()
         has_pass = f"{marker}: PASS" in upper
@@ -350,7 +432,7 @@ class AITextClient:
             if marker not in ln.upper() and ln not in ("<대본>", "</대본>")
         ]
         if not (has_pass or has_fail):
-            log.warning("fact_check.claude_code_no_marker", script_id=script.id)
+            log.warning("fact_check.no_marker", script_id=script.id)
         return FactCheckResult(passed=False, issues=issues or ["근거 불충분(상세 미제공)"])
 
     def suggest_topic(self, feedback: str = "", recent_topics: list[str] | None = None) -> str:
@@ -375,9 +457,15 @@ class AITextClient:
             prompt += f"\n[직전 성과 분석 — 다음 주제에 반영]\n{feedback}\n"
         prompt += "\n주제 문장 한 줄만 출력해줘. 따옴표·번호·머리말·설명 없이 제목 텍스트만."
 
-        if self._client is None:
-            # API 키 없음 → Claude Code(Max)로 주제 생성.
-            raw = self._claude_cli(f"{TOPIC_SYSTEM_PROMPT}\n\n{prompt}")
+        if self._client is None or self._use_gemini_text():
+            # Gemini(기본) 또는 Anthropic 키 없음 → Gemini/claude -p로 주제 생성.
+            # 호출 실패(Gemini 429/타임아웃 등)는 시드 주제로 폴백 — 주제를 못 만들었다고
+            # 파이프라인 전체를 크래시시키지 않는다(analyze_performance와 동일 페일세이프).
+            try:
+                raw = self._llm_text(f"{TOPIC_SYSTEM_PROMPT}\n\n{prompt}", max_tokens=128)
+            except RuntimeError:
+                log.warning("topic.suggest.fallback_failed")
+                return self._dry_topic(recent)
         else:
             msg = self._client.messages.create(
                 model=self.settings.script_model,
@@ -422,10 +510,10 @@ class AITextClient:
             log.info("dry_run.fact_check", script_id=script.id)
             return FactCheckResult(passed=True, issues=[])
 
-        if self._client is None:
-            # 라이브 + API 키 없음 → Claude Code(Max)로 팩트체크. 키 없다고 조용히
-            # 통과시키면 위험·근거없는 수의학 주장이 검수 전에 걸러지지 않는다.
-            return self._fact_check_via_claude_code(script)
+        if self._client is None or self._use_gemini_text():
+            # 라이브 + (Gemini 선택 또는 Anthropic 키 없음) → Gemini/claude -p로 팩트체크.
+            # 키 없다고 조용히 통과시키면 위험·근거없는 수의학 주장이 안 걸러진다.
+            return self._fact_check_via_fallback(script)
 
         prompt = (
             "다음 대본에서 근거가 없거나 위험한 수의학적 주장을 찾아 "
@@ -475,8 +563,8 @@ class AITextClient:
                 hashtags=["#강아지간식", "#수제간식", "#반려견건강", "#Nutti", "#강아지쇼츠"],
             )
 
-        if self._client is None:
-            return self._generate_metadata_via_claude_code(script, calculator_url)
+        if self._client is None or self._use_gemini_text():
+            return self._generate_metadata_via_fallback(script, calculator_url)
 
         prompt = (
             f"다음 <대본>에 맞는 YouTube Shorts 제목, 설명, 해시태그 5개를 만들어줘. "
@@ -502,10 +590,10 @@ class AITextClient:
             [str(t) for t in raw_tags] if isinstance(raw_tags, list) else [],
         )
 
-    def _generate_metadata_via_claude_code(
+    def _generate_metadata_via_fallback(
         self, script: Script, calculator_url: str
     ) -> Metadata:
-        """API 키 없이 Claude Code로 메타데이터 생성(JSON 파싱, 실패 시 기본 폴백).
+        """API 키 없이 Gemini(기본)/Claude Code로 메타데이터 생성(JSON 파싱, 실패 시 기본 폴백).
 
         메타데이터는 안전 게이트가 아니므로 CLI/파싱 실패 시 일반 폴백(_build_metadata의
         기본 제목·해시태그)으로 안전하게 진행한다. 대본은 델리미터로 감싼 데이터로 취급.
@@ -521,9 +609,9 @@ class AITextClient:
         title = description = ""
         hashtags: list[str] = []
         try:
-            data = _json.loads(self._claude_cli(full))
+            data = _json.loads(self._llm_text(full, max_tokens=512))
         except (RuntimeError, ValueError) as exc:
-            log.warning("metadata.claude_code_failed", script_id=script.id, err=type(exc).__name__)
+            log.warning("metadata.fallback_failed", script_id=script.id, err=type(exc).__name__)
             data = {}
         if isinstance(data, dict):
             title = str(data.get("title") or "")
@@ -571,12 +659,13 @@ class AITextClient:
         )
         prompt = f"다음 성과 데이터를 분석해 다음 대본 개선 포인트를 3가지로 요약해줘.\n{summary}"
 
-        if self._client is None:
-            # 라이브 + API 키 없음 → Claude Code 폴백. 실패 시 빈 피드백(루프 오염 방지).
+        if self._client is None or self._use_gemini_text():
+            # 라이브 + (Gemini 선택/Anthropic 키 없음) → Gemini/claude -p 폴백.
+            # 실패 시 빈 피드백(루프 오염 방지).
             try:
-                return self._claude_cli(prompt)
+                return self._llm_text(prompt, max_tokens=512)
             except RuntimeError:
-                log.warning("analyze.claude_code_failed")
+                log.warning("analyze.fallback_failed")
                 return ""
 
         msg = self._client.messages.create(

@@ -26,9 +26,22 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="NUTTI_LOG_LEVEL")
     dry_run: bool = Field(default=True, alias="NUTTI_DRY_RUN")
 
-    # 1단계: 대본 (Claude)
+    # 1단계: 대본 (기본 Gemini — 이미 결제된 GEMINI_API_KEY 재사용, claude -p 폴백 없음)
+    # text_backend: 라이브(비-dry_run) 텍스트 생성 백엔드 선택.
+    #   "gemini"(기본) → GEMINI_API_KEY로 Gemini generateContent 호출(대본·주제·팩트체크·
+    #     메타데이터·성과분석 전부). 키가 없으면 자동으로 claude/claude -p 폴백으로 강등.
+    #   "claude" → 기존 동작(ANTHROPIC_API_KEY 있으면 Anthropic API, 없으면 claude -p).
+    # Gemini를 기본으로 둔 이유: claude -p 폴백은 호출마다 풀 세션 부팅(MCP 로딩 등)으로
+    # 느리고 간헐 타임아웃이 잦았다. Gemini REST는 가볍고 추가 키도 불필요하다.
+    text_backend: Literal["gemini", "claude"] = Field(
+        default="gemini", alias="NUTTI_TEXT_BACKEND"
+    )
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     script_model: str = Field(default="claude-opus-4-8", alias="NUTTI_SCRIPT_MODEL")
+    # text_backend="gemini"일 때 대본·팩트체크 등에 쓰는 Gemini 텍스트 모델(저비용 flash).
+    gemini_text_model: str = Field(
+        default="gemini-2.5-flash", alias="NUTTI_GEMINI_TEXT_MODEL"
+    )
     # 실행 간 영속 상태(직전 성과 피드백·최근 주제) 저장 경로.
     # 매 사이클의 성과 분석을 다음 사이클 feedback으로 자동 연결하고,
     # 최근 주제를 기억해 주제 자동 생성 시 중복을 피하는 데 쓴다.
