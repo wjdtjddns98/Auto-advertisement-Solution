@@ -16,6 +16,14 @@ log = get_logger(__name__)
 # 도메인이지만, 텍스트 경로는 video 모듈에 의존하지 않도록 여기서 따로 정의한다.
 _GEMINI_TEXT_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
+# 일시 오류(HTTP 429·5xx) 재시도 정책 — 영상 경로(video._MAX_TRANSIENT_RETRIES·
+# _RETRY_BACKOFF_SEC)와 동일하게 최대 3회·지수 backoff(2·4·8초). Gemini는 분당 한도(429)와
+# 일시 과부하(503 "model overloaded")가 잦아, 단발 실패로 풀 파이프라인이 통째로 죽지
+# 않도록 텍스트 경로(_gemini_text)에도 영상과 동일한 보호를 둔다(값은 video와 독립 정의 —
+# 텍스트 경로가 video 모듈에 의존하지 않도록).
+_MAX_TRANSIENT_RETRIES = 3
+_RETRY_BACKOFF_SEC = 2.0
+
 
 def _usable_key(value: str | None) -> bool:
     """API 키가 실제로 쓸 수 있는지(비어 있지 않고 인라인 주석이 아님) 판정한다.
@@ -327,15 +335,25 @@ class AITextClient:
             and _usable_key(self.settings.gemini_api_key)
         )
 
-    def _gemini_text(self, full_prompt: str, max_tokens: int = 1024) -> str:
+    def _gemini_text(self, full_prompt: str, max_tokens: int = 1024, *, sleep=None) -> str:
         """Gemini generateContent로 텍스트를 생성하고 본문 문자열을 반환한다.
 
         실패(HTTP 4xx/5xx·빈 응답·세이프티 차단·네트워크)는 모두 RuntimeError로
         통일해, 호출부의 기존 `except RuntimeError` 폴백/페일세이프 로직을 그대로
         재사용한다. 키·프롬프트 원문이 새지 않도록 예외엔 상태코드/타입만 싣는다.
+
+        일시 오류(HTTP 429 또는 5xx)는 지수 backoff(2·4·8초)로 최대
+        `_MAX_TRANSIENT_RETRIES`회 재시도한다 — 영상 경로(video._send_json)와 동일한
+        분류·정책. 503("model overloaded")·429(분당 한도) 한 번에 풀 파이프라인이 죽던
+        문제를 막는다. 재시도 소진 후에도 4xx/5xx면 기존대로 RuntimeError로 전파한다.
+        전송/JSON 파싱 실패(비-상태 오류)는 재시도 없이 즉시 전파한다.
+        `sleep`은 테스트가 가짜 시계를 주입하기 위한 훅(기본 time.sleep)이다.
         """
+        import time
+
         import httpx
 
+        _sleep = sleep if sleep is not None else time.sleep
         url = f"{_GEMINI_TEXT_BASE}/models/{self.settings.gemini_text_model}:generateContent"
         body = {
             "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
@@ -345,10 +363,23 @@ class AITextClient:
             "x-goog-api-key": self.settings.gemini_api_key,
             "Content-Type": "application/json",
         }
-        try:
-            resp = httpx.post(url, headers=headers, json=body, timeout=60.0)
-        except httpx.HTTPError as exc:
-            raise RuntimeError(f"Gemini text 요청 실패: {type(exc).__name__}") from exc
+        attempts = 0
+        while True:
+            try:
+                resp = httpx.post(url, headers=headers, json=body, timeout=60.0)
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"Gemini text 요청 실패: {type(exc).__name__}") from exc
+            code = resp.status_code
+            # 일시 오류(429 또는 5xx)만 재시도(영상 경로와 동일 분류). 그 외 4xx는 영구
+            # 오류이므로 재시도하지 않고 아래에서 즉시 전파한다.
+            transient = code == 429 or code >= 500
+            if transient and attempts < _MAX_TRANSIENT_RETRIES:
+                attempts += 1
+                log.debug("gemini_text.transient_retry", status=code, attempt=attempts)
+                # 지수 backoff(2·4·8초). 가짜 sleep 주입 시 즉시 반환된다.
+                _sleep(_RETRY_BACKOFF_SEC * (2 ** (attempts - 1)))
+                continue
+            break
         if resp.status_code >= 400:
             # 본문엔 프롬프트 단편이 에코될 수 있어 상태코드만 노출(redaction 규율).
             log.debug("gemini_text.http_error", status=resp.status_code)
