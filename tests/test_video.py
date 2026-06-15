@@ -1340,16 +1340,19 @@ class FakeVeoClient:
         self.video_path = video_path
         self.extend_path = extend_path
         self.calls: list[tuple[str, str]] = []
+        self.gen_uri_calls: list[tuple[str, str]] = []  # _generate_uri 전용(라우팅 핀)
         self.extend_calls: list[tuple[str, str]] = []
         self.close_count = 0
 
     def generate(self, frame_path: str, prompt: str) -> str:
+        # 단일 비트(연장 없음) 경로 전용 — 로컬 경로를 그대로 돌려준다.
         self.calls.append((frame_path, prompt))
         return self.video_path
 
     def _generate_uri(self, frame_path: str, prompt: str) -> str:
         # 다중 비트 체이닝의 첫 클립 — 다운로드 없이 URI(여기선 결정적 가짜 경로)를 돌려준다.
         self.calls.append((frame_path, prompt))
+        self.gen_uri_calls.append((frame_path, prompt))
         return self.video_path
 
     def extend(self, prev_video_uri: str, prompt: str) -> str:
@@ -1420,6 +1423,7 @@ def test_produce_multi_beat_generates_then_extends(monkeypatch):
     )
     asset = studio.produce(script)
     assert len(veo.calls) == 1            # 첫 비트만 image-to-video generate
+    assert len(veo.gen_uri_calls) == 1    # 다중 비트 첫 클립은 _generate_uri(다운로드 없는 URI) 경로
     assert len(veo.extend_calls) == 3     # 나머지 3비트는 extend
     assert asset.duration_sec == 29.0     # 8 + 7*3
     assert asset.video_path == "data/fake/ext_3.mp4"  # 마지막(3번째) extend 결과가 최종 영상
@@ -1453,6 +1457,7 @@ def test_produce_no_beats_falls_back_to_single_clip():
     studio = VideoStudio(_gemini_settings(), nano_client=nano, veo_client=veo)
     asset = studio.produce(_script(body="한 줄 대사"))
     assert len(veo.calls) == 1
+    assert len(veo.gen_uri_calls) == 0  # 단일 비트는 generate 경로(_generate_uri 미사용)
     assert len(veo.extend_calls) == 0  # 단일 비트는 연장 없음
     assert asset.duration_sec == 8.0
     assert asset.video_path == "data/fake/solo.mp4"  # 단일 클립은 그대로
