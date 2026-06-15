@@ -581,6 +581,50 @@ def test_gemini_text_no_candidates_raises(monkeypatch):
         client._gemini_text("아무 프롬프트")
 
 
+def test_gemini_text_disables_thinking_budget(monkeypatch):
+    """회귀 핀(#57 대본 잘림): 요청 body가 thinkingBudget=0으로 추론을 끄는지 검증.
+
+    gemini-2.5-flash는 thinking이 기본 켜져 있어 추론 토큰이 maxOutputTokens 예산을
+    잠식 → 대본이 잘리거나 빈 응답으로 떨어졌다. generationConfig.thinkingConfig.
+    thinkingBudget=0이 빠지면 그 회귀가 재발하므로 body 구조를 고정한다.
+    """
+    client = _gemini_client()
+    captured: dict = {}
+
+    def fake_post(url, **kwargs):
+        captured["json"] = kwargs.get("json")
+        return _FakeResp(200, _gemini_payload("훅\n핵심\n팁\n마무리"))
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    out = client._gemini_text("p", max_tokens=256)
+    assert out == "훅\n핵심\n팁\n마무리"
+    gen_cfg = captured["json"]["generationConfig"]
+    assert gen_cfg["maxOutputTokens"] == 256
+    assert gen_cfg["thinkingConfig"]["thinkingBudget"] == 0
+
+
+def test_gemini_text_truncated_max_tokens_still_returns(monkeypatch):
+    """본문이 일부 와도(finishReason=MAX_TOKENS) 있는 만큼 반환하고 잘림 경고를 남긴다.
+
+    가진 텍스트는 버리지 않되(빈 텍스트만 RuntimeError), MAX_TOKENS 잘림은 경고 로그로
+    남겨 진단 가능해야 한다. 경고 emit까지 핀으로 고정해, 신규 블록을 지우면 red가 되게 한다.
+    """
+    client = _gemini_client()
+    payload = {
+        "candidates": [
+            {"content": {"parts": [{"text": "잘린 본문"}]}, "finishReason": "MAX_TOKENS"}
+        ]
+    }
+    monkeypatch.setattr("httpx.post", lambda *a, **k: _FakeResp(200, payload))
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "nutti.integrations.ai_text.log.warning",
+        lambda event, **kw: warnings.append(event),
+    )
+    assert client._gemini_text("p") == "잘린 본문"
+    assert "gemini_text.truncated" in warnings
+
+
 def test_text_backend_claude_ignores_gemini_key(monkeypatch):
     """text_backend=claude면 GEMINI_API_KEY가 있어도 Gemini를 쓰지 않고 claude -p로 간다."""
     settings = Settings(
