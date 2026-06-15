@@ -42,10 +42,14 @@ _RETRY_BACKOFF_SEC = 2.0
 # 비트 1개(8초/7초)의 대사는 짧으므로 이 한도를 넘을 이유가 없다.
 _MAX_DIALOGUE_CHARS = 500
 _MAX_TOPIC_CHARS = 200
-# 영상 길이 구성: 비트마다 독립 8초 클립을 생성해 ffmpeg로 잇는다(스티칭).
-# Veo 연장(extend)은 16:9 가로만 지원해 세로 쇼츠(9:16)엔 못 써서 스티칭을 택했다.
-# 비트 N개 → 8*N초. 기본 4비트 = 32초(veo 경로 기준).
+# 영상 길이 구성(veo 경로): 첫 비트는 image-to-video 8초 클립, 이후 비트는 Veo 영상
+# 연장(extend)으로 직전 클립을 이어 받아 +7초씩 늘린다 — 점프컷 없는 단일 연속 영상.
+# 9:16 세로도 extend 지원(2026-06 ai.google.dev/gemini-api/docs/video, 과거 16:9 전용
+# 제약 해제). 단 extend는 Fast/Standard 모델만 — Lite 미지원. 비트 N개 → 8+7*(N-1)초,
+# 기본 4비트 = 29초. kling 경로는 별도(클립 길이가 음성에 맞춰져 ffmpeg로 스티칭).
 _CLIP_SEC = 8.0
+# Veo extend 1회가 추가하는 길이(초). durationSeconds=8로 요청해도 출력 추가분은 7초.
+_EXTEND_SEC = 7.0
 # Veo가 화면에 텍스트(특히 깨진 한글 자막)를 임의 렌더하는 것을 억제하는 negativePrompt.
 # 대사를 음성으로만 내보내기 위함 — 실측에서 이 파라미터로 자막이 사라짐을 확인.
 _VEO_NEGATIVE_PROMPT = (
@@ -358,6 +362,14 @@ def pick_episode_style(script_id: str) -> EpisodeStyle:
     return EpisodeStyle(_EPISODE_OUTFITS[outfit_idx], _EPISODE_SETTINGS[setting_idx])
 
 
+def _veo_total_sec(n_beats: int) -> float:
+    """veo extend 경로의 총 길이초: 첫 비트 8초 + 이후 비트마다 +7초(extend).
+
+    비트가 0~1개면 extend가 없어 8초(또는 그 이하 1개)다. 음수 방지로 max(0, …).
+    """
+    return _CLIP_SEC + _EXTEND_SEC * max(0, n_beats - 1)
+
+
 class VeoPromptBuilder:
     """Veo 3.1 image-to-video 프롬프트 빌더(비트별 클립·네이티브 한국어 음성).
 
@@ -452,6 +464,34 @@ class VeoPromptBuilder:
             f"{self._VOICE} "
             f"{self._CAMERA} "
             "Format: vertical 9:16, single continuous 8-second shot. "
+            f"{self._NEGATIVE}"
+        )
+
+    def build_extend_beat(
+        self,
+        dialogue_text: str,
+        *,
+        off_screen_interviewer: bool = True,
+    ) -> str:
+        """직전 클립을 이어받는 Veo extend용 프롬프트를 만든다(연속 동작·발화만 묘사).
+
+        배경·의상·시작 장면은 직전 세그먼트에서 자동 계승되므로 재명시하지 않는다 —
+        과도한 장면 재설정 지시는 시각적 불연속을 유발할 수 있다(공식 extend 가이드).
+        목소리 고정 묘사(_VOICE)·카메라(_CAMERA)·금지 요소(_NEGATIVE)는 비트 간 드리프트를
+        막기 위해 유지한다. 마스코트가 클립 끝까지 끊김 없이 말하도록 유도해 직전 클립
+        마지막 1초에 음성이 남게 한다 — 마지막 1초에 음성이 없으면 연장 구간에서 발화가
+        이어지지 않기 때문(공식 가이드: voice not extended if not present in last 1 second).
+        대사는 build_beat과 동일하게 `_sanitize_prompt_text`로 정제해 인용 구분자 주입을 막는다.
+        """
+        dialogue = _sanitize_prompt_text(dialogue_text.strip() or "", _MAX_DIALOGUE_CHARS)
+        speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
+        return (
+            "Continue the same uninterrupted shot with no cut and no scene change. "
+            f"The same {self._PERSONA} keeps {speaking}, now saying "
+            f"(as spoken audio only, no on-screen text): '{dialogue}'. "
+            "The mascot keeps talking continuously to the very end with no silent pause. "
+            f"{self._VOICE} "
+            f"{self._CAMERA} "
             f"{self._NEGATIVE}"
         )
 
@@ -649,10 +689,24 @@ class VeoClient(_HttpClosingMixin):
     def generate(self, frame_path: str, prompt: str) -> str:
         """시작 프레임 + 프롬프트로 8초 영상을 생성하고 로컬 저장 경로를 반환한다.
 
-        쇼츠는 세로(9:16)인데 Veo 영상 연장(extend)은 16:9 가로만 지원하므로, 길이는
-        연장이 아니라 독립 8초 클립을 여러 개 생성해 VideoStudio에서 ffmpeg로 잇는다.
+        다중 비트 연속 영상의 **첫 클립**이다(이후 비트는 `extend`로 이어 붙인다).
+        해상도는 720p로 고정한다 — Veo extend 출력이 720p 고정이라, 첫 클립도
+        720p로 맞춰 첫 연장 경계에서 해상도 점프가 생기지 않게 한다.
         """
         op_name = self._submit(frame_path, prompt)
+        uri = self._poll(op_name)
+        return self._download(uri)
+
+    def extend(self, prev_video_path: str, prompt: str) -> str:
+        """직전 클립을 이어 받아 +7초 연장한 영상을 생성·다운로드해 경로를 반환한다.
+
+        각 extend 호출은 입력 영상에 새 구간을 덧붙인 **누적 전체 영상**을 돌려주므로,
+        마지막 호출 결과가 곧 최종 연속 영상이다(별도 스티칭 불요). 9:16 세로 extend는
+        Fast/Standard 모델만 지원한다(Lite 불가 — 호출부에서 사전 차단). 직전 클립의
+        마지막 1초에 음성이 없으면 연장 구간 음성이 이어지지 않으므로(공식 가이드),
+        extend 프롬프트(VeoPromptBuilder.build_extend_beat)는 끊김 없는 발화를 유도한다.
+        """
+        op_name = self._submit_extend(prev_video_path, prompt)
         uri = self._poll(op_name)
         return self._download(uri)
 
@@ -665,7 +719,8 @@ class VeoClient(_HttpClosingMixin):
         import base64
 
         frame_bytes = _read_bytes(frame_path, "Veo 시작 프레임")
-        params: dict = {"aspectRatio": "9:16"}
+        # resolution 720p: extend 출력이 720p 고정이라 첫 클립도 720p로 맞춘다(경계 점프 방지).
+        params: dict = {"aspectRatio": "9:16", "resolution": "720p"}
         # Veo 3.1 Lite는 negativePrompt를 보내면 HTTP 400으로 거부한다
         # ("`negativePrompt` isn't supported by this model", 2026-06-12 실측).
         # Lite에서는 프롬프트 본문의 자막 금지 문구(_NEGATIVE·'no on-screen text')가
@@ -679,6 +734,37 @@ class VeoClient(_HttpClosingMixin):
                     "image": {
                         "bytesBase64Encoded": base64.b64encode(frame_bytes).decode("ascii"),
                         "mimeType": _guess_image_mime(frame_path),
+                    },
+                }
+            ],
+            "parameters": params,
+        }
+        return self._submit_body(body)
+
+    def _submit_extend(self, prev_video_path: str, prompt: str) -> str:
+        """직전 클립을 입력으로 영상 연장(extend) 작업을 제출하고 operation name을 반환한다.
+
+        image-to-video(`_submit`)와 같은 predictLongRunning 엔드포인트를 쓰되,
+        instance의 입력이 image가 아니라 직전 클립 `video`(base64)다. 출력은 720p 고정이며
+        aspectRatio는 입력 영상에서 계승되므로 보내지 않는다(중복 파라미터 400 회피).
+        TODO(live): predictLongRunning extend 본문의 정확한 video 필드명
+        (bytesBase64Encoded vs inlineData)·허용 parameters를 키 확보 후 실측 확정한다 —
+        image instance와 동일한 `bytesBase64Encoded`/`mimeType` 관례를 가정한다.
+        """
+        import base64
+
+        video_bytes = _read_bytes(prev_video_path, "Veo 연장 입력 클립")
+        params: dict = {"resolution": "720p"}
+        # negativePrompt: 자막 억제. Fast/Standard만 지원(Lite는 400) — 모델명으로 분기.
+        if self._supports_negative_prompt():
+            params["negativePrompt"] = _VEO_NEGATIVE_PROMPT
+        body = {
+            "instances": [
+                {
+                    "prompt": prompt,
+                    "video": {
+                        "bytesBase64Encoded": base64.b64encode(video_bytes).decode("ascii"),
+                        "mimeType": "video/mp4",
                     },
                 }
             ],
@@ -919,15 +1005,22 @@ class VideoStudio:
             raise ValueError("GEMINI_API_KEY가 비어 있습니다 — dry_run=False 시 필수입니다.")
 
     def produce(self, script: Script) -> VideoAsset:
-        """시작 프레임 → 비트별 8초 클립 생성 → ffmpeg 스티칭 → VideoAsset 반환.
+        """시작 프레임 → 첫 클립 + extend 체이닝(veo) → VideoAsset 반환.
 
-        대본 비트(`script.beats`)가 N개면 같은 시작 프레임으로 8초 클립 N개를 만들어
-        ffmpeg로 이어붙인다(총 8*N초). 비트가 없으면 body 단일컷(8초)으로 폴백한다.
+        veo 경로: 대본 비트(`script.beats`)가 N개면 첫 비트로 8초 클립을 만들고 이후
+        비트를 extend로 이어 붙여 단일 연속 영상(총 8+7*(N-1)초)을 만든다. kling 경로는
+        비트별 무음 클립 + TTS 보이스오버를 ffmpeg로 스티칭한다. 비트가 없으면 body
+        단일컷(8초)으로 폴백한다. 실 경로의 정확한 길이는 _produce_clips가 돌려준 값으로
+        덮어쓰고, 아래 duration은 dry_run·사전 추정용 계산이다(백엔드별로 분기).
         """
         # 실 경로면 시작 전에 필수 키를 검증(미설정 시 빠르게 실패).
         self.validate_config()
         beats = self._beats(script)
-        duration = _CLIP_SEC * len(beats)
+        # veo는 첫 8초 + 비트마다 +7초(extend), kling/그 외는 비트당 8초 가정.
+        if self.settings.video_backend == "veo":
+            duration = _veo_total_sec(len(beats))
+        else:
+            duration = _CLIP_SEC * len(beats)
 
         if self.settings.dry_run:
             log.info("dry_run.video", script_id=script.id, beats=len(beats))
@@ -977,14 +1070,14 @@ class VideoStudio:
 
         `video_backend`가 "kling"이면 무음 Kling 영상 + 한국어 TTS 보이스오버 백엔드로
         비트 클립을 만든다(편별 스타일 미적용 — 프롬프트 체계가 달라 veo 전용).
-        그 외(기본 "veo")는 Veo 네이티브 음성 경로를 쓰고 스타일을 비트 프롬프트에 반영한다.
-        실측 총길이초는 kling 경로에서만 채워지고(클립 길이가 음성 길이에 맞춰짐),
-        veo 경로는 None을 돌려줘 호출부의 8.0×N 계산을 그대로 쓰게 한다.
+        그 외(기본 "veo")는 Veo 네이티브 음성 경로를 쓰고 스타일을 첫 비트 프롬프트에 반영한다.
+        두 경로 모두 실측/계산된 총길이초를 함께 돌려준다 — kling은 클립 길이가 음성에
+        맞춰지고, veo는 첫 8초 + 비트마다 +7초(extend)로 길이가 정해진다.
         """
         if self.settings.video_backend == "kling":
             return self._produce_clips_kling(frame_path, beats)
         if self.settings.video_backend == "veo":
-            return self._produce_clips_veo(frame_path, beats, style), None
+            return self._produce_clips_veo(frame_path, beats, style)
         # Settings.video_backend는 Literal["veo","kling"]이므로 여기는 도달 불가.
         # 직접 객체 변조·테스트 주입 등 런타임 우회 대비용 명시적 거부.
         # 설정 값을 메시지에 포함하면 monkey-patch된 임의 문자열이 로그/텔레그램으로 누출될 수 있다.
@@ -1009,30 +1102,43 @@ class VideoStudio:
         clips, total_sec = backend.produce_beat_clips(frame_path, beats)
         return self._stitch(clips), total_sec
 
-    def _produce_clips_veo(self, frame_path: str, beats: list[str], style: EpisodeStyle) -> str:
-        """각 비트를 독립 8초 클립으로 생성한 뒤 ffmpeg로 이어붙여 최종 경로를 반환한다.
+    def _produce_clips_veo(
+        self, frame_path: str, beats: list[str], style: EpisodeStyle
+    ) -> tuple[str, float]:
+        """첫 비트를 8초 클립으로 생성한 뒤 이후 비트를 Veo extend로 이어 붙여
+        하나의 연속 영상(점프컷 없음)을 만들고 (최종 경로, 총길이초)를 반환한다.
 
-        모든 클립이 같은 시작 프레임과 같은 편별 스타일(의상·장소)을 써서 시각
-        일관성을 유지한다. 음성은 클립마다 독립 생성되므로 프롬프트의 고정 목소리
-        묘사(_VOICE)가 비트 간 일관성의 유일한 통제 수단이다. Veo 클라이언트는
-        한 번만 확보해 재사용하고, 자체 생성분만 finally에서 정확히 1회 닫는다
-        (주입분은 소유자가 닫는다 — 연결 풀 누수 방지).
+        첫 클립은 시작 프레임 + 편별 스타일(의상·장소)을 쓴 image-to-video다. 이후
+        비트는 직전 클립을 입력으로 한 extend라, 각 호출이 누적된 전체 영상을 돌려주므로
+        마지막 결과가 최종 영상이다(별도 스티칭 불요). 배경·의상은 첫 클립에서 정해져
+        extend 구간에 자동 계승되므로 extend 프롬프트(build_extend_beat)는 이어지는
+        동작·발화만 묘사한다. 음성 일관성은 모든 프롬프트의 고정 목소리 묘사(_VOICE)와
+        extend의 연속 발화 유도로 통제한다. Veo 클라이언트는 한 번만 확보해 재사용하고,
+        자체 생성분만 finally에서 정확히 1회 닫는다(주입분은 소유자가 닫음 — 풀 누수 방지).
+
+        extend는 Fast/Standard 모델만 지원하므로, 다중 비트 + Lite 조합은 과금되는
+        제출 전에 명확한 ValueError로 빠르게 막는다(라이브에서 400으로 늦게 실패 방지).
         """
+        if len(beats) > 1 and "lite" in self.settings.veo_model.lower():
+            raise ValueError(
+                "Veo extend(다중 비트 연속 영상)는 Lite 모델을 지원하지 않습니다 — "
+                "NUTTI_VEO_MODEL을 fast 또는 standard로 설정하세요."
+            )
         builder = VeoPromptBuilder()
         client = self._veo_client
         owned = None
         if client is None:
             client = owned = VeoClient(self.settings, sleep=self._sleep)
         try:
-            clips: list[str] = []
-            for i, beat in enumerate(beats, start=1):
-                clip = client.generate(frame_path, builder.build_beat(beat, style=style))
-                log.info("video.veo.clip.done", path=clip, beat=i, of=len(beats))
-                clips.append(clip)
+            video_path = client.generate(frame_path, builder.build_beat(beats[0], style=style))
+            log.info("video.veo.clip.done", path=video_path, beat=1, of=len(beats))
+            for i, beat in enumerate(beats[1:], start=2):
+                video_path = client.extend(video_path, builder.build_extend_beat(beat))
+                log.info("video.veo.extend.done", path=video_path, beat=i, of=len(beats))
         finally:
             if owned is not None:
                 _close_owned(owned)
-        return self._stitch(clips)
+        return video_path, _veo_total_sec(len(beats))
 
     def _stitch(self, clips: list[str]) -> str:
         """여러 8초 클립을 ffmpeg로 이어붙여 하나의 MP4로 만든다(재인코딩 concat).
