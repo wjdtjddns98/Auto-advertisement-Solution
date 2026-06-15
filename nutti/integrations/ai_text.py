@@ -348,6 +348,10 @@ class AITextClient:
         문제를 막는다. 재시도 소진 후에도 4xx/5xx면 기존대로 RuntimeError로 전파한다.
         전송/JSON 파싱 실패(비-상태 오류)는 재시도 없이 즉시 전파한다.
         `sleep`은 테스트가 가짜 시계를 주입하기 위한 훅(기본 time.sleep)이다.
+
+        thinking(추론) 비활성화(`thinkingConfig.thinkingBudget=0`)는 thinking 지원 모델
+        (gemini-2.5-flash 등)에만 효과가 있고, 미지원 모델에서는 이 키가 조용히 무시된다
+        (오류 아님). 모델 변경 시 이 점을 염두에 둘 것.
         """
         import time
 
@@ -357,7 +361,16 @@ class AITextClient:
         url = f"{_GEMINI_TEXT_BASE}/models/{self.settings.gemini_text_model}:generateContent"
         body = {
             "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens},
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                # Gemini 2.5 계열(flash 등)은 thinking(추론)이 기본 켜져 있어, 추론 토큰이
+                # maxOutputTokens 예산을 먼저 잠식한다. 그러면 정작 대본 본문이 잘리거나
+                # (finishReason=MAX_TOKENS) 남은 토큰으로 급조돼 엉뚱해진다. 대본·주제·
+                # 팩트체크·메타데이터는 짧은 결정형 출력이라 추론이 불필요하므로 0으로 끈다
+                # (flash는 thinkingBudget=0 지원). 이 한 줄이 #57 Gemini 전환 후 '대본 잘림/
+                # 빈 응답' 회귀의 근본 원인 차단점이다.
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
         }
         headers = {
             "x-goog-api-key": self.settings.gemini_api_key,
@@ -395,10 +408,17 @@ class AITextClient:
             # 세이프티 차단 등으로 후보가 없으면 빈 응답 → 페일세이프(통과 지어내지 않음).
             log.warning("gemini_text.no_candidates")
             raise RuntimeError("Gemini text 빈 응답(후보 없음)")
+        finish = candidates[0].get("finishReason")
         parts = (candidates[0].get("content") or {}).get("parts") or []
         text = "".join(p.get("text", "") for p in parts).strip()
         if not text:
+            # 빈 텍스트 — finishReason을 함께 남겨 원인(MAX_TOKENS 잘림·세이프티 등)을 진단.
+            log.warning("gemini_text.empty_text", finish_reason=finish)
             raise RuntimeError("Gemini text 빈 응답(텍스트 없음)")
+        if finish == "MAX_TOKENS":
+            # 본문이 일부만 오고 토큰 한도로 잘린 상태 — 대본이 중간에 끊길 수 있어 경고.
+            # thinkingBudget=0으로 대부분 해소되지만, 그래도 잘리면 max_tokens 상향 신호.
+            log.warning("gemini_text.truncated", chars=len(text))
         return text
 
     def _llm_text(self, full_prompt: str, max_tokens: int = 1024) -> str:
