@@ -1326,8 +1326,10 @@ class FakeNanoBananaClient:
 class FakeVeoClient:
     """VeoClient 대체 — generate/extend 호출 인자를 기록하고 결정적 경로를 반환한다.
 
-    extend는 호출 순서별로 고유 경로(extend_path 스템 + _N)를 돌려줘, "n번째 extend의
-    입력 = (n-1)번째 extend의 출력"이라는 체이닝 불변식을 3회 이상 연장에서도 핀한다.
+    다중 비트 연속 영상은 URI 체이닝이다: 첫 클립은 _generate_uri(다운로드 없이 URI),
+    이후 비트는 extend(직전 URI → 새 URI), 마지막에 _download(URI→경로) 1회. extend는
+    호출 순서별로 고유 URI(extend_path 스템 + _N)를 돌려줘, "n번째 extend의 입력 =
+    (n-1)번째 extend의 출력"이라는 체이닝 불변식을 3회 이상 연장에서도 핀한다.
     """
 
     def __init__(
@@ -1345,11 +1347,20 @@ class FakeVeoClient:
         self.calls.append((frame_path, prompt))
         return self.video_path
 
-    def extend(self, prev_video_path: str, prompt: str) -> str:
-        self.extend_calls.append((prev_video_path, prompt))
-        # 호출 순서별 고유 경로를 돌려준다 — 직전 출력이 다음 입력으로 넘어가는지 검증 가능.
+    def _generate_uri(self, frame_path: str, prompt: str) -> str:
+        # 다중 비트 체이닝의 첫 클립 — 다운로드 없이 URI(여기선 결정적 가짜 경로)를 돌려준다.
+        self.calls.append((frame_path, prompt))
+        return self.video_path
+
+    def extend(self, prev_video_uri: str, prompt: str) -> str:
+        self.extend_calls.append((prev_video_uri, prompt))
+        # 호출 순서별 고유 URI를 돌려준다 — 직전 출력이 다음 입력으로 넘어가는지 검증 가능.
         base, dot, ext = self.extend_path.rpartition(".")
         return f"{base}_{len(self.extend_calls)}{dot}{ext}" if dot else self.extend_path
+
+    def _download(self, uri: str) -> str:
+        # 최종 누적 URI를 로컬 경로로 가정(가짜) — 실제 다운로드 없이 그대로 돌려준다.
+        return uri
 
     def close(self):
         self.close_count += 1
@@ -1505,22 +1516,27 @@ def test_veo_client_submit_lite_omits_negative_prompt(tmp_path):
     assert "negativePrompt" not in params
 
 
-def test_veo_client_extend_submits_video_instance(tmp_path):
-    """extend는 image가 아니라 직전 클립 video(base64)를 instance로 보내고 720p로 제출한다."""
+def test_veo_client_extend_submits_video_uri_instance(tmp_path):
+    """extend는 인라인 base64가 아니라 직전 클립 video.uri(Files API 참조)를 보내고
+    720p로 제출하며, 누적 영상의 새 URI를 반환한다(중간 다운로드 없음 — 실측 계약).
+
+    인라인 base64는 400 "Video URI not found", gcsUri·inlineData는 모델 미지원
+    (2026-06-15 실측)이므로 video.uri만 허용된다.
+    """
     fake = FakeVeoHttp(get_responses=[_veo_done_response()])
     client = _veo_client(tmp_path, fake, NUTTI_VEO_MODEL="veo-3.1-fast-generate-preview")
-    prev = tmp_path / "prev.mp4"
-    prev.write_bytes(b"PREV-MP4-BYTES")
-    path = client.extend(str(prev), "continue prompt")
-    assert Path(path).exists()  # 연장 결과를 내려받아 저장한다
+    prev_uri = "https://generativelanguage.googleapis.com/v1beta/files/abc123:download?alt=media"
+    new_uri = client.extend(prev_uri, "continue prompt")
+    assert new_uri == _VIDEO_URI  # 다음 extend 입력이자 최종 다운로드 대상인 URI를 돌려준다
+    assert fake.download_urls == []  # extend는 중간 클립을 내려받지 않는다(URI만 체이닝)
     inst = fake.post_bodies[0]["instances"][0]
     # image-to-video가 아니라 video-to-video(연장)다.
     assert "video" in inst and "image" not in inst
-    assert inst["video"]["mimeType"] == "video/mp4"
-    assert inst["video"]["bytesBase64Encoded"]  # 직전 클립 바이트가 base64로 실린다
+    assert inst["video"] == {"uri": prev_uri}        # URI 참조만 전달(재업로드 없음)
+    assert "bytesBase64Encoded" not in inst["video"]  # 인라인 base64 금지(400 실측)
     params = fake.post_bodies[0]["parameters"]
     assert params["resolution"] == "720p"          # extend 출력은 720p 고정
-    assert "aspectRatio" not in params              # 입력 영상에서 계승(중복 미전송)
+    assert params["aspectRatio"] == "9:16"          # 9:16 명시 필수(생략 시 16:9 강제→400 실측)
     assert "subtitles" in params["negativePrompt"]  # Fast는 자막 억제 negativePrompt 지원
 
 
@@ -1528,10 +1544,11 @@ def test_veo_client_extend_lite_omits_negative_prompt(tmp_path):
     """lite 모델이면 extend에서도 negativePrompt를 보내지 않는다(400 거부 회피)."""
     fake = FakeVeoHttp(get_responses=[_veo_done_response()])
     client = _veo_client(tmp_path, fake, NUTTI_VEO_MODEL="veo-3.1-lite-generate-preview")
-    prev = tmp_path / "prev.mp4"
-    prev.write_bytes(b"PREV")
-    client.extend(str(prev), "continue")
-    assert "negativePrompt" not in fake.post_bodies[0]["parameters"]
+    prev_uri = "https://generativelanguage.googleapis.com/v1beta/files/x:download?alt=media"
+    client.extend(prev_uri, "continue")
+    params = fake.post_bodies[0]["parameters"]
+    assert "negativePrompt" not in params
+    assert params["aspectRatio"] == "9:16"  # aspectRatio는 lite에서도 유지(9:16 필수)
 
 
 def test_default_veo_model_is_fast(tmp_path):
@@ -1723,8 +1740,8 @@ def test_produce_closes_self_created_veo_client_on_later_clip_failure(monkeypatc
             super().__init__()
             created["veo"] = self
 
-        def extend(self, prev_video_path: str, prompt: str) -> str:
-            super().extend(prev_video_path, prompt)
+        def extend(self, prev_video_uri: str, prompt: str) -> str:
+            super().extend(prev_video_uri, prompt)
             raise VideoRenderError("Veo extend 제출 HTTP 500")  # 2번째 비트(첫 extend)에서 실패
 
     monkeypatch.setattr(video_module, "VeoClient", _FailExtendVeo)

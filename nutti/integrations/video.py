@@ -44,9 +44,10 @@ _MAX_DIALOGUE_CHARS = 500
 _MAX_TOPIC_CHARS = 200
 # 영상 길이 구성(veo 경로): 첫 비트는 image-to-video 8초 클립, 이후 비트는 Veo 영상
 # 연장(extend)으로 직전 클립을 이어 받아 +7초씩 늘린다 — 점프컷 없는 단일 연속 영상.
-# 9:16 세로도 extend 지원(2026-06 ai.google.dev/gemini-api/docs/video, 과거 16:9 전용
-# 제약 해제). 단 extend는 Fast/Standard 모델만 — Lite 미지원. 비트 N개 → 8+7*(N-1)초,
-# 기본 4비트 = 29초. kling 경로는 별도(클립 길이가 음성에 맞춰져 ffmpeg로 스티칭).
+# 9:16 세로 extend는 요청에 aspectRatio="9:16"을 명시해야만 동작한다 — 생략하면 Gemini
+# API가 출력을 16:9로 가정해 9:16 입력을 400으로 거부한다(2026-06-15 유료 실측; 공식 문서는
+# 지원으로 표기하나 실 API는 이 파라미터 없이는 막힘). 단 extend는 Fast/Standard 모델만 —
+# Lite 미지원. 비트 N개 → 8+7*(N-1)초, 기본 4비트 = 29초. kling 경로는 별도(ffmpeg 스티칭).
 _CLIP_SEC = 8.0
 # Veo extend 1회가 추가하는 길이(초). durationSeconds=8로 요청해도 출력 추가분은 7초.
 _EXTEND_SEC = 7.0
@@ -689,26 +690,38 @@ class VeoClient(_HttpClosingMixin):
     def generate(self, frame_path: str, prompt: str) -> str:
         """시작 프레임 + 프롬프트로 8초 영상을 생성하고 로컬 저장 경로를 반환한다.
 
-        다중 비트 연속 영상의 **첫 클립**이다(이후 비트는 `extend`로 이어 붙인다).
-        해상도는 720p로 고정한다 — Veo extend 출력이 720p 고정이라, 첫 클립도
-        720p로 맞춰 첫 연장 경계에서 해상도 점프가 생기지 않게 한다.
+        단일 비트(연장 없음)와 외부 호출용 경로다. 다중 비트 연속 영상은
+        `_generate_uri`로 첫 클립 URI만 얻어 extend로 체이닝한 뒤 마지막에 1회만
+        다운로드한다(중간 클립 다운로드 불요). 해상도는 720p로 고정한다 — Veo extend
+        출력이 720p 고정이라, 첫 클립도 720p로 맞춰 첫 연장 경계에서 해상도 점프가
+        생기지 않게 한다.
+        """
+        return self._download(self._generate_uri(frame_path, prompt))
+
+    def _generate_uri(self, frame_path: str, prompt: str) -> str:
+        """첫 클립을 생성하고 Files API 영상 URI를 반환한다(다운로드 없음).
+
+        extend 입력은 직전 클립의 **URI 참조**를 요구하므로(인라인 base64 거부, 실측),
+        다중 비트 체이닝에서는 중간 클립을 내려받지 않고 이 URI를 다음 extend로 넘긴다.
         """
         op_name = self._submit(frame_path, prompt)
-        uri = self._poll(op_name)
-        return self._download(uri)
+        return self._poll(op_name)
 
-    def extend(self, prev_video_path: str, prompt: str) -> str:
-        """직전 클립을 이어 받아 +7초 연장한 영상을 생성·다운로드해 경로를 반환한다.
+    def extend(self, prev_video_uri: str, prompt: str) -> str:
+        """직전 클립 URI를 이어 +7초 연장하고, 누적 영상의 새 Files API URI를 반환한다.
 
-        각 extend 호출은 입력 영상에 새 구간을 덧붙인 **누적 전체 영상**을 돌려주므로,
-        마지막 호출 결과가 곧 최종 연속 영상이다(별도 스티칭 불요). 9:16 세로 extend는
+        extend 입력은 Files API URI 참조(`instances[].video.uri`)만 받는다 — 인라인
+        base64는 400 "Video URI not found", gcsUri·inlineData는 모델 미지원(2026-06-15
+        실측 확정). 직전 `_generate_uri`/`extend`가 받은 URI를 그대로 넘기므로 중간
+        클립을 재다운로드·재업로드하지 않는다. 각 extend 호출은 입력 영상에 새 구간을
+        덧붙인 **누적 전체 영상**의 URI를 돌려주므로, 마지막 호출 결과가 곧 최종 연속
+        영상이고 호출부가 그것만 1회 다운로드한다(별도 스티칭 불요). 9:16 세로 extend는
         Fast/Standard 모델만 지원한다(Lite 불가 — 호출부에서 사전 차단). 직전 클립의
         마지막 1초에 음성이 없으면 연장 구간 음성이 이어지지 않으므로(공식 가이드),
         extend 프롬프트(VeoPromptBuilder.build_extend_beat)는 끊김 없는 발화를 유도한다.
         """
-        op_name = self._submit_extend(prev_video_path, prompt)
-        uri = self._poll(op_name)
-        return self._download(uri)
+        op_name = self._submit_extend(prev_video_uri, prompt)
+        return self._poll(op_name)
 
     def _submit(self, frame_path: str, prompt: str) -> str:
         """image-to-video 작업을 제출하고 operation name을 반환한다.
@@ -741,33 +754,26 @@ class VeoClient(_HttpClosingMixin):
         }
         return self._submit_body(body)
 
-    def _submit_extend(self, prev_video_path: str, prompt: str) -> str:
-        """직전 클립을 입력으로 영상 연장(extend) 작업을 제출하고 operation name을 반환한다.
+    def _submit_extend(self, prev_video_uri: str, prompt: str) -> str:
+        """직전 클립 URI를 입력으로 영상 연장(extend) 작업을 제출하고 operation name을 반환한다.
 
-        image-to-video(`_submit`)와 같은 predictLongRunning 엔드포인트를 쓰되,
-        instance의 입력이 image가 아니라 직전 클립 `video`(base64)다. 출력은 720p 고정이며
-        aspectRatio는 입력 영상에서 계승되므로 보내지 않는다(중복 파라미터 400 회피).
-        TODO(live): predictLongRunning extend 본문의 정확한 video 필드명
-        (bytesBase64Encoded vs inlineData)·허용 parameters를 키 확보 후 실측 확정한다 —
-        image instance와 동일한 `bytesBase64Encoded`/`mimeType` 관례를 가정한다.
+        image-to-video(`_submit`)와 같은 predictLongRunning 엔드포인트를 쓰되, instance
+        입력이 image가 아니라 직전 클립 `video.uri`(Files API URI 참조)다. 인라인 base64는
+        거부되고(400 "Video URI not found in the request."), `gcsUri`·`inlineData`는 모델
+        미지원이라 거부된다(전부 2026-06-15 실측 확정). 입력 URI는 직전 generate/extend
+        완료 응답의 `generatedSamples[0].video.uri`를 그대로 쓴다(재다운로드·재업로드 불요).
+        출력은 720p 고정. aspectRatio="9:16"을 반드시 명시한다 — 생략하면 extend가 출력을
+        16:9로 가정해 9:16 입력을 HTTP 400("Aspect ratio of the input video must be 16:9,
+        but got: 9:16")으로 거부한다(2026-06-15 유료 실측 확정). 명시하면 9:16 입력을 받아
+        720x1280 연속 영상을 낸다. 공식 문서는 9:16 extend 지원으로 표기하나 실제 Gemini
+        API는 이 파라미터 없이는 막힌다(docs/API 불일치, 미수정).
         """
-        import base64
-
-        video_bytes = _read_bytes(prev_video_path, "Veo 연장 입력 클립")
-        params: dict = {"resolution": "720p"}
+        params: dict = {"aspectRatio": "9:16", "resolution": "720p"}
         # negativePrompt: 자막 억제. Fast/Standard만 지원(Lite는 400) — 모델명으로 분기.
         if self._supports_negative_prompt():
             params["negativePrompt"] = _VEO_NEGATIVE_PROMPT
         body = {
-            "instances": [
-                {
-                    "prompt": prompt,
-                    "video": {
-                        "bytesBase64Encoded": base64.b64encode(video_bytes).decode("ascii"),
-                        "mimeType": "video/mp4",
-                    },
-                }
-            ],
+            "instances": [{"prompt": prompt, "video": {"uri": prev_video_uri}}],
             "parameters": params,
         }
         return self._submit_body(body)
@@ -1128,11 +1134,21 @@ class VideoStudio:
         if client is None:
             client = owned = VeoClient(self.settings, sleep=self._sleep)
         try:
-            video_path = client.generate(frame_path, builder.build_beat(beats[0], style=style))
-            log.info("video.veo.clip.done", path=video_path, beat=1, of=len(beats))
+            if len(beats) == 1:
+                # 단일 비트는 연장 없이 generate 한 클립을 그대로 쓴다(다운로드 경로).
+                video_path = client.generate(
+                    frame_path, builder.build_beat(beats[0], style=style)
+                )
+                log.info("video.veo.clip.done", path=video_path, beat=1, of=1)
+                return video_path, _veo_total_sec(1)
+            # 다중 비트: 첫 클립 URI → extend로 URI 체이닝(중간 다운로드 없음) → 마지막
+            # 누적 URI만 1회 다운로드. extend 입력은 URI 참조여야 한다(인라인 base64 거부, 실측).
+            uri = client._generate_uri(frame_path, builder.build_beat(beats[0], style=style))
+            log.info("video.veo.clip.done", beat=1, of=len(beats))
             for i, beat in enumerate(beats[1:], start=2):
-                video_path = client.extend(video_path, builder.build_extend_beat(beat))
-                log.info("video.veo.extend.done", path=video_path, beat=i, of=len(beats))
+                uri = client.extend(uri, builder.build_extend_beat(beat))
+                log.info("video.veo.extend.done", beat=i, of=len(beats))
+            video_path = client._download(uri)
         finally:
             if owned is not None:
                 _close_owned(owned)
