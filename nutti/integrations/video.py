@@ -1039,11 +1039,9 @@ class VideoStudio:
         # 갈릴 때 프레임과 클립의 장면이 어긋날 수 있다(리뷰 지적, PR #52).
         style = pick_episode_style(script.id)
         frame_path = self._generate_frame(script, style)
-        video_path, measured_sec = self._produce_clips(frame_path, beats, style)
-        # kling 백엔드는 클립이 5/10초이고 mux `-shortest`로 음성 길이에 맞춰 잘리므로,
-        # veo의 8.0×N 가정 대신 백엔드가 돌려준 실측 총길이를 쓴다(veo는 measured=None).
-        if measured_sec is not None:
-            duration = measured_sec
+        # 실 경로의 총길이는 위 사전 추정 대신 백엔드가 돌려준 실측값으로 덮어쓴다 —
+        # veo는 8+7*(N-1)초, kling은 mux `-shortest`로 음성 길이에 맞춰진 실측 총길이.
+        video_path, duration = self._produce_clips(frame_path, beats, style)
         return VideoAsset(
             script_id=script.id,
             frame_image_path=frame_path,
@@ -1065,7 +1063,7 @@ class VideoStudio:
 
     def _produce_clips(
         self, frame_path: str, beats: list[str], style: EpisodeStyle
-    ) -> tuple[str, float | None]:
+    ) -> tuple[str, float]:
         """비트별 클립을 생성해 ffmpeg로 이어붙인 (최종 경로, 실측 총길이초)를 반환한다(백엔드 분기).
 
         `video_backend`가 "kling"이면 무음 Kling 영상 + 한국어 TTS 보이스오버 백엔드로

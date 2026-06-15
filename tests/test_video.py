@@ -1326,8 +1326,8 @@ class FakeNanoBananaClient:
 class FakeVeoClient:
     """VeoClient 대체 — generate/extend 호출 인자를 기록하고 결정적 경로를 반환한다.
 
-    extend는 첫 클립과 구분되는 별도 경로(extend_path)를 돌려줘 체이닝(직전 경로가
-    다음 extend의 입력으로 넘어가는지)을 검증할 수 있게 한다.
+    extend는 호출 순서별로 고유 경로(extend_path 스템 + _N)를 돌려줘, "n번째 extend의
+    입력 = (n-1)번째 extend의 출력"이라는 체이닝 불변식을 3회 이상 연장에서도 핀한다.
     """
 
     def __init__(
@@ -1347,7 +1347,9 @@ class FakeVeoClient:
 
     def extend(self, prev_video_path: str, prompt: str) -> str:
         self.extend_calls.append((prev_video_path, prompt))
-        return self.extend_path
+        # 호출 순서별 고유 경로를 돌려준다 — 직전 출력이 다음 입력으로 넘어가는지 검증 가능.
+        base, dot, ext = self.extend_path.rpartition(".")
+        return f"{base}_{len(self.extend_calls)}{dot}{ext}" if dot else self.extend_path
 
     def close(self):
         self.close_count += 1
@@ -1409,14 +1411,14 @@ def test_produce_multi_beat_generates_then_extends(monkeypatch):
     assert len(veo.calls) == 1            # 첫 비트만 image-to-video generate
     assert len(veo.extend_calls) == 3     # 나머지 3비트는 extend
     assert asset.duration_sec == 29.0     # 8 + 7*3
-    assert asset.video_path == "data/fake/ext.mp4"  # 마지막 extend 결과가 최종 영상
+    assert asset.video_path == "data/fake/ext_3.mp4"  # 마지막(3번째) extend 결과가 최종 영상
     # 첫 클립은 시작 프레임으로 생성되고 첫 비트 대사가 인용된다.
     assert veo.calls[0][0] == "data/fake/f.jpg"
     assert "'훅 대사'" in veo.calls[0][1]
-    # extend 입력이 체이닝된다: 첫 extend는 generate 결과(v.mp4)를, 이후는 직전 extend 결과(ext.mp4)를 받는다.
-    assert veo.extend_calls[0][0] == "data/fake/v.mp4"
-    assert veo.extend_calls[1][0] == "data/fake/ext.mp4"
-    assert veo.extend_calls[2][0] == "data/fake/ext.mp4"
+    # extend 입력이 체이닝된다: 첫 extend는 generate 결과(v.mp4)를, 이후는 직전 extend 출력을 받는다.
+    assert veo.extend_calls[0][0] == "data/fake/v.mp4"      # generate 출력
+    assert veo.extend_calls[1][0] == "data/fake/ext_1.mp4"  # 1번째 extend 출력
+    assert veo.extend_calls[2][0] == "data/fake/ext_2.mp4"  # 2번째 extend 출력
     # 각 비트 대사가 해당 extend 프롬프트에 인용되고, extend는 연속 동작 톤이다.
     assert "'설명1 대사'" in veo.extend_calls[0][1]
     assert "'마무리 대사'" in veo.extend_calls[2][1]
