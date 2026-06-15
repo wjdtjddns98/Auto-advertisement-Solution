@@ -565,6 +565,8 @@ def test_fact_check_via_gemini_fail_blocks(monkeypatch):
 def test_fact_check_via_gemini_http_error_fails_safe(monkeypatch):
     """Gemini HTTP 오류(429 등) 시 통과를 지어내지 않고 passed=False(fail-safe)."""
     client = _gemini_client()
+    # 429는 일시 오류라 재시도된다 — 테스트가 실제로 잠들지 않도록 sleep을 무력화.
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
     monkeypatch.setattr("httpx.post", lambda *a, **k: _FakeResp(429, {}))
     result = client.fact_check_script(Script(topic="t", body="x"))
     assert result.passed is False
@@ -610,6 +612,65 @@ def test_suggest_topic_gemini_failure_falls_back_to_seed(monkeypatch):
     from nutti.integrations.ai_text import _SEED_TOPICS
 
     client = _gemini_client()
+    # 429는 일시 오류라 재시도된다 — 테스트가 실제로 잠들지 않도록 sleep을 무력화.
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
     monkeypatch.setattr("httpx.post", lambda *a, **k: _FakeResp(429, {}))
     topic = client.suggest_topic()  # RuntimeError가 전파되면 이 호출이 터진다(리버트 감지).
     assert topic == _SEED_TOPICS[0]
+
+
+def test_gemini_text_retries_transient_then_succeeds(monkeypatch):
+    """503(일시 과부하) 두 번 뒤 200 → 재시도로 성공. 503 한 번에 풀런이 죽던 결함의 회귀 핀."""
+    client = _gemini_client()
+    responses = [
+        _FakeResp(503, {}),
+        _FakeResp(503, {}),
+        _FakeResp(200, _gemini_payload("성공 텍스트")),
+    ]
+    calls = {"n": 0}
+
+    def fake_post(*a, **k):
+        resp = responses[calls["n"]]
+        calls["n"] += 1
+        return resp
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    slept: list[float] = []
+    out = client._gemini_text("p", sleep=slept.append)
+    assert out == "성공 텍스트"
+    assert calls["n"] == 3  # 503·503·200
+    assert slept == [2.0, 4.0]  # 지수 backoff(2·4), 3번째는 200이라 sleep 없음
+
+
+def test_gemini_text_exhausts_retries_then_raises(monkeypatch):
+    """일시 오류가 한도까지 지속되면 RuntimeError 전파(최초 1 + 재시도 3 = 4회 호출)."""
+    client = _gemini_client()
+    calls = {"n": 0}
+
+    def fake_post(*a, **k):
+        calls["n"] += 1
+        return _FakeResp(503, {})
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    slept: list[float] = []
+    with pytest.raises(RuntimeError):
+        client._gemini_text("p", sleep=slept.append)
+    assert calls["n"] == 4  # 1 + 3 재시도
+    assert slept == [2.0, 4.0, 8.0]
+
+
+def test_gemini_text_no_retry_on_permanent_4xx(monkeypatch):
+    """영구 4xx(400 등)는 재시도하지 않고 즉시 RuntimeError(일시 오류만 재시도)."""
+    client = _gemini_client()
+    calls = {"n": 0}
+
+    def fake_post(*a, **k):
+        calls["n"] += 1
+        return _FakeResp(400, {})
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    slept: list[float] = []
+    with pytest.raises(RuntimeError):
+        client._gemini_text("p", sleep=slept.append)
+    assert calls["n"] == 1  # 재시도 없음
+    assert slept == []
