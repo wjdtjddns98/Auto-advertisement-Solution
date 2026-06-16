@@ -19,6 +19,7 @@ from nutti.models import (
     Script,
     Stage,
 )
+from nutti.pipeline.cost import estimate_run_cost
 from nutti.review.gates import DiscordGate, ReviewGate, TelegramGate
 from nutti.storage.sheets import SheetStore
 from nutti.storage.state_store import PipelineState
@@ -170,6 +171,10 @@ class Orchestrator:
         run.uploads.append(self.publisher.upload_youtube(run.video, run.metadata))
         if content_format == ContentFormat.REELS:
             run.uploads.append(self.publisher.upload_instagram(run.video, run.metadata))
+
+        # 비용 집계: 산출물(영상 길이·프레임·생성 텍스트) 기준으로 편당 제작 비용을 명세화.
+        run.cost = estimate_run_cost(run, self.settings)
+        log.info("pipeline.cost", run_id=run.id, total_usd=run.cost.total_usd, dry_run=run.cost.dry_run)
 
         # 5단계: 성과 수집(분석/피드백은 collect_and_analyze에서 별도 주기로 수행)
         run.current_stage = Stage.ANALYTICS
