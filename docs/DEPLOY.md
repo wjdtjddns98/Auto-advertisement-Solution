@@ -79,8 +79,9 @@ ANTHROPIC_API_KEY=sk-ant-...
 # 옵션 B: claude CLI 방식 → 11번 섹션 참고 (아래 줄 주석 처리)
 # ANTHROPIC_API_KEY=  ← 비워두고 volumes에 ~/.claude 마운트
 
-# ── Gemini (영상 생성) ───────────────────────────────────────────────────────
-GEMINI_API_KEY=your_gemini_api_key
+# ── fal.ai (영상·시작 프레임 생성) ───────────────────────────────────────────
+# FAL_KEY 하나로 시작 프레임(FLUX.1 Kontext)·영상(Veo 3.1, veo_fal) 모두 처리한다.
+FAL_KEY=your_fal_key
 
 # ── Google Sheets ────────────────────────────────────────────────────────────
 GOOGLE_SHEETS_ID=your_sheet_id

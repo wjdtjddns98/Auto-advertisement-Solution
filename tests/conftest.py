@@ -10,18 +10,17 @@ httpx.Request/Response 객체 생성(예외 fixture 구성용)은 막지 않고,
 
 ## .env 격리가 필요한 이유
 
-이 머신의 리포 `.env`에 `NUTTI_DRY_RUN=false`·`NUTTI_VIDEO_BACKEND=kling` 및
-실제 외부 API 키들이 설정돼 있으면, Settings(pydantic-settings BaseSettings)가
-`env_file='.env'`로 그 값을 읽어 들인다. 그 결과 override 없는 `Settings(...)`가
-dry_run=False·video_backend='kling'으로 생성되어, 네트워크 차단 가드(_block_real_network)가
-발동하거나 키 검증 ValueError가 터진다 — 완전히 머신 의존적인 결함이다.
+이 머신의 리포 `.env`에 `NUTTI_DRY_RUN=false` 및 실제 외부 API 키들이 설정돼 있으면,
+Settings(pydantic-settings BaseSettings)가 `env_file='.env'`로 그 값을 읽어 들인다.
+그 결과 override 없는 `Settings(...)`가 dry_run=False로 생성되어, 네트워크 차단 가드
+(_block_real_network)가 발동하거나 키 검증 ValueError가 터진다 — 완전히 머신 의존적인 결함이다.
 
 `_isolate_settings_env` 픽스처가 이를 막는다:
 1. `Settings.model_config['env_file']`을 None으로 덮어 `.env` 파일 로딩을 끈다.
 2. OS 환경변수(셸 export 등)에 남아 있을 수 있는 Nutti/외부 API 키들을 삭제한다.
 3. `get_settings` lru_cache를 클리어해 캐시된 라이브 Settings가 재사용되지 않도록 한다.
 
-결과: override 없는 `Settings(...)`는 코드 기본값(dry_run=True, video_backend='veo')
+결과: override 없는 `Settings(...)`는 코드 기본값(dry_run=True, video_backend='veo_fal')
 으로 확정적으로 잡힌다. 각 테스트가 명시적으로 넘기는 kwargs는 생성자 인자(init)가
 env_file보다 우선이므로 격리 후에도 그대로 적용된다.
 """
@@ -43,21 +42,7 @@ _NUTTI_ENV_VARS: tuple[str, ...] = (
     "NUTTI_VIDEO_BACKEND",
     "NUTTI_ENV",
     "NUTTI_LOG_LEVEL",
-    "NUTTI_TEXT_BACKEND",
     "NUTTI_SCRIPT_MODEL",
-    "NUTTI_GEMINI_TEXT_MODEL",
-    "NUTTI_GEMINI_IMAGE_MODEL",
-    "NUTTI_VEO_MODEL",
-    "NUTTI_KLING_MODEL",
-    "NUTTI_VEO_POLL_INTERVAL_SEC",
-    "NUTTI_VEO_TIMEOUT_SEC",
-    "NUTTI_KLING_POLL_INTERVAL_SEC",
-    "NUTTI_KLING_TIMEOUT_SEC",
-    "NUTTI_TTS_MODEL",
-    "NUTTI_TTS_VOICE",
-    "NUTTI_KLING_LIPSYNC",
-    "NUTTI_KLING_LIPSYNC_MODEL",
-    "NUTTI_KLING_TTS",
     "NUTTI_VEO_FAL_MODEL",
     "NUTTI_VEO_FAL_POLL_INTERVAL_SEC",
     "NUTTI_VEO_FAL_TIMEOUT_SEC",
@@ -65,12 +50,6 @@ _NUTTI_ENV_VARS: tuple[str, ...] = (
     "NUTTI_KONTEXT_MODEL",
     "NUTTI_KONTEXT_POLL_INTERVAL_SEC",
     "NUTTI_KONTEXT_TIMEOUT_SEC",
-    "ELEVENLABS_API_KEY",
-    "NUTTI_ELEVENLABS_MODEL",
-    "NUTTI_ELEVENLABS_VOICE_ID",
-    "SUPERTONE_API_KEY",
-    "NUTTI_SUPERTONE_VOICE_IDS",
-    "NUTTI_SUPERTONE_MODEL",
     "NUTTI_MEDIA_DIR",
     "NUTTI_MASCOT_IMAGE",
     "NUTTI_STATE_PATH",
@@ -79,7 +58,6 @@ _NUTTI_ENV_VARS: tuple[str, ...] = (
     "NUTTI_REVIEW_POLL_INTERVAL_SEC",
     "NUTTI_REVIEW_STORE_PATH",
     "NUTTI_CALCULATOR_URL",
-    "GEMINI_API_KEY",
     "FAL_KEY",
     "ANTHROPIC_API_KEY",
     "TELEGRAM_BOT_TOKEN",
@@ -99,9 +77,9 @@ _NUTTI_ENV_VARS: tuple[str, ...] = (
 def _isolate_settings_env(monkeypatch):
     """Settings가 리포 `.env` 또는 OS 환경변수를 읽어 기본값이 뒤집히는 것을 막는다.
 
-    이 픽스처가 없으면 머신의 `.env`(예: NUTTI_DRY_RUN=false, NUTTI_VIDEO_BACKEND=kling,
-    실제 API 키들)가 테스트에 누수돼 _block_real_network 가드가 발동하거나 키 검증
-    ValueError가 터진다. 픽스처 종료 시 monkeypatch가 자동으로 원복한다.
+    이 픽스처가 없으면 머신의 `.env`(예: NUTTI_DRY_RUN=false, 실제 API 키들)가 테스트에
+    누수돼 _block_real_network 가드가 발동하거나 키 검증 ValueError가 터진다.
+    픽스처 종료 시 monkeypatch가 자동으로 원복한다.
 
     명시적 kwargs(예: Settings(NUTTI_DRY_RUN=False, GEMINI_API_KEY='test-key'))는
     생성자 인자(init source)가 env_file보다 우선이므로 격리 후에도 그대로 적용된다.

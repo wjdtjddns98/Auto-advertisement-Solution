@@ -12,13 +12,14 @@ from nutti.config import Settings
 def test_settings_defaults_isolated_from_env():
     """격리 픽스처 하에서 override 없는 Settings()가 코드 기본값을 반환한다.
 
-    리포 `.env`에 NUTTI_DRY_RUN=false·NUTTI_VIDEO_BACKEND=kling이 설정돼 있어도
-    이 테스트가 통과해야 한다 — 머신 의존성 검증 핀.
+    리포 `.env`에 NUTTI_DRY_RUN=false가 설정돼 있어도 이 테스트가 통과해야 한다 —
+    머신 의존성 검증 핀.
     """
     s = Settings()
     assert s.dry_run is True, "dry_run 기본값이 True여야 한다(env_file 누수 없음)"
-    assert s.video_backend == "veo", "video_backend 기본값이 'veo'여야 한다(env_file 누수 없음)"
-    assert s.gemini_api_key == "", "gemini_api_key 기본값이 빈 문자열이어야 한다"
+    assert s.video_backend == "veo_fal", (
+        "video_backend 기본값이 'veo_fal'이어야 한다(env_file 누수 없음)"
+    )
     assert s.fal_key == "", "fal_key 기본값이 빈 문자열이어야 한다"
     assert s.anthropic_api_key == "", "anthropic_api_key 기본값이 빈 문자열이어야 한다"
 
@@ -27,35 +28,33 @@ def test_settings_explicit_kwargs_override_env_isolation():
     """pydantic-settings init-source 우선순위를 검증한다.
 
     생성자 kwargs(init source)는 env_file·OS environ보다 항상 우선이므로,
-    Settings(NUTTI_DRY_RUN=False, GEMINI_API_KEY='k')는 격리 픽스처 유무와
-    관계없이 그 값을 반환한다.
+    Settings(NUTTI_DRY_RUN=False, FAL_KEY='k')는 격리 픽스처 유무와 관계없이
+    그 값을 반환한다.
 
     참고: 이 테스트는 pydantic-settings의 init-source 계약을 문서화하며
-    _live_settings/_gemini_settings 헬퍼의 동작 전제를 확인한다.
+    _live_settings 헬퍼의 동작 전제를 확인한다.
     격리 픽스처 자체의 회귀 핀은 test_settings_defaults_isolated_from_env 참조.
     """
-    s = Settings(**{"NUTTI_DRY_RUN": False, "GEMINI_API_KEY": "my-key"})
+    s = Settings(**{"NUTTI_DRY_RUN": False, "FAL_KEY": "my-key"})
     assert s.dry_run is False
-    assert s.gemini_api_key == "my-key"
+    assert s.fal_key == "my-key"
 
 
-def test_settings_kling_backend_explicit_kwargs_works():
-    """pydantic-settings init-source 우선순위(kling 백엔드)를 검증한다.
+def test_settings_veo_fal_backend_explicit_kwargs_works():
+    """pydantic-settings init-source 우선순위(veo_fal 백엔드)를 검증한다.
 
-    명시적 NUTTI_VIDEO_BACKEND='kling' override는 격리 픽스처 유무와 관계없이
-    적용된다 — test_video_kling.py의 _kling_settings() 헬퍼 계약 문서화.
+    명시적 NUTTI_VIDEO_BACKEND='veo_fal'·FAL_KEY override는 격리 픽스처 유무와
+    관계없이 적용된다 — 라이브 경로 테스트 헬퍼 계약 문서화.
     """
     s = Settings(
         **{
             "NUTTI_DRY_RUN": False,
-            "NUTTI_VIDEO_BACKEND": "kling",
-            "GEMINI_API_KEY": "test-gemini-key",
+            "NUTTI_VIDEO_BACKEND": "veo_fal",
             "FAL_KEY": "test-fal-key",
         }
     )
-    assert s.video_backend == "kling"
+    assert s.video_backend == "veo_fal"
     assert s.dry_run is False
-    assert s.gemini_api_key == "test-gemini-key"
     assert s.fal_key == "test-fal-key"
 
 
