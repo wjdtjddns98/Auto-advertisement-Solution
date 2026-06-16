@@ -394,13 +394,14 @@ def _veo_total_sec(n_beats: int) -> float:
 # 텍스트로 외형을 고정하는 것이 일관성의 핵심 수단 — 비워 두면 생성기가 매 편 다른
 # 강아지를 지어낸다(실제 증상). 반드시 레퍼런스 이미지(assets/mascot.png,
 # NUTTI_MASCOT_IMAGE)의 실제 모습과 일치시킬 것 — 텍스트와 이미지가 어긋나면 둘을
-# 섞어 오히려 더 들쭉날쭉해진다. 현재 값은 assets/mascot.png(솜털 크림색 새끼강아지)
-# 기준의 "얌전하고 귀여운 puppy". ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
+# 섞어 오히려 더 들쭉날쭉해진다. 현재 값은 assets/mascot.png(흰 비숑프리제, PO 제공
+# 페르소나.png) 기준의 "얌전하고 귀여운 puppy". ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
 _MASCOT_APPEARANCE = (
-    "a real, photorealistic, live small fluffy cream-and-white Pomeranian-type puppy "
-    "with soft fur, round dark eyes, a tiny black nose, a gentle calm cute face, and a "
-    "normal four-legged small dog body — a real live animal, never a person in an animal "
-    "costume, never a mascot suit or fursuit, never a plush toy or stuffed animal"
+    "a real, photorealistic, live small white Bichon Frise puppy with a soft, fluffy, "
+    "rounded pure-white powder-puff coat groomed into a round teddy-bear face, round dark "
+    "eyes, a small black nose, and a normal four-legged small dog body — a real live "
+    "animal, never a person in an animal costume, never a mascot suit or fursuit, never a "
+    "plush toy or stuffed animal"
 )
 # ==================== PO 수정 구역 끝 (마스코트 외형) ====================
 
