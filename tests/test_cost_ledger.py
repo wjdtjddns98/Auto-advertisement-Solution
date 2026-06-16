@@ -125,6 +125,20 @@ def test_summary_ignores_unparseable_dates():
     assert b["today"]["runs"] == 0     # 날짜 버킷엔 안 잡힘
 
 
+def test_summary_naive_timestamp_treated_as_utc():
+    """naive 타임스탬프가 섞여도 UTC로 간주돼 window 비교가 오프셋만큼 어긋나지 않는다."""
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc).astimezone()
+    # 1시간 전 UTC를 tz 표기 없이(naive) 기록 — 최근 7일 윈도우에 정확히 들어가야 한다.
+    naive_iso = (datetime(2026, 6, 16, 11, 0, tzinfo=timezone.utc)
+                 .replace(tzinfo=None).isoformat())
+    records = [{
+        "recorded_at": naive_iso, "actual_usd": 1.0, "total_usd": 1.0, "dry_run": False,
+    }]
+    b = summarize_records(records, now=now, days=7)
+    assert b["window"]["actual"] == 1.0  # naive→UTC 정규화로 윈도우에 포함
+    assert b["all"]["actual"] == 1.0
+
+
 def test_format_summary_shows_actual_and_estimate():
     now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc).astimezone()
     b = summarize_records(

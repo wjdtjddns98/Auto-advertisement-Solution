@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from nutti.logging import get_logger
@@ -90,8 +90,12 @@ def _to_local(iso: str) -> datetime | None:
         dt = datetime.fromisoformat(iso)
     except (TypeError, ValueError):
         return None
-    # tz-aware면 로컬로 변환, naive면 그대로(레거시 폴백).
-    return dt.astimezone() if dt.tzinfo is not None else dt
+    # 기록은 항상 _utcnow()(UTC tz-aware)로 남기지만, 혹시 naive 타임스탬프가 섞여도
+    # UTC로 간주해 로컬로 변환한다 — naive를 그대로 두면 timestamp() 비교가 로컬
+    # 오프셋(KST +9h)만큼 어긋나 window 버킷이 오산되기 때문(반드시 aware로 정규화).
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone()
 
 
 def summarize_records(
