@@ -1940,6 +1940,9 @@ def test_persona_is_calm_and_pins_fixed_appearance():
     assert "exaggerated comedic" not in persona
     # 고정 외형이 실제 비트 프롬프트에 박혀 비트 간 드리프트를 막는지 확인.
     assert video_module._MASCOT_APPEARANCE in VeoPromptBuilder().build_beat("대사")
+    # extend(다중 비트 2번째~)도 _PERSONA를 통해 같은 외형을 이어받아야 한다 —
+    # 다중 비트 영상의 대부분이 이 경로라 일관성 핀을 함께 건다.
+    assert video_module._MASCOT_APPEARANCE in VeoPromptBuilder().build_extend_beat("대사")
 
 
 def test_frame_prompt_pins_fixed_appearance():
