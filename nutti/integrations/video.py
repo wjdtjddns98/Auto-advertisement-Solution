@@ -1207,6 +1207,15 @@ class VideoStudio:
                 clip_path = client.generate(frame_path, prompt)
                 log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
                 clips.append(clip_path)
+        except BaseException:
+            # 중도 실패 시 이미 받은 비트 클립(각 수백 MB)이 media_dir에 영구 잔존하지
+            # 않도록 정리한다(Kling 스티칭 경로의 누수 방어와 동일).
+            for done in clips:
+                try:
+                    Path(done).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
         finally:
             if owned is not None:
                 _close_owned(owned)

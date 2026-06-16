@@ -115,17 +115,22 @@ class FakeVeoFalHttp:
         self,
         *,
         post_response: _Resp | None = None,
+        post_responses: list | None = None,
         post_exc: Exception | None = None,
         get_status_responses: list | None = None,
         get_result_response: _Resp | None = None,
+        get_result_responses: list | None = None,
         download_response: _Resp | Exception | None = None,
     ):
         self.post_response = post_response or _Resp(json_data={"request_id": "veo-req-001"})
+        # post_responses/get_result_responses: 주어지면 큐로 소비(429 재시도 테스트용).
+        self.post_responses = list(post_responses or [])
         self.post_exc = post_exc
         self.get_status_responses = list(get_status_responses or [])
         self.get_result_response = get_result_response or _Resp(
             json_data={"video": {"url": "https://fal.media/fake/veo.mp4"}}
         )
+        self.get_result_responses = list(get_result_responses or [])
         self.download_response = (
             download_response
             if download_response is not None
@@ -146,6 +151,8 @@ class FakeVeoFalHttp:
         self.post_headers.append(headers)
         if self.post_exc is not None:
             raise self.post_exc
+        if self.post_responses:
+            return self.post_responses.pop(0)
         return self.post_response
 
     def get(self, url, *, headers=None, follow_redirects=False):
@@ -160,6 +167,8 @@ class FakeVeoFalHttp:
         if is_queue_host:
             self.result_calls.append(url)
             self.result_headers.append(headers)
+            if self.get_result_responses:
+                return self.get_result_responses.pop(0)
             return self.get_result_response
         # 다운로드 URL (fal.media)
         self.download_calls.append(url)
@@ -365,6 +374,60 @@ def test_fal_veo_client_transient_500_exhausted_raises(tmp_path):
     assert "500" in str(exc_info.value)
     # 최초 1회 + 재시도 3회 = 4회
     assert len(fake.status_calls) == 4
+
+
+def test_fal_veo_client_submit_transient_429_retries_and_succeeds(tmp_path):
+    """제출 429 → backoff 재시도 후 성공(생성 전 단계라 전체 파이프라인 보호)."""
+    sleeps: list[float] = []
+    fake = FakeVeoFalHttp(
+        post_responses=[
+            _Resp(status_code=429),
+            _Resp(json_data={"request_id": "veo-submit-retry"}),
+        ],
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+    )
+    settings = _veo_fal_settings(NUTTI_MEDIA_DIR=str(tmp_path))
+    client = FalVeoClient(settings, http=fake, sleep=sleeps.append)
+    path = client.generate(_frame_file(tmp_path), "prompt")
+    assert Path(path).exists()
+    assert len(fake.post_calls) == 2          # 429 1회 → 재시도 1회
+    assert len(sleeps) >= 1 and sleeps[0] > 0  # 가짜 시계로 backoff 호출 확인
+
+
+def test_fal_veo_client_result_transient_429_retries_and_succeeds(tmp_path):
+    """결과 조회 429 → backoff 재시도 후 성공(생성 완료 후 과금 손실 방지)."""
+    sleeps: list[float] = []
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        get_result_responses=[
+            _Resp(status_code=429),
+            _Resp(json_data={"video": {"url": "https://fal.media/clips/v.mp4"}}),
+        ],
+    )
+    settings = _veo_fal_settings(NUTTI_MEDIA_DIR=str(tmp_path))
+    client = FalVeoClient(settings, http=fake, sleep=sleeps.append)
+    path = client.generate(_frame_file(tmp_path), "prompt")
+    assert Path(path).exists()
+    assert len(fake.result_calls) == 2         # 429 1회 → 재시도 1회
+    assert len(sleeps) >= 1 and sleeps[0] > 0
+
+
+def test_fal_veo_client_error_messages_do_not_leak_response_keys(tmp_path):
+    """redaction 계약: request_id/URL 누락 오류 메시지에 응답 키 목록을 노출하지 않는다."""
+    # 제출 응답 키 누락.
+    fake_submit = FakeVeoFalHttp(post_response=_Resp(json_data={"secret_field": "x"}))
+    with pytest.raises(VideoRenderError) as exc:
+        _fal_veo_client(tmp_path, fake_submit).generate(_frame_file(tmp_path), "prompt")
+    assert "secret_field" not in str(exc.value) and "응답 키" not in str(exc.value)
+
+    # 결과 응답 키 누락.
+    fake_result = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        get_result_response=_Resp(json_data={"unexpected_key": 1}),
+    )
+    with pytest.raises(VideoRenderError) as exc2:
+        _fal_veo_client(tmp_path, fake_result).generate(_frame_file(tmp_path), "prompt")
+    assert "unexpected_key" not in str(exc2.value) and "응답 키" not in str(exc2.value)
 
 
 def test_fal_veo_client_result_missing_video_url_raises(tmp_path):
@@ -652,6 +715,36 @@ def test_videostudio_veo_fal_each_beat_uses_same_frame(monkeypatch):
     assert len(veo_fal.calls) == 3
     frame_paths = [call[0] for call in veo_fal.calls]
     assert all(p == "data/fake/shared_frame.jpg" for p in frame_paths)
+
+
+def test_produce_veo_fal_cleans_up_completed_clips_on_midloop_failure(tmp_path):
+    """비트 루프 중도 실패 시 이미 받은 클립 파일을 정리한다(수백 MB 누수 방지)."""
+    created: list[Path] = []
+
+    class _LeakyFalVeo:
+        def __init__(self):
+            self.n = 0
+
+        def generate(self, frame_path, prompt):
+            self.n += 1
+            if self.n == 1:
+                p = tmp_path / "veo_fal_leak1.mp4"
+                p.write_bytes(b"CLIP1")
+                created.append(p)
+                return str(p)
+            raise VideoRenderError("둘째 비트 생성 실패")
+
+        def close(self):
+            pass
+
+    nano = FakeNanoBananaClient(frame_path="data/fake/frame.jpg")
+    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_MEDIA_DIR=str(tmp_path))
+    studio = VideoStudio(settings, nano_client=nano, veo_fal_client=_LeakyFalVeo())
+    script = _script(beats=["b1", "b2"])
+    with pytest.raises(VideoRenderError):
+        studio.produce(script)
+    # 1번째 비트 클립이 정리돼 영구 잔존하지 않아야 한다.
+    assert created and not created[0].exists()
 
 
 def test_videostudio_veo_fal_duration_is_clip_sec_times_beats(monkeypatch):

@@ -41,6 +41,7 @@ from nutti.integrations.video import (
     _json_or_raise,
     _raise_for_status,
     _safe_send,
+    _send_json,
     _write_bytes,
 )
 from nutti.integrations.video_kling import (
@@ -141,20 +142,20 @@ class FalVeoClient(_HttpClosingMixin):
             "duration": "8s",
         }
         url = f"{_FAL_QUEUE_BASE}/{self._model}"
-        # 일시 오류(429/5xx)는 backoff 재시도 — Kling 제출과 달리 400은 재시도하지 않는다
-        # (Veo fal 제출에서 간헐 400이 실측된 적 없음; 필요 시 retry_400=True로 조정).
-        from nutti.integrations.video import _send_json
-
+        # 일시 오류(429/5xx)는 backoff 재시도(폴링·결과조회와 동일). Veo 생성은 분당
+        # 한도가 낮은 시점에 제출 429를 맞으면 전체 파이프라인이 죽을 수 있으므로 재시도한다.
+        # 400은 재시도하지 않는다(Veo fal 제출에서 간헐 400 실측 없음).
         data = _send_json(
             lambda: self._client().post(url, headers=_fal_headers(self.settings), json=body),
             "Veo(fal) 작업 제출",
+            sleep=self._sleep,
+            max_transient_retries=_MAX_TRANSIENT_RETRIES,
         )
         request_id = data.get("request_id")
         if not request_id:
+            # redaction: 예외 메시지에 응답 본문(키 목록 포함) 금지 — 진단은 log.debug로만.
             log.debug("veo_fal.submit.missing_request_id", keys=list(data.keys()))
-            raise VideoRenderError(
-                f"Veo(fal) 응답에 request_id가 없습니다 (응답 키: {list(data.keys())})"
-            )
+            raise VideoRenderError("Veo(fal) 응답에 request_id가 없습니다")
         return _validate_request_id(str(request_id))
 
     def _poll(self, request_id: str) -> str:
@@ -207,19 +208,21 @@ class FalVeoClient(_HttpClosingMixin):
     def _fetch_result_url(self, request_id: str) -> str:
         """완료된 작업의 결과에서 검증된 영상 URL을 방어적으로 추출·반환한다."""
         result_url = f"{_FAL_QUEUE_BASE}/{self._app_id}/requests/{request_id}"
-        data = _safe_send(
+        # 결과 조회도 일시 오류(429/5xx) 재시도 — Veo 생성이 끝난 뒤(과금 완료) 결과
+        # 조회 한 번의 429로 전체 비용이 날아가는 손실을 막는다(폴링과 동일 backoff).
+        data = _send_json(
             lambda: self._client().get(result_url, headers=_fal_headers(self.settings)),
             "Veo(fal) 결과 조회",
+            sleep=self._sleep,
+            max_transient_retries=_MAX_TRANSIENT_RETRIES,
         )
-        data = _json_or_raise(data, "Veo(fal) 결과 조회")
         # fal Veo 결과 스키마: {"video": {"url": "..."}} — KlingClient와 동일 구조.
         video = data.get("video")
         uri = video.get("url") if isinstance(video, dict) else None
         if not uri:
+            # redaction: 예외 메시지에 응답 본문(키 목록 포함) 금지 — 진단은 log.debug로만.
             log.debug("veo_fal.result.missing_url", keys=list(data.keys()))
-            raise VideoRenderError(
-                f"Veo(fal) 결과에 영상 URL이 없습니다 (응답 키: {list(data.keys())})"
-            )
+            raise VideoRenderError("Veo(fal) 결과에 영상 URL이 없습니다")
         uri = str(uri)
         _validate_fal_video_url(uri)
         return uri
