@@ -145,7 +145,9 @@ def test_prompt_builder_photorealistic_9_16_8sec():
     """포맷 규칙(photorealistic·9:16·single continuous 8-second shot)이 포함된다."""
     prompt = VeoPromptBuilder().build(_script())
     assert "photorealistic" in prompt
-    assert "9:16" in prompt
+    # 리터럴 "9:16"은 화면 자막으로 렌더돼 제거함 — 세로 비율은 "portrait"로 지시한다.
+    assert "portrait" in prompt
+    assert "9:16" not in prompt
     assert "8-second" in prompt
     assert "single continuous" in prompt
 
@@ -226,10 +228,10 @@ def test_frame_prompt_sanitizes_topic():
     assert "간식’" in prompt
     # 주제 잘림 경계 핀 — 고정 템플릿(페르소나·마이크·의상·장소) 길이를 더한 상한.
     # 핀의 목적은 "주제가 _MAX_TOPIC_CHARS로 잘린다"이므로 템플릿이 길어지면 함께 올린다.
-    # 시네마틱 화질·조명 블록(_CINEMATIC_LOOK) 추가분 반영해 상한을 올렸다.
-    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 850
-    # 금지 요소 지시는 주입과 무관하게 유지된다.
-    assert "No people, no additional animals, no on-screen text." in prompt
+    # 시네마틱 블록 + 실사강아지·자막금지 강화 문구 반영해 상한을 올렸다.
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1200
+    # 금지 요소 지시는 주입과 무관하게 유지된다(자막·코스튬·타 동물 금지 강화 문구).
+    assert "No people, no humans in costume, no other animals." in prompt
 
 
 # --- 섹션 3: VeoClient ---
@@ -1658,7 +1660,9 @@ def test_build_beat_always_includes_persona_and_fixed_voice():
         VeoPromptBuilder().build_beat("대사"),
         VeoPromptBuilder().build_beat("대사", style=pick_episode_style("x")),
     ):
-        assert "Nutti" in prompt
+        # 브랜드명 "Nutti"는 화면 자막으로 렌더돼 시각 프롬프트에서 제거함.
+        assert "Nutti" not in prompt
+        assert video_module._MASCOT_APPEARANCE in prompt  # 고정 외형은 항상 포함
         assert "EXACTLY the same voice" in prompt
         assert "Korean voice" in prompt
 
