@@ -402,6 +402,21 @@ _MASCOT_APPEARANCE = (
 # ==================== PO 수정 구역 끝 (마스코트 외형) ====================
 
 
+# ============== PO 수정 구역 (시네마틱 화질·조명 — 톤 일관성) ==============
+# 모든 클립과 시작 프레임에 동일하게 박는 고정 "화질·조명·심도" 묘사. 한 번 정해
+# 일관되게 적용해 편마다 영상 톤이 들쭉날쭉하지 않게 하고, 밋밋한 핸드폰 영상 느낌을
+# 줄여 완성도를 높인다. 단, 장면(의상·장소)·카메라 무빙·캐릭터 외형은 여기서 건드리지
+# 말 것 — extend 연속성·구도 안정성·캐릭터 일관성과 충돌한다. extend(이어붙이는 클립)
+# 에는 넣지 않는다(첫 클립+시작 프레임이 룩을 정하면 연장 구간이 시각적으로 계승).
+# ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
+_CINEMATIC_LOOK = (
+    "Cinematic look: soft natural daylight with a gentle warm key light, shallow depth "
+    "of field with a softly blurred background, crisp sharp focus on the puppy, "
+    "photorealistic fine fur detail, clean high-resolution clarity."
+)
+# ==================== PO 수정 구역 끝 (시네마틱 화질·조명) ====================
+
+
 class VeoPromptBuilder:
     """Veo 3.1 image-to-video 프롬프트 빌더(비트별 클립·네이티브 한국어 음성).
 
@@ -498,6 +513,7 @@ class VeoPromptBuilder:
             f"{scene}{mic}"
             f"{self._VOICE} "
             f"{self._CAMERA} "
+            f"{_CINEMATIC_LOOK} "
             "Format: vertical 9:16, single continuous 8-second shot. "
             f"{self._NEGATIVE}"
         )
@@ -1275,7 +1291,8 @@ class VideoStudio:
             f"the Nutti mascot, {_MASCOT_APPEARANCE}, wearing {style.outfit}, {style.setting}, "
             "looking at the camera with a calm, gentle, friendly face, like a guest in a "
             "street interview. A handheld interview microphone is pointed at the mascot "
-            f"from off-screen; the person holding it is not visible. Topic: {topic}. "
+            f"from off-screen; the person holding it is not visible. {_CINEMATIC_LOOK} "
+            f"Topic: {topic}. "
             "No people, no additional animals, no on-screen text."
         )
         # =================== PO 수정 구역 끝 (첫 장면 비주얼) ===================

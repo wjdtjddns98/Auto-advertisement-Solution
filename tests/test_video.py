@@ -228,7 +228,8 @@ def test_frame_prompt_sanitizes_topic():
     assert "간식’" in prompt
     # 주제 잘림 경계 핀 — 고정 템플릿(페르소나·마이크·의상·장소) 길이를 더한 상한.
     # 핀의 목적은 "주제가 _MAX_TOPIC_CHARS로 잘린다"이므로 템플릿이 길어지면 함께 올린다.
-    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 600
+    # 시네마틱 화질·조명 블록(_CINEMATIC_LOOK) 추가분 반영해 상한을 올렸다.
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 850
     # 금지 요소 지시는 주입과 무관하게 유지된다.
     assert "No people, no additional animals, no on-screen text." in prompt
 
@@ -1953,6 +1954,19 @@ def test_frame_prompt_pins_fixed_appearance():
     assert "cheeky" not in prompt
 
 
+def test_cinematic_look_in_first_clip_and_frame_not_in_extend():
+    """시네마틱 화질·조명 블록은 첫 클립·시작 프레임에만 들어가고 extend엔 안 들어간다.
+
+    첫 클립+프레임이 룩을 정하면 extend 구간이 시각적으로 계승하므로, extend에 다시
+    넣으면 장면 재설정으로 연속성이 깨질 수 있어 의도적으로 제외한다.
+    """
+    look = video_module._CINEMATIC_LOOK
+    assert look in VeoPromptBuilder().build_beat("대사")            # 첫/단일 클립
+    script = _script(topic="강아지 간식")
+    assert look in VideoStudio._frame_prompt(script, pick_episode_style(script.id))
+    assert look not in VeoPromptBuilder().build_extend_beat("대사")  # extend는 미포함
+
+
 def test_build_beat_style_adds_outfit_and_setting():
     """style이 주어지면 의상·장소 문장이 들어가고, 없으면 들어가지 않는다."""
     style = EpisodeStyle(
@@ -1987,6 +2001,8 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
         VeoPromptBuilder._SPEAKING_DIRECT,
         VeoPromptBuilder._CAMERA,
         VeoPromptBuilder._NEGATIVE,
+        video_module._MASCOT_APPEARANCE,
+        video_module._CINEMATIC_LOOK,
     )
     for text in templates + tuple(video_module._EPISODE_OUTFITS + video_module._EPISODE_SETTINGS):
         assert "'" not in text
