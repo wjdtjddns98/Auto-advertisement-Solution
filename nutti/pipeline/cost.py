@@ -43,7 +43,19 @@ def _video_unit_price(settings: Settings) -> tuple[float, str]:
             return 0.084, "Kling Standard"
         log.warning("cost.unknown_video_model", backend="kling", model=settings.kling_model)
         return 0.084, "Kling(단가추정)"
-    # 기본 veo 경로.
+    if settings.video_backend == "veo_fal":
+        # fal.ai Veo 3.1 단가: Lite=$0.05/s, Fast=$0.15/s, 그 외(standard)=$0.40/s.
+        # 모델 문자열("fal-ai/veo3.1/lite/image-to-video" 등)에서 tier를 판별한다.
+        model = settings.veo_fal_model.lower()
+        if "lite" in model:
+            return 0.05, "Veo(fal) Lite"
+        if "fast" in model:
+            return 0.15, "Veo(fal) Fast"
+        if "standard" in model:
+            return 0.40, "Veo(fal) Standard"
+        log.warning("cost.unknown_video_model", backend="veo_fal", model=settings.veo_fal_model)
+        return 0.40, "Veo(fal)(단가추정)"
+    # 기본 veo 경로(Gemini API).
     model = settings.veo_model.lower()
     if "fast" in model:
         return 0.10, "Veo Fast"

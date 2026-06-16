@@ -1002,6 +1002,7 @@ class VideoStudio:
         kling_client=None,
         tts_client=None,
         kling_lipsync_client=None,
+        veo_fal_client=None,
         sleep=None,
     ):
         # 실연동 클라이언트는 주입 가능하게 받는다(테스트에서 fake 주입 → 네트워크 불요).
@@ -1015,6 +1016,9 @@ class VideoStudio:
         # Kling LipSync 후처리(NUTTI_KLING_LIPSYNC=true)용 주입 클라이언트.
         # 미주입 시 백엔드(KlingVoiceoverBackend)가 실 경로에서 지연 생성한다.
         self._kling_lipsync_client = kling_lipsync_client
+        # fal.ai Veo 3.1 백엔드(video_backend="veo_fal")용 주입 클라이언트.
+        # 미주입 시 _produce_clips_veo_fal에서 지연 생성하고 finally에서 1회 닫는다.
+        self._veo_fal_client = veo_fal_client
         # 폴링 대기용 sleep 주입(기본 time.sleep). 테스트에서 가짜 시계로 대체.
         self._sleep = sleep
 
@@ -1060,6 +1064,17 @@ class VideoStudio:
             # LipSync 후처리(kling_lipsync=true)도 fal.ai 큐를 쓰므로 FAL_KEY 요구는 위에서 충족된다.
             # LipSync 클라이언트(kling_lipsync_client) 주입 여부와 무관하게 프레임용 GEMINI_API_KEY·
             # FAL_KEY 요구는 유지된다(무음 클립 생성은 여전히 Kling=fal, 프레임은 Gemini).
+            return
+        # veo_fal 백엔드: 시작 프레임(Gemini)과 영상 생성(fal.ai) 모두 키 필요.
+        if self.settings.video_backend == "veo_fal":
+            if self._nano_client is None and not _usable_key(self.settings.gemini_api_key):
+                raise ValueError(
+                    "GEMINI_API_KEY가 비어 있습니다 — veo_fal 백엔드의 프레임(NanoBanana)에 필수입니다."
+                )
+            if self._veo_fal_client is None and not _usable_key(self.settings.fal_key):
+                raise ValueError(
+                    "FAL_KEY가 비어 있습니다 — veo_fal 백엔드(dry_run=False) 시 필수입니다."
+                )
             return
         needs_key = self._nano_client is None or self._veo_client is None
         if needs_key and not _usable_key(self.settings.gemini_api_key):
@@ -1137,10 +1152,14 @@ class VideoStudio:
             return self._produce_clips_kling(frame_path, beats)
         if self.settings.video_backend == "veo":
             return self._produce_clips_veo(frame_path, beats, style)
-        # Settings.video_backend는 Literal["veo","kling"]이므로 여기는 도달 불가.
+        if self.settings.video_backend == "veo_fal":
+            return self._produce_clips_veo_fal(frame_path, beats, style)
+        # Settings.video_backend는 Literal["veo","kling","veo_fal"]이므로 여기는 도달 불가.
         # 직접 객체 변조·테스트 주입 등 런타임 우회 대비용 명시적 거부.
         # 설정 값을 메시지에 포함하면 monkey-patch된 임의 문자열이 로그/텔레그램으로 누출될 수 있다.
-        raise ValueError("알 수 없는 video_backend 값입니다 — 'veo' 또는 'kling' 중 하나여야 합니다.")
+        raise ValueError(
+            "알 수 없는 video_backend 값입니다 — 'veo', 'kling', 'veo_fal' 중 하나여야 합니다."
+        )
 
     def _produce_clips_kling(self, frame_path: str, beats: list[str]) -> tuple[str, float]:
         """Kling 무음 + 한국어 TTS 백엔드로 비트 클립을 만들고 스티칭한다.
@@ -1160,6 +1179,38 @@ class VideoStudio:
         )
         clips, total_sec = backend.produce_beat_clips(frame_path, beats)
         return self._stitch(clips), total_sec
+
+    def _produce_clips_veo_fal(
+        self, frame_path: str, beats: list[str], style: EpisodeStyle
+    ) -> tuple[str, float]:
+        """fal.ai Veo 3.1로 비트마다 같은 시작 프레임에서 클립을 생성하고 스티칭한다.
+
+        Gemini API Veo와 달리 fal Veo는 extend 엔드포인트를 미노출하므로, 비트별 독립
+        클립을 생성한 뒤 _stitch로 합친다(Kling 스티칭 패턴과 동일). 프롬프트는
+        VeoPromptBuilder.build_beat를 재사용해 마스코트 외형·목소리·연출 일관성을 유지한다.
+        총길이 = _CLIP_SEC × len(beats)(각 클립 8초).
+
+        FalVeoClient는 주입분 우선, 없으면 지연 생성하고 finally에서 소유분만 닫는다
+        (_produce_clips_veo의 owned 패턴과 동일).
+        """
+        from nutti.integrations.video_veo_fal import FalVeoClient
+
+        builder = VeoPromptBuilder()
+        client = self._veo_fal_client
+        owned = None
+        if client is None:
+            client = owned = FalVeoClient(self.settings, sleep=self._sleep)
+        clips: list[str] = []
+        try:
+            for i, beat in enumerate(beats, start=1):
+                prompt = builder.build_beat(beat, style=style)
+                clip_path = client.generate(frame_path, prompt)
+                log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
+                clips.append(clip_path)
+        finally:
+            if owned is not None:
+                _close_owned(owned)
+        return self._stitch(clips), _CLIP_SEC * len(beats)
 
     def _produce_clips_veo(
         self, frame_path: str, beats: list[str], style: EpisodeStyle

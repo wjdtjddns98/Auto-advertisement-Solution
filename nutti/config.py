@@ -69,10 +69,14 @@ class Settings(BaseSettings):
     veo_poll_interval_sec: float = Field(default=15.0, alias="NUTTI_VEO_POLL_INTERVAL_SEC")
     veo_timeout_sec: float = Field(default=600.0, alias="NUTTI_VEO_TIMEOUT_SEC")
 
-    # 영상 백엔드 선택: "veo"(기본, 네이티브 한국어 음성) | "kling"(무음 영상 + 한국어 TTS 보이스오버).
-    # Kling은 네이티브 한국어 음성이 불가(v3는 영어로 자동번역, v1.6/2.1은 무음)하므로,
-    # 무음 영상을 생성하고 Gemini TTS로 한국어 내레이션을 별도 합성해 mux한다(립싱크 포기·보이스오버).
-    video_backend: Literal["veo", "kling"] = Field(default="veo", alias="NUTTI_VIDEO_BACKEND")
+    # 영상 백엔드 선택:
+    #   "veo"(기본) — Gemini API Veo, 네이티브 한국어 음성, 일일 쿼터 있음.
+    #   "kling" — fal.ai Kling, 무음 영상 + 한국어 TTS 보이스오버.
+    #   "veo_fal" — fal.ai 경유 Veo 3.1, 네이티브 한국어 음성 + 종량제(쿼터 벽 우회).
+    #              Gemini Veo와 같은 모델이므로 품질·마스코트 일관성 동일, 단가는 모델별 분기.
+    video_backend: Literal["veo", "kling", "veo_fal"] = Field(
+        default="veo", alias="NUTTI_VIDEO_BACKEND"
+    )
     # 2단계-Kling: fal.ai Kling image-to-video(무음). FAL_KEY는 fal.ai 대시보드에서 발급.
     fal_key: str = Field(default="", alias="FAL_KEY")
     # 기본 v2.1 standard — 무음·최저가($0.084/s)·5·10초 길이. v3는 duration 자유지만 가격 미확정.
@@ -123,6 +127,21 @@ class Settings(BaseSettings):
         default="fal-ai/kling-video/lipsync/audio-to-video",
         alias="NUTTI_KLING_LIPSYNC_MODEL",
     )
+
+    # ---- fal.ai Veo 3.1 백엔드(video_backend="veo_fal") ----
+    # Gemini API Veo와 동일한 모델을 fal.ai 종량제로 호스팅해 일일 쿼터 벽을 우회한다.
+    # Lite 화질로 싸게 검증하고, Fast로 승격할 때는 모델명만 바꾼다(PO 승인 후).
+    # FAL_KEY는 기존 kling 백엔드와 공유한다(fal.ai 단일 키).
+    veo_fal_model: str = Field(
+        default="fal-ai/veo3.1/lite/image-to-video",
+        alias="NUTTI_VEO_FAL_MODEL",
+    )
+    # fal 큐 폴링 간격(초). Veo 생성이 Kling보다 오래 걸릴 수 있으므로 Kling보다 넉넉히.
+    veo_fal_poll_interval_sec: float = Field(default=10.0, alias="NUTTI_VEO_FAL_POLL_INTERVAL_SEC")
+    # fal 큐 전체 타임아웃(초). Veo 3.1은 최대 ~10분 소요를 대비해 Kling과 동일 한도.
+    veo_fal_timeout_sec: float = Field(default=600.0, alias="NUTTI_VEO_FAL_TIMEOUT_SEC")
+    # fal Veo 출력 해상도. "720p"(기본·저비용) | "1080p"(고품질).
+    veo_fal_resolution: str = Field(default="720p", alias="NUTTI_VEO_FAL_RESOLUTION")
 
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
