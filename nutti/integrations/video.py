@@ -454,14 +454,16 @@ class VeoPromptBuilder:
     # 화면 자막으로 렌더한다(실측: "Nutti"·"9:16" 자막 박힘). "mascot"도 금지 — 인형탈
     # 코스튬으로 해석된다(실측). 캐릭터는 항상 "진짜 실사 강아지"로 못박는다.
     _PERSONA = (
-        f"{_MASCOT_APPEARANCE}, calm and gentle, behaving like a friendly guest in a "
-        "relaxed street interview, with soft, natural, subtle facial expressions and no "
+        f"{_MASCOT_APPEARANCE}, calm and gentle, talking to the camera in a relaxed, "
+        "friendly way, with soft, natural, subtle facial expressions and no "
         "exaggerated or distorted faces"
     )
     _VOICE = (
         "Voice (must be EXACTLY the same voice in every clip of this series): a bright, "
         "cute Little girl Korean voice, slightly high-pitched, cheeky and energetic, "
-        "speaking at a lively natural pace."
+        "speaking at a lively natural pace. Keep the identical timbre, pitch, and accent "
+        "in every clip; do not change the voice or switch to a different speaker for "
+        "emphasis or for the final call-to-action line."
     )
     _MIC = (
         "A handheld interview microphone is pointed at the puppy from off-screen; "
@@ -1080,7 +1082,9 @@ class VideoStudio:
         clips: list[str] = []
         try:
             for i, beat in enumerate(beats, start=1):
-                prompt = builder.build_beat(beat, style=style)
+                # 정면 1인 발화(off_screen_interviewer=False) — 인터뷰 마이크 연출 제거
+                # (2026-06-16 PO 피드백: 마이크 구도 아예 삭제).
+                prompt = builder.build_beat(beat, off_screen_interviewer=False, style=style)
                 clip_path = client.generate(frame_path, prompt)
                 log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
                 clips.append(clip_path)
@@ -1096,7 +1100,90 @@ class VideoStudio:
         finally:
             if owned is not None:
                 _close_owned(owned)
-        return self._stitch(clips), _CLIP_SEC * len(beats)
+        # 비트 클립(8초 고정)의 앞뒤 침묵을 잘라 비트 사이 공백을 줄인다
+        # (2026-06-16 PO 피드백: 비트 사이 공백이 너무 길다). 트림 실패분은 원본·8초로 폴백.
+        trimmed: list[str] = []
+        total = 0.0
+        for clip in clips:
+            path, sec = self._trim_to_speech(clip)
+            trimmed.append(path)
+            total += sec if sec is not None else _CLIP_SEC
+        # 트림으로 새로 만든 임시 파일(veo_fal_trim_*.mp4)은 스티칭 후 정리한다 — 원본
+        # 비트 클립은 기존 정책대로 유지하고, 단일 비트라 _stitch가 그대로 돌려준 파일
+        # (final)은 삭제 대상에서 제외한다(반환 파일 삭제 방지). 스티칭 실패 시에도 정리.
+        final = None
+        try:
+            final = self._stitch(trimmed)
+            return final, total
+        finally:
+            for orig, t in zip(clips, trimmed):
+                if t != orig and t != final:
+                    try:
+                        Path(t).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
+    def _trim_to_speech(self, clip: str) -> tuple[str, float | None]:
+        """클립에서 발화 구간만 남기고 앞뒤 침묵을 잘라 (새 경로, 길이초)를 반환한다.
+
+        veo_fal 비트 클립은 8초 고정이라 짧은 대사 뒤에 긴 침묵이 남는다 — 그대로
+        이어붙이면 비트 사이 공백이 길어진다(PO 피드백). ffmpeg silencedetect로 앞/뒤
+        침묵 경계를 찾아 발화 구간 + 짧은 여유만 남긴다. 검출·트림 실패나 전구간 침묵 등
+        이상 시 (원본 경로, None)을 돌려준다 — 더미 경로·예외에도 파이프라인이 안전하게
+        진행되도록(단위 테스트의 가짜 클립 경로 포함).
+        """
+        import re
+        import subprocess
+
+        try:
+            import imageio_ffmpeg
+
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+            probe = subprocess.run(
+                [ff, "-hide_banner", "-i", clip, "-af",
+                 "silencedetect=noise=-30dB:d=0.4", "-f", "null", "-"],
+                capture_output=True,
+            )
+            err = probe.stderr.decode("utf-8", "replace")
+            dm = re.search(r"Duration:\s*(\d+):(\d+):([0-9.]+)", err)
+            if dm is None:
+                return clip, None
+            dur = int(dm.group(1)) * 3600 + int(dm.group(2)) * 60 + float(dm.group(3))
+            starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)", err)]
+            ends = [float(x) for x in re.findall(r"silence_end:\s*([0-9.]+)", err)]
+            # 앞 침묵: 0 근처에서 시작하는 첫 침묵의 끝이 발화 시작점.
+            start_t = 0.0
+            if starts and starts[0] <= 0.3 and ends:
+                start_t = max(0.0, ends[0] - 0.10)
+            # 뒤 침묵: 마지막 침묵이 EOF까지 이어지면(=닫히지 않거나 파일 끝 근처에서 닫힘)
+            # 그 시작이 발화 끝점. 중간에서 닫힌 침묵(발화 사이 짧은 멈춤)은 트림하지 않는다.
+            end_t = dur
+            if starts:
+                last = starts[-1]
+                open_to_eof = len(ends) < len(starts)  # 마지막 침묵이 EOF까지 안 닫힘
+                closed_near_eof = bool(ends) and ends[-1] >= dur - 0.1
+                if last > start_t and (open_to_eof or closed_near_eof):
+                    end_t = min(dur, last + 0.35)
+            out_sec = end_t - start_t
+            if out_sec < 0.8 or end_t <= start_t:
+                return clip, dur  # 과도 트림 방지(전구간 침묵·검출 이상) — 실측 길이 유지
+            # 실제로 잘라낼 무음이 0.5초 미만이면 재인코딩하지 않고 원본 유지 — Veo 클립은
+            # 룸톤이 끝까지 깔려 데드에어가 거의 없다(2026-06-16 실측). 의미 있는 무음이
+            # 있을 때만 트림해 무익한 재인코딩·중복 파일 생성을 막는다.
+            if (dur - out_sec) < 0.5:
+                return clip, dur  # 트림 안 함 — 실측 길이 유지
+            out = str(Path(self.settings.nutti_media_dir) / f"veo_fal_trim_{uuid4().hex[:8]}.mp4")
+            cut = subprocess.run(
+                [ff, "-y", "-hide_banner", "-ss", f"{start_t:.3f}", "-i", clip,
+                 "-t", f"{out_sec:.3f}", "-c:v", "libx264", "-c:a", "aac", out],
+                capture_output=True,
+            )
+            if cut.returncode != 0 or not Path(out).exists():
+                return clip, dur  # 트림 실패 — 원본 + 실측 길이
+            return out, out_sec
+        except Exception:
+            # 트림은 품질 개선용 best-effort — 어떤 실패도 원본 클립으로 폴백한다.
+            return clip, None
 
     def _produce_clips_veo(
         self, frame_path: str, beats: list[str], style: EpisodeStyle
@@ -1232,11 +1319,11 @@ class VideoStudio:
         return (
             "A photorealistic tall vertical portrait-orientation starting frame for a "
             f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}, {style.setting}, "
-            "looking at the camera with a calm, gentle, friendly face, like a guest in a "
-            "street interview. A handheld interview microphone is pointed at the puppy "
-            f"from off-screen; the person holding it is not visible. {_CINEMATIC_LOOK} "
+            "looking straight at the camera with a calm, gentle, friendly face, ready to "
+            f"talk directly to the camera. {_CINEMATIC_LOOK} "
             f"Scene context: {topic}. "
             "Absolutely no text, letters, numbers, words, captions, logos, brand names, or "
-            "watermarks anywhere. No people, no humans in costume, no other animals."
+            "watermarks anywhere. No people, no humans in costume, no other animals. "
+            "No microphone and no interview setup in frame."
         )
         # =================== PO 수정 구역 끝 (첫 장면 비주얼) ===================

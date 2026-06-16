@@ -1747,14 +1747,20 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
         assert "'" not in text
 
 
-def test_frame_prompt_includes_episode_style_and_microphone():
-    """프레임 프롬프트에 편별 의상·장소와 인터뷰 마이크 연출이 들어간다."""
+def test_frame_prompt_includes_episode_style_and_no_microphone():
+    """프레임 프롬프트에 편별 의상·장소가 들어가고, 인터뷰 마이크 연출은 제거된다.
+
+    2026-06-16 PO 피드백: 인터뷰 마이크 구도 아예 삭제 → 프레임도 정면 발화로,
+    마이크 명시 억제.
+    """
     script = _script(topic="강아지 간식")
     style = pick_episode_style(script.id)
     prompt = VideoStudio._frame_prompt(script, style)
     assert style.outfit in prompt
     assert style.setting in prompt
-    assert "interview microphone" in prompt
+    assert "interview microphone" not in prompt  # 기존 마이크 리그 문구 제거됨
+    assert "handheld" not in prompt
+    assert "No microphone" in prompt  # 마이크 억제 명시
 
 
 def test_produce_veo_frame_and_all_beats_share_episode_style(monkeypatch):
