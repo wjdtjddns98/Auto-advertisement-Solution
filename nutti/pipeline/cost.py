@@ -20,8 +20,8 @@ from nutti.models import CostBreakdown, CostLineItem, PipelineRun
 
 log = get_logger(__name__)
 
-# 시작 프레임 1장(나노바나나 / Gemini 2.5 Flash Image) 단가(USD).
-_FRAME_USD = 0.05
+# 시작 프레임 1장(FLUX.1 Kontext pro / fal.ai) 단가(USD). 편당 $0.04.
+_FRAME_USD = 0.04
 
 # 텍스트 생성 추정 단가(USD / 1K 토큰, output 기준 블렌디드). Gemini 2.5 Flash 근사치.
 # 한국어는 대략 글자당 ~1토큰으로 보수적으로 잡는다. 금액 자체가 작아 정밀도는 부차적.
@@ -87,11 +87,11 @@ def estimate_run_cost(run: PipelineRun, settings: Settings) -> CostBreakdown:
     """
     items: list[CostLineItem] = []
 
-    # 1) 시작 프레임(나노바나나) — 영상이 만들어졌으면 1장.
+    # 1) 시작 프레임(FLUX Kontext) — 영상이 만들어졌으면 1장.
     if run.video is not None and run.video.frame_image_path:
         items.append(
             CostLineItem(
-                label="시작 프레임 (나노바나나)",
+                label="시작 프레임 (FLUX Kontext)",
                 detail=f"${_FRAME_USD:.3f}/장 × 1장",
                 usd=_FRAME_USD,
             )

@@ -764,12 +764,15 @@ def test_videostudio_veo_fal_duration_is_clip_sec_times_beats(monkeypatch):
     assert asset.duration_sec != pytest.approx(22.0)  # veo extend 값이 아님
 
 
-def test_videostudio_veo_fal_validate_config_missing_gemini_key_raises():
-    """veo_fal + dry_run=False + GEMINI_API_KEY 빈 값 → ValueError."""
+def test_videostudio_veo_fal_validate_config_does_not_require_gemini_key():
+    """veo_fal은 GEMINI_API_KEY가 없어도 통과한다 — 프레임(Kontext)·영상 모두 fal(FAL_KEY).
+
+    이미지 생성을 Gemini(NanoBanana)에서 fal Kontext로 옮기면서 veo_fal 파이프라인은
+    Gemini 키가 완전히 불필요해졌다(결제처 fal 단일화). FAL_KEY만 있으면 검증을 통과해야 한다.
+    """
     settings = _live_settings(NUTTI_VIDEO_BACKEND="veo_fal", GEMINI_API_KEY="", FAL_KEY="fk")
     studio = VideoStudio(settings)
-    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
-        studio.validate_config()
+    studio.validate_config()  # GEMINI 없이도 예외 없이 통과해야 한다
 
 
 def test_videostudio_veo_fal_validate_config_missing_fal_key_raises():

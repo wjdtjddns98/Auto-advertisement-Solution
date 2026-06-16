@@ -1,10 +1,10 @@
-"""VideoStudio 단위 테스트 — NanoBanana(시작 프레임)·Veo 3.1(영상)·프롬프트 빌더.
+"""VideoStudio 단위 테스트 — 프레임 클라이언트(Kontext)·Veo 3.1(영상)·프롬프트 빌더.
 
 모든 테스트는 fake 클라이언트 주입 또는 dry_run으로 **네트워크 없이** 동작한다
 (conftest의 autouse 픽스처가 실제 httpx 전송을 차단한다). 섹션 구성:
 
 1. VeoPromptBuilder — 대사 인용·카메라 지시·금지 요소·포맷 규칙.
-2. NanoBananaClient — fake http 주입 성공/HTTP·전송 오류/redaction/close.
+2. (NanoBananaClient Gemini 단위테스트 제거 — FalKontextClient로 교체됨, 2026-06)
 3. VeoClient — 제출·폴링(횟수 핀)·타임아웃·실패 상태·다운로드 저장·redaction·close.
 4. VideoStudio.produce() dry_run — 결정적 더미 VideoAsset.
 5. VideoStudio.produce() end-to-end fake 주입 — 전 필드·키 검증·소유분 close.
@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 
 import pytest
@@ -21,7 +20,6 @@ import nutti.integrations.video as video_module
 from nutti.config import Settings
 from nutti.integrations.video import (
     EpisodeStyle,
-    NanoBananaClient,
     VeoClient,
     VeoPromptBuilder,
     VideoRenderError,
@@ -232,280 +230,6 @@ def test_frame_prompt_sanitizes_topic():
     assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 850
     # 금지 요소 지시는 주입과 무관하게 유지된다.
     assert "No people, no additional animals, no on-screen text." in prompt
-
-
-# --- 섹션 2: NanoBananaClient ---
-
-
-def _nano_image_response(image_bytes: bytes = b"FAKE-PNG-BYTES") -> _Resp:
-    """generateContent 성공 응답(텍스트 파트 + 이미지 inline_data 파트)."""
-    return _Resp(
-        json_data={
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [
-                            {"text": "frame description"},
-                            {
-                                "inline_data": {
-                                    "mime_type": "image/png",
-                                    "data": base64.b64encode(image_bytes).decode("ascii"),
-                                }
-                            },
-                        ]
-                    }
-                }
-            ]
-        }
-    )
-
-
-class FakeNanoBananaHttp:
-    """주입용 httpx.Client 대역 — post 1회 응답(또는 예외)을 돌려준다.
-
-    `post_headers`에 매 호출의 헤더를 기록한다 — NanoBanana가 실제로
-    `x-goog-api-key`를 Gemini API로 보내는지 단언하기 위함이다.
-    """
-
-    def __init__(self, *, response: _Resp | None = None, exc: Exception | None = None):
-        self.response = response
-        self.exc = exc
-        self.posts: list[tuple[str, dict]] = []
-        self.post_headers: list[dict | None] = []
-        self.closed = False
-
-    def post(self, url, *, headers=None, json=None):
-        self.posts.append((url, json))
-        self.post_headers.append(headers)
-        if self.exc is not None:
-            raise self.exc
-        return self.response
-
-    def close(self):
-        self.closed = True
-
-
-def test_nano_banana_generate_frame_success(tmp_path):
-    """성공 시 이미지 바이트를 media_dir에 저장하고 로컬 경로(문자열)를 반환한다.
-
-    Gemini API 인증은 `x-goog-api-key` 헤더로 한다(Bearer 아님) — 헤더가
-    없으면 401·403으로 무음 실패한다. 인증 헤더 제거 시 이 단언이 실패한다.
-    """
-    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
-    fake = FakeNanoBananaHttp(response=_nano_image_response(b"FAKE-PNG-BYTES"))
-    client = NanoBananaClient(settings, http=fake)
-    path = client.generate_frame("a photorealistic dog mascot")
-    assert isinstance(path, str)
-    assert Path(path).parent == tmp_path
-    assert Path(path).name.startswith("frame_")
-    assert Path(path).read_bytes() == b"FAKE-PNG-BYTES"
-    # Gemini API 인증 헤더가 실제로 전송됐는지 단언(#3 핀).
-    assert fake.post_headers, "post_headers가 기록되지 않았습니다"
-    sent_headers = fake.post_headers[0] or {}
-    assert sent_headers.get("x-goog-api-key") == "test-gemini-key"
-
-
-def test_nano_banana_generate_frame_accepts_camelcase_inline_data(tmp_path):
-    """실 Gemini API의 camelCase `inlineData` 키도 이미지 파트로 인식한다.
-
-    응답 파서는 snake_case/camelCase 둘 다 허용해야 한다 — camelCase 분기가
-    빠지면 실 API 응답에서 '이미지 파트 없음' 오류가 무음으로 발생한다.
-    """
-    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
-    response = _Resp(
-        json_data={
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [
-                            {
-                                "inlineData": {
-                                    "mimeType": "image/png",
-                                    "data": base64.b64encode(b"CAMEL-PNG").decode("ascii"),
-                                }
-                            }
-                        ]
-                    }
-                }
-            ]
-        }
-    )
-    client = NanoBananaClient(settings, http=FakeNanoBananaHttp(response=response))
-    path = client.generate_frame("a dog")
-    assert Path(path).read_bytes() == b"CAMEL-PNG"
-
-
-def test_nano_banana_reference_image_attached_inline(tmp_path):
-    """레퍼런스 이미지가 있으면 base64 inline_data 파트로 첨부된다."""
-    ref = tmp_path / "mascot.png"
-    ref.write_bytes(b"REF-IMAGE")
-    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
-    fake = FakeNanoBananaHttp(response=_nano_image_response())
-    client = NanoBananaClient(settings, http=fake)
-    client.generate_frame("a dog", reference_image_path=str(ref))
-    _, body = fake.posts[0]
-    parts = body["contents"][0]["parts"]
-    inline = parts[1]["inline_data"]
-    assert inline["mime_type"] == "image/png"
-    assert base64.b64decode(inline["data"]) == b"REF-IMAGE"
-
-
-def test_nano_banana_http_error_raises_render_error(tmp_path):
-    """HTTP 4xx는 VideoRenderError로 전파된다."""
-    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
-    fake = FakeNanoBananaHttp(response=_Resp(status_code=400))
-    client = NanoBananaClient(settings, http=fake)
-    with pytest.raises(VideoRenderError):
-        client.generate_frame("a dog")
-
-
-def test_nano_banana_transport_error_raises_render_error(tmp_path):
-    """전송 계층 오류(ConnectionError 등)도 VideoRenderError로 승격된다."""
-    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
-    fake = FakeNanoBananaHttp(exc=ConnectionError("boom https://secret.example/leak"))
-    client = NanoBananaClient(settings, http=fake)
-    with pytest.raises(VideoRenderError) as exc_info:
-        client.generate_frame("a dog")
-    # 전송 오류는 타입명만 노출(메시지에 URL이 박힐 수 있음).
-    assert "ConnectionError" in str(exc_info.value)
-    assert "secret.example" not in str(exc_info.value)
-
-
-def test_nano_banana_missing_image_in_response_raises(tmp_path):
-    """응답에 이미지 파트가 없으면 VideoRenderError를 던진다(무음 결함 방지)."""
-    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
-    fake = FakeNanoBananaHttp(
-        response=_Resp(json_data={"candidates": [{"content": {"parts": [{"text": "only"}]}}]})
-    )
-    client = NanoBananaClient(settings, http=fake)
-    with pytest.raises(VideoRenderError):
-        client.generate_frame("a dog")
-
-
-class _MultiRespFake:
-    """post 호출마다 순서대로 다른 응답을 돌려주는 fake (재시도 시나리오용)."""
-
-    def __init__(self, responses: list[_Resp]):
-        self._responses = iter(responses)
-        self.call_count = 0
-        self.closed = False
-
-    def post(self, url, *, headers=None, json=None):
-        self.call_count += 1
-        return next(self._responses)
-
-    def close(self):
-        self.closed = True
-
-
-def test_nano_banana_generate_frame_retries_on_missing_image(tmp_path):
-    """이미지 파트 없는 응답 후 재시도하면 성공한다(sleep 주입으로 빠르게)."""
-    no_image = _Resp(json_data={"candidates": [{"content": {"parts": [{"text": "only"}]}}]})
-    ok = _nano_image_response()
-    fake = _MultiRespFake([no_image, ok])
-    client = NanoBananaClient(
-        _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake, sleep=lambda _: None
-    )
-    path = client.generate_frame("a dog")
-    assert Path(path).exists()
-    assert fake.call_count == 2  # 1회 실패 + 1회 성공
-
-
-def test_nano_banana_generate_frame_exhausts_retries(tmp_path):
-    """모든 재시도가 실패하면 VideoRenderError를 던진다."""
-    no_image = _Resp(json_data={"candidates": [{"content": {"parts": [{"text": "only"}]}}]})
-    max_tries = 1 + NanoBananaClient._MAX_FRAME_RETRIES
-    fake = _MultiRespFake([no_image] * max_tries)
-    client = NanoBananaClient(
-        _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake, sleep=lambda _: None
-    )
-    with pytest.raises(VideoRenderError):
-        client.generate_frame("a dog")
-    assert fake.call_count == max_tries
-
-
-def test_nano_banana_generate_frame_retries_transient_429_then_succeeds(tmp_path):
-    """회귀: 프레임 생성 중 일시적 429(분당 한도)는 backoff 후 재시도해 성공한다.
-
-    무료 티어 Gemini는 RPM이 낮아 풀 파이프라인 연속 호출 시 일시적 429가 흔하다.
-    이전엔 HTTP 호출이 재시도 루프 밖이라 단발 429로 전체 작업이 죽었다.
-    """
-    ok = _nano_image_response()
-    fake = _MultiRespFake([_Resp(status_code=429), ok])
-    client = NanoBananaClient(
-        _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake, sleep=lambda _: None
-    )
-    path = client.generate_frame("a dog")
-    assert Path(path).exists()
-    assert fake.call_count == 2  # 429 1회 + 재시도 성공 1회
-
-
-def test_nano_banana_generate_frame_transient_429_exhausted_raises(tmp_path):
-    """회귀: 연속 429가 재시도 한도를 넘으면 VideoRenderError로 전파된다(무한루프 금지)."""
-    fake = FakeNanoBananaHttp(response=_Resp(status_code=429))
-    client = NanoBananaClient(
-        _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=fake, sleep=lambda _: None
-    )
-    with pytest.raises(VideoRenderError) as exc_info:
-        client.generate_frame("a dog")
-    assert "429" in str(exc_info.value)
-    # 최초 1회 + 일시 오류 재시도 _MAX_TRANSIENT_RETRIES회 = 4회 POST 후 포기.
-    assert len(fake.posts) == 1 + 3
-
-
-def test_nano_banana_error_message_redacts_url_and_body(tmp_path):
-    """HTTP 오류 메시지에는 상태 코드만 — URL·응답 본문은 노출하지 않는다."""
-    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
-    fake = FakeNanoBananaHttp(
-        response=_Resp(status_code=500, json_data={"error": "internal-secret-detail"})
-    )
-    # 5xx는 일시 오류로 재시도되므로 가짜 sleep을 주입해 backoff 대기 없이 빠르게 소진시킨다.
-    client = NanoBananaClient(settings, http=fake, sleep=lambda _: None)
-    with pytest.raises(VideoRenderError) as exc_info:
-        client.generate_frame("a dog")
-    msg = str(exc_info.value)
-    assert "500" in msg
-    assert "://" not in msg
-    assert "generativelanguage" not in msg
-    assert "internal-secret-detail" not in msg
-
-
-def test_nano_banana_close_closes_http():
-    """close()는 주입/지연 생성한 http 클라이언트를 닫는다(멱등)."""
-    fake = FakeNanoBananaHttp(response=_nano_image_response())
-    client = NanoBananaClient(_gemini_settings(), http=fake)
-    client.close()
-    assert fake.closed is True
-    client.close()  # 멱등 — 두 번째 호출도 안전해야 한다.
-
-
-def test_nano_banana_write_failure_raises_render_error(tmp_path, monkeypatch):
-    """디스크 쓰기 실패(OSError)도 VideoRenderError로 승격된다(계약 유지)."""
-    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
-    fake = FakeNanoBananaHttp(response=_nano_image_response())
-    client = NanoBananaClient(settings, http=fake)
-    monkeypatch.setattr(Path, "write_bytes", _failing_write_bytes)
-    with pytest.raises(VideoRenderError) as exc_info:
-        client.generate_frame("a dog")
-    msg = str(exc_info.value)
-    assert "OSError" in msg
-    # 예외 원문(경로 상세)은 노출하지 않는다 — 타입명만(redaction).
-    assert "secret-path-detail" not in msg
-
-
-def test_nano_banana_malformed_json_raises_render_error(tmp_path):
-    """HTTP 200 + 비-JSON 본문이면 resp.json() 실패도 VideoRenderError로 승격된다."""
-    settings = _gemini_settings(NUTTI_MEDIA_DIR=str(tmp_path))
-    fake = FakeNanoBananaHttp(
-        response=_Resp(json_exc=ValueError("Expecting value: secret body"))
-    )
-    client = NanoBananaClient(settings, http=fake)
-    with pytest.raises(VideoRenderError) as exc_info:
-        client.generate_frame("a dog")
-    msg = str(exc_info.value)
-    assert "JSON" in msg
-    assert "ValueError" in msg
-    assert "secret body" not in msg  # 예외 원문(본문 일부)은 노출 금지.
 
 
 # --- 섹션 3: VeoClient ---
@@ -1662,18 +1386,21 @@ def test_stitch_ffmpeg_failure_raises_render_error(tmp_path, monkeypatch):
     assert "secret-path-leak" not in str(exc.value)
 
 
-def test_produce_validate_config_missing_gemini_key_raises():
-    """실 경로 + GEMINI_API_KEY 빈값이면 시작 시점에 ValueError로 빠르게 실패한다."""
+def test_produce_validate_config_missing_fal_key_raises():
+    """실 경로 + FAL_KEY 빈값이면 시작 시점에 ValueError로 빠르게 실패한다.
+
+    시작 프레임이 Kontext(fal.ai)로 바뀌었으므로 FAL_KEY가 필수다.
+    """
     studio = VideoStudio(_live_settings())
-    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+    with pytest.raises(ValueError, match="FAL_KEY"):
         studio.produce(_script())
 
 
 def test_produce_validate_config_partial_injection_still_requires_key():
     """nano_client만 주입되고 veo_client=None이면 키 검사를 건너뛰지 않는다(OR 로직 핀).
 
-    needs_key = nano is None OR veo is None → 하나라도 None이면 키 필요.
-    AND로 변경되면 partial injection이 키 검사를 우회해 실 API를 호출할 수 있다.
+    nano_client 주입 시 프레임 키 검사는 건너뛰지만, veo_client=None이면
+    GEMINI_API_KEY(Veo 영상용)는 여전히 필요하다.
     """
     studio = VideoStudio(_live_settings(), nano_client=FakeNanoBananaClient())
     with pytest.raises(ValueError, match="GEMINI_API_KEY"):
@@ -1695,9 +1422,12 @@ def test_usable_key_rejects_blank_and_inline_comment_values():
 
 
 def test_produce_validate_config_comment_value_key_raises():
-    """GEMINI_API_KEY가 인라인 주석 값('# placeholder')이면 진짜 키로 오인하지 않는다."""
-    studio = VideoStudio(_live_settings(GEMINI_API_KEY="# placeholder"))
-    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+    """FAL_KEY가 인라인 주석 값('# placeholder')이면 진짜 키로 오인하지 않는다.
+
+    시작 프레임이 Kontext(fal.ai)로 바뀌었으므로 FAL_KEY 검증이 최초 실패점이다.
+    """
+    studio = VideoStudio(_live_settings(FAL_KEY="# placeholder"))
+    with pytest.raises(ValueError, match="FAL_KEY"):
         studio.produce(_script())
 
 
@@ -1713,7 +1443,11 @@ def test_produce_validate_config_injected_clients_skip_key_check():
 
 
 def test_produce_closes_self_created_nano_client(monkeypatch):
-    """주입이 없어 자체 생성한 NanoBananaClient는 finally에서 정확히 1회 닫는다."""
+    """자체 생성한 프레임 클라이언트(FalKontextClient)는 finally에서 정확히 1회 닫는다.
+
+    프레임 클라이언트는 _generate_frame에서 image_kontext 모듈로부터 지연 import되므로
+    소스 모듈의 FalKontextClient를 패치한다(시드 이름 self._nano_client는 유지).
+    """
     created: dict = {}
 
     class _OwnedNano(FakeNanoBananaClient):
@@ -1721,8 +1455,9 @@ def test_produce_closes_self_created_nano_client(monkeypatch):
             super().__init__()
             created["nano"] = self
 
-    monkeypatch.setattr(video_module, "NanoBananaClient", _OwnedNano)
-    studio = VideoStudio(_gemini_settings(), veo_client=FakeVeoClient())
+    monkeypatch.setattr("nutti.integrations.image_kontext.FalKontextClient", _OwnedNano)
+    # 프레임은 이제 fal Kontext → validate_config가 FAL_KEY를 요구한다(영상은 주입된 veo).
+    studio = VideoStudio(_gemini_settings(FAL_KEY="fk"), veo_client=FakeVeoClient())
     studio.produce(_script())
     assert created["nano"].close_count == 1
 
@@ -1776,10 +1511,10 @@ def test_produce_closes_self_created_nano_client_even_on_failure(monkeypatch):
             created["nano"] = self
 
         def generate_frame(self, scene_prompt, *, reference_image_path=None):
-            raise VideoRenderError("Gemini 프레임 생성 HTTP 500")
+            raise VideoRenderError("Kontext 프레임 생성 HTTP 500")
 
-    monkeypatch.setattr(video_module, "NanoBananaClient", _FailingNano)
-    studio = VideoStudio(_gemini_settings(), veo_client=FakeVeoClient())
+    monkeypatch.setattr("nutti.integrations.image_kontext.FalKontextClient", _FailingNano)
+    studio = VideoStudio(_gemini_settings(FAL_KEY="fk"), veo_client=FakeVeoClient())
     with pytest.raises(VideoRenderError):
         studio.produce(_script())
     assert created["nano"].close_count == 1

@@ -59,7 +59,7 @@ class VideoAsset(BaseModel):
     """2단계 산출물: Veo 단일컷 영상과 중간 자산."""
 
     script_id: str
-    frame_image_path: str | None = None  # NanoBanana(마스코트 시작 프레임) 로컬 경로
+    frame_image_path: str | None = None  # FLUX Kontext(마스코트 시작 프레임) 로컬 경로
     video_path: str | None = None        # VeoClient가 즉시 다운로드해 저장한 로컬 경로
     final_url: str | None = None         # 최종 산출물 위치(로컬 파일 경로 문자열 허용)
     preview_url: str | None = None
