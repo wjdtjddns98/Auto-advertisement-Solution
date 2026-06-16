@@ -16,6 +16,7 @@ import typer
 from nutti.config import get_settings
 from nutti.logging import configure_logging
 from nutti.models import ContentFormat
+from nutti.pipeline.cost import format_cost
 from nutti.pipeline.orchestrator import GateRejected, Orchestrator
 
 app = typer.Typer(help="Nutti 애견간식 콘텐츠 자동화 파이프라인")
@@ -56,6 +57,10 @@ def run(
     typer.secho(f"완료: run={result.id}", fg=typer.colors.GREEN)
     for up in result.uploads:
         typer.echo(f"  - {up.platform}: {up.url}")
+
+    if result.cost is not None:
+        typer.echo("")
+        typer.secho(format_cost(result.cost), fg=typer.colors.MAGENTA)
 
     analysis = orchestrator.collect_and_analyze(result)
     typer.echo(f"\n[성과 분석 → 다음 사이클 피드백으로 저장됨]\n{analysis}")

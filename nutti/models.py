@@ -95,6 +95,26 @@ class PerformanceReport(BaseModel):
     collected_at: datetime = Field(default_factory=_utcnow)
 
 
+class CostLineItem(BaseModel):
+    """비용 명세의 한 줄(항목별 단가·수량·소계)."""
+
+    label: str                     # 예: "영상 생성 (Veo Fast)"
+    detail: str = ""               # 예: "$0.100/초 × 32.0초"
+    usd: float = 0.0               # 소계(USD)
+    estimated: bool = False        # True면 실측이 아닌 추정치(예: 텍스트 토큰)
+
+
+class CostBreakdown(BaseModel):
+    """한 편 제작에 든 비용 명세와 합계.
+
+    dry_run 실행이면 실제 지출은 0이고 total_usd는 "라이브였다면" 예상 비용이다.
+    """
+
+    items: list[CostLineItem] = Field(default_factory=list)
+    total_usd: float = 0.0
+    dry_run: bool = True           # True면 total_usd는 실제 지출이 아닌 예상치
+
+
 class ReviewRequest(BaseModel):
     """검수 게이트로 보내는 승인 요청."""
 
@@ -121,4 +141,6 @@ class PipelineRun(BaseModel):
     metadata: Metadata | None = None
     uploads: list[UploadResult] = Field(default_factory=list)
     reports: list[PerformanceReport] = Field(default_factory=list)
+    # 한 사이클 종료 시 집계한 제작 비용 명세(영상·프레임·텍스트). 미집계 시 None.
+    cost: CostBreakdown | None = None
     created_at: datetime = Field(default_factory=_utcnow)
