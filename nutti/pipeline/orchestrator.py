@@ -20,6 +20,7 @@ from nutti.models import (
     Stage,
 )
 from nutti.pipeline.cost import estimate_run_cost
+from nutti.pipeline.cost_ledger import CostLedger
 from nutti.review.gates import DiscordGate, ReviewGate, TelegramGate
 from nutti.storage.sheets import SheetStore
 from nutti.storage.state_store import PipelineState
@@ -70,6 +71,7 @@ class Orchestrator:
         discord: ReviewGate | None = None,
         max_factcheck_retries: int = 1,
         state: PipelineState | None = None,
+        ledger: CostLedger | None = None,
     ):
         self.settings = settings or get_settings()
         self.ai = AITextClient(self.settings)
@@ -78,6 +80,8 @@ class Orchestrator:
         self.store = SheetStore(self.settings)
         # 실행 간 영속 상태(직전 피드백·최근 주제). 테스트 시 tmp 경로 주입 가능.
         self.state = state or PipelineState(self.settings.state_path)
+        # 제작 비용 누적 원장(일/월 합산용). 테스트 시 tmp 경로 주입 가능.
+        self.ledger = ledger or CostLedger(self.settings.cost_ledger_path)
         # 팩트체크 실패 시 issues를 피드백으로 대본을 재생성하는 최대 횟수.
         self.max_factcheck_retries = max_factcheck_retries
         # 검수 게이트 주입 가능(테스트 시 AutoApproveGate)
@@ -177,6 +181,8 @@ class Orchestrator:
         # 예외로 빠져 run.cost는 None으로 남는다(CLI는 None 가드로 출력을 건너뛴다).
         run.cost = estimate_run_cost(run, self.settings)
         log.info("pipeline.cost", run_id=run.id, total_usd=run.cost.total_usd, dry_run=run.cost.dry_run)
+        # 누적 원장에 기록 — `nutti cost`로 일/월/전체 실제 지출을 조회한다.
+        self.ledger.record(run)
 
         # 5단계: 성과 수집(분석/피드백은 collect_and_analyze에서 별도 주기로 수행)
         run.current_stage = Stage.ANALYTICS

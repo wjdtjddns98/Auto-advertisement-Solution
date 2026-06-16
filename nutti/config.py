@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     # 매 사이클의 성과 분석을 다음 사이클 feedback으로 자동 연결하고,
     # 최근 주제를 기억해 주제 자동 생성 시 중복을 피하는 데 쓴다.
     state_path: str = Field(default="data/pipeline_state.json", alias="NUTTI_STATE_PATH")
+    # 사이클별 제작 비용을 누적 기록하는 원장(ledger) 경로. `nutti cost`로 일/월/전체
+    # 실제 지출을 조회한다(dry_run 실행은 실제 지출 0으로 기록·구분).
+    cost_ledger_path: str = Field(
+        default="data/cost_ledger.json", alias="NUTTI_COST_LEDGER_PATH"
+    )
 
     # 2단계: 영상 (Gemini 이미지 → Veo 3.1 image-to-video)
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
