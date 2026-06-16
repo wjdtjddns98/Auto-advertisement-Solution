@@ -1108,7 +1108,20 @@ class VideoStudio:
             path, sec = self._trim_to_speech(clip)
             trimmed.append(path)
             total += sec if sec is not None else _CLIP_SEC
-        return self._stitch(trimmed), total
+        # 트림으로 새로 만든 임시 파일(veo_fal_trim_*.mp4)은 스티칭 후 정리한다 — 원본
+        # 비트 클립은 기존 정책대로 유지하고, 단일 비트라 _stitch가 그대로 돌려준 파일
+        # (final)은 삭제 대상에서 제외한다(반환 파일 삭제 방지). 스티칭 실패 시에도 정리.
+        final = None
+        try:
+            final = self._stitch(trimmed)
+            return final, total
+        finally:
+            for orig, t in zip(clips, trimmed):
+                if t != orig and t != final:
+                    try:
+                        Path(t).unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     def _trim_to_speech(self, clip: str) -> tuple[str, float | None]:
         """클립에서 발화 구간만 남기고 앞뒤 침묵을 잘라 (새 경로, 길이초)를 반환한다.
@@ -1142,21 +1155,23 @@ class VideoStudio:
             start_t = 0.0
             if starts and starts[0] <= 0.3 and ends:
                 start_t = max(0.0, ends[0] - 0.10)
-            # 뒤 침묵: EOF까지 이어지는 마지막 침묵의 시작이 발화 끝점.
+            # 뒤 침묵: 마지막 침묵이 EOF까지 이어지면(=닫히지 않거나 파일 끝 근처에서 닫힘)
+            # 그 시작이 발화 끝점. 중간에서 닫힌 침묵(발화 사이 짧은 멈춤)은 트림하지 않는다.
             end_t = dur
             if starts:
                 last = starts[-1]
-                trails = (not ends) or ends[-1] <= last + 0.05 or ends[-1] >= dur - 0.05
-                if last > start_t and trails:
+                open_to_eof = len(ends) < len(starts)  # 마지막 침묵이 EOF까지 안 닫힘
+                closed_near_eof = bool(ends) and ends[-1] >= dur - 0.1
+                if last > start_t and (open_to_eof or closed_near_eof):
                     end_t = min(dur, last + 0.35)
             out_sec = end_t - start_t
             if out_sec < 0.8 or end_t <= start_t:
-                return clip, None  # 과도 트림 방지(전구간 침묵·검출 이상)
+                return clip, dur  # 과도 트림 방지(전구간 침묵·검출 이상) — 실측 길이 유지
             # 실제로 잘라낼 무음이 0.5초 미만이면 재인코딩하지 않고 원본 유지 — Veo 클립은
             # 룸톤이 끝까지 깔려 데드에어가 거의 없다(2026-06-16 실측). 의미 있는 무음이
             # 있을 때만 트림해 무익한 재인코딩·중복 파일 생성을 막는다.
             if (dur - out_sec) < 0.5:
-                return clip, None
+                return clip, dur  # 트림 안 함 — 실측 길이 유지
             out = str(Path(self.settings.nutti_media_dir) / f"veo_fal_trim_{uuid4().hex[:8]}.mp4")
             cut = subprocess.run(
                 [ff, "-y", "-hide_banner", "-ss", f"{start_t:.3f}", "-i", clip,
@@ -1164,7 +1179,7 @@ class VideoStudio:
                 capture_output=True,
             )
             if cut.returncode != 0 or not Path(out).exists():
-                return clip, None
+                return clip, dur  # 트림 실패 — 원본 + 실측 길이
             return out, out_sec
         except Exception:
             # 트림은 품질 개선용 best-effort — 어떤 실패도 원본 클립으로 폴백한다.

@@ -1758,8 +1758,9 @@ def test_frame_prompt_includes_episode_style_and_no_microphone():
     prompt = VideoStudio._frame_prompt(script, style)
     assert style.outfit in prompt
     assert style.setting in prompt
-    assert "microphone" not in prompt.replace("No microphone", "")
-    assert "No microphone" in prompt
+    assert "interview microphone" not in prompt  # 기존 마이크 리그 문구 제거됨
+    assert "handheld" not in prompt
+    assert "No microphone" in prompt  # 마이크 억제 명시
 
 
 def test_produce_veo_frame_and_all_beats_share_episode_style(monkeypatch):
