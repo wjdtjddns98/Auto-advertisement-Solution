@@ -287,8 +287,9 @@ class FalKontextClient(_HttpClosingMixin):
 def _validate_kontext_image_url(url: str) -> None:
     """결과 이미지 다운로드 URL이 허용된 fal CDN 호스트인지 검증한다(SSRF 방어).
 
-    _validate_fal_video_url과 동일한 원칙: scheme=https + host가
-    _FAL_SAFE_HOSTS(fal.media, fal.run, v3.fal.media) 또는 그 서브도메인이어야 한다.
+    _validate_fal_video_url과 동일한 원칙: scheme=https + host가 _FAL_SAFE_HOSTS
+    (fal.media, fal.run) 또는 그 서브도메인이어야 한다. suffix 매칭이라 Kontext 결과
+    호스트인 v3.fal.media 등 *.fal.media 서브도메인이 자동 포함된다.
     API 응답값은 신뢰 불가 입력이므로 다운로드 전에 반드시 검증한다.
     """
     parsed = urlparse(url)
@@ -297,7 +298,7 @@ def _validate_kontext_image_url(url: str) -> None:
     host = (parsed.hostname or "").lower()
     if not any(host == s or host.endswith(f".{s}") for s in _FAL_SAFE_HOSTS):
         raise VideoRenderError(
-            "Kontext 다운로드: 이미지 URL 호스트 불허 (허용: fal.media, fal.run, v3.fal.media)"
+            "Kontext 다운로드: 이미지 URL 호스트 불허 (허용: fal.media, fal.run 및 서브도메인)"
         )
 
 

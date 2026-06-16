@@ -1397,10 +1397,10 @@ def test_produce_validate_config_missing_fal_key_raises():
 
 
 def test_produce_validate_config_partial_injection_still_requires_key():
-    """nano_client만 주입되고 veo_client=None이면 키 검사를 건너뛰지 않는다(OR 로직 핀).
+    """프레임·영상 키 검사는 분리돼 있어, 한쪽만 주입돼도 다른 쪽 키는 여전히 요구된다.
 
-    nano_client 주입 시 프레임 키 검사는 건너뛰지만, veo_client=None이면
-    GEMINI_API_KEY(Veo 영상용)는 여전히 필요하다.
+    nano_client(프레임) 주입 시 프레임 키(FAL_KEY) 검사는 건너뛰지만, veo_client=None이면
+    veo 영상용 GEMINI_API_KEY는 여전히 필요하다(검사가 OR가 아니라 항목별 분리).
     """
     studio = VideoStudio(_live_settings(), nano_client=FakeNanoBananaClient())
     with pytest.raises(ValueError, match="GEMINI_API_KEY"):

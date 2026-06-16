@@ -51,9 +51,11 @@ log = get_logger(__name__)
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 # fal.ai 큐 API 베이스. 제출/상태/결과 모두 이 호스트(자격증명 헤더는 여기에만 붙인다).
 _FAL_QUEUE_BASE = "https://queue.fal.run"
-# 결과 영상/이미지 다운로드를 허용하는 fal CDN 호스트(신뢰 불가 응답 URL의 SSRF 방어).
-# v3.fal.media: Kontext pro 이미지 결과 URL이 이 호스트로 반환된다(2026-06 확인).
-_FAL_SAFE_HOSTS = frozenset({"fal.media", "fal.run", "v3.fal.media"})
+# 결과 영상/이미지 다운로드를 허용하는 fal CDN 루트 호스트(신뢰 불가 응답 URL의 SSRF 방어).
+# 검증은 `host == s or host.endswith(".{s}")`(suffix 매칭)이라 v3.fal.media 등 모든
+# *.fal.media 서브도메인이 자동 포함된다(Kontext pro 결과 URL = v3.fal.media). 루트만 둬
+# 허용 표면을 명확히 한다 — v3.fal.media를 따로 추가하면 중복(동작 동일)이라 두지 않는다.
+_FAL_SAFE_HOSTS = frozenset({"fal.media", "fal.run"})
 # fal request id 허용 형태(폴링 URL에 삽입 전 검증). 영숫자·`-`·`_`만 허용.
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_REQUEST_ID_CHARS = 128
