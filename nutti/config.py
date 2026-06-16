@@ -26,15 +26,16 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="NUTTI_LOG_LEVEL")
     dry_run: bool = Field(default=True, alias="NUTTI_DRY_RUN")
 
-    # 1단계: 대본 (기본 Gemini — 이미 결제된 GEMINI_API_KEY 재사용, claude -p 폴백 없음)
+    # 1단계: 대본 (기본 Claude — 2026-06-16 PO 롤백. Gemini 텍스트가 대본 잘림·팩트체크
+    # FAIL이 잦아 #57 이전 Claude 경로로 되돌렸다.)
     # text_backend: 라이브(비-dry_run) 텍스트 생성 백엔드 선택.
-    #   "gemini"(기본) → GEMINI_API_KEY로 Gemini generateContent 호출(대본·주제·팩트체크·
-    #     메타데이터·성과분석 전부). 키가 없으면 자동으로 claude/claude -p 폴백으로 강등.
-    #   "claude" → 기존 동작(ANTHROPIC_API_KEY 있으면 Anthropic API, 없으면 claude -p).
-    # Gemini를 기본으로 둔 이유: claude -p 폴백은 호출마다 풀 세션 부팅(MCP 로딩 등)으로
-    # 느리고 간헐 타임아웃이 잦았다. Gemini REST는 가볍고 추가 키도 불필요하다.
+    #   "claude"(기본) → ANTHROPIC_API_KEY 있으면 Anthropic API(빠르고 안정적, 권장),
+    #     없으면 claude -p CLI 폴백(Max 구독·무료지만 호출마다 세션 부팅으로 느리고 간헐
+    #     타임아웃 가능). 대본·주제·팩트체크·메타데이터·성과분석 전부.
+    #   "gemini" → GEMINI_API_KEY로 Gemini generateContent 호출(가볍고 추가 키 불필요하나
+    #     대본 잘림·팩트체크 FAIL 이슈로 기본에서 내려옴). 키 없으면 claude 폴백으로 강등.
     text_backend: Literal["gemini", "claude"] = Field(
-        default="gemini", alias="NUTTI_TEXT_BACKEND"
+        default="claude", alias="NUTTI_TEXT_BACKEND"
     )
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     script_model: str = Field(default="claude-opus-4-8", alias="NUTTI_SCRIPT_MODEL")
