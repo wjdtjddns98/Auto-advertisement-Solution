@@ -387,6 +387,21 @@ def _veo_total_sec(n_beats: int) -> float:
     return _CLIP_SEC + _EXTEND_SEC * max(0, n_beats - 1)
 
 
+# ============== PO 수정 구역 (마스코트 외형 — 캐릭터 일관성의 핵심) ==============
+# 마스코트 "강아지 자체"의 고정 외형(캐릭터 시트). 시작 프레임과 모든 비트 프롬프트에
+# 똑같이 박아, 편이 바뀌고 옷·장소가 달라져도 "같은 강아지"로 보이게 한다.
+# 텍스트로 외형을 고정하는 것이 일관성의 핵심 수단 — 비워 두면 생성기가 매 편 다른
+# 강아지를 지어낸다(실제 증상). 반드시 레퍼런스 이미지(assets/mascot.png,
+# NUTTI_MASCOT_IMAGE)의 실제 모습과 일치시킬 것 — 텍스트와 이미지가 어긋나면 둘을
+# 섞어 오히려 더 들쭉날쭉해진다. 현재 값은 assets/mascot.png(솜털 크림색 새끼강아지)
+# 기준의 "얌전하고 귀여운 puppy". ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
+_MASCOT_APPEARANCE = (
+    "a small fluffy cream-and-white puppy with soft fur, round dark eyes, "
+    "a tiny black nose, and a gentle calm cute face"
+)
+# ==================== PO 수정 구역 끝 (마스코트 외형) ====================
+
+
 class VeoPromptBuilder:
     """Veo 3.1 image-to-video 프롬프트 빌더(비트별 클립·네이티브 한국어 음성).
 
@@ -397,14 +412,16 @@ class VeoPromptBuilder:
       달라지는 문제 확인 → 상세 고정 묘사로 드리프트 완화).
     - 인터뷰 마이크를 화면 밖에서 들이대는 길거리 인터뷰 구도(참고: "오줌싸개 강아지의
       억울한 변명"·"조회수 두자리 강아지의 한마디" 류 쇼츠).
-    - 카메라는 고정(locked-off tripod)·medium close-up·eye-level — 흔들림/컷 전환 방지.
+    - 카메라는 고정(locked-off tripod)·무빙 없음 — 흔들림/컷 전환 방지.
     - 깨짐 주원인(추가 동물·사람·화면 내 텍스트)을 명시적으로 금지한다.
     - 포맷: photorealistic · 9:16 세로 · 각 비트는 8초 단일컷(여러 비트는 ffmpeg로 스티칭).
     """
 
     # =========================== PO 수정 구역 (영상 연출) ===========================
     # 영상의 "연기·카메라·말투"를 바꾸려면 아래 영어 템플릿을 고친다.
-    # · _PERSONA: 마스코트 캐릭터(능청·과장 리액션). 개성을 바꾸려면 여기를 수정
+    # · _PERSONA: 마스코트 캐릭터(얌전하고 귀여운 puppy·차분한 인터뷰 톤). 외형은
+    #   _MASCOT_APPEARANCE로 고정되고, 여기선 성격·태도만 정한다. 과장 표정 단어
+    #   (cheeky/exaggerated 등)를 넣으면 얼굴이 일그러지므로(괴랄) 피한다
     # · _VOICE: 목소리 고정 묘사 — 비트 간 목소리 일관성의 핵심. 모든 클립에 동일하게
     #   들어가야 하므로 함부로 빼지 말 것. 목소리 톤을 바꾸려면 묘사 내용만 교체
     # · _MIC: 화면 밖 인터뷰 마이크 연출(사람은 화면에 안 나옴)
@@ -415,8 +432,9 @@ class VeoPromptBuilder:
     # 모든 템플릿에 ASCII 작은따옴표(') 금지 — 대사 인용 구분자와 충돌(주입 방어 깨짐).
     # 한국어로 "이렇게 바꾸고 싶다"만 정해도 됨 — 영어 반영은 개발자에게 요청 권장.
     _PERSONA = (
-        "Nutti, a cheeky and expressive dog mascot with a big personality, reacting with "
-        "lively, exaggerated comedic facial expressions like a guest in a street interview"
+        f"Nutti, {_MASCOT_APPEARANCE}, a calm and gentle puppy mascot behaving like a "
+        "friendly guest in a relaxed street interview, with soft, natural, subtle facial "
+        "expressions and no exaggerated or distorted faces"
     )
     _VOICE = (
         "Voice (must be EXACTLY the same voice in every clip of this series): a bright, "
@@ -429,7 +447,7 @@ class VeoPromptBuilder:
     )
     _SPEAKING_OFF = "speaking in Korean to an off-screen interviewer"
     _SPEAKING_DIRECT = "speaking in Korean directly to the camera"
-    _CAMERA = "Camera: locked-off tripod shot, medium close-up, eye-level, no camera movement."
+    _CAMERA = "Camera: locked-off tripod shot, no camera movement."
     _NEGATIVE = (
         "Strictly no additional animals, no people. Absolutely no text, subtitles, "
         "captions, letters, words, or writing anywhere in the frame."
@@ -1254,8 +1272,8 @@ class VideoStudio:
         # ASCII 작은따옴표(') 금지(주입 방어 검증과 충돌). 한국어로 원하는 그림만 정해도 됨.
         return (
             "A photorealistic vertical 9:16 starting frame for a short-form video: "
-            f"the Nutti dog mascot wearing {style.outfit}, {style.setting}, "
-            "looking at the camera with a cheeky, expressive face, like a guest in a "
+            f"the Nutti mascot, {_MASCOT_APPEARANCE}, wearing {style.outfit}, {style.setting}, "
+            "looking at the camera with a calm, gentle, friendly face, like a guest in a "
             "street interview. A handheld interview microphone is pointed at the mascot "
             f"from off-screen; the person holding it is not visible. Topic: {topic}. "
             "No people, no additional animals, no on-screen text."
