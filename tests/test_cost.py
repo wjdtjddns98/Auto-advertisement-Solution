@@ -57,6 +57,32 @@ def test_kling_standard_unit_price():
     assert abs(video_item.usd - 0.084 * 10.0) < 1e-9
 
 
+def test_kling_pro_unit_price():
+    """Kling Pro 경로(모델 ID에 'pro' 포함)는 $0.112/초로 계산된다."""
+    settings = Settings(
+        NUTTI_DRY_RUN=True,
+        NUTTI_VIDEO_BACKEND="kling",
+        NUTTI_KLING_MODEL="fal-ai/kling-video/v2.1/pro/image-to-video",
+    )
+    cost = estimate_run_cost(_run_with_video(10.0), settings)
+    video_item = next(i for i in cost.items if i.label.startswith("영상 생성"))
+    assert "Kling Pro" in video_item.label
+    assert abs(video_item.usd - 0.112 * 10.0) < 1e-9
+
+
+def test_unknown_video_model_falls_back_and_marks_estimate():
+    """단가표에 없는 모델은 조용히 틀리지 않도록 보수적 기본값 + '단가추정' 라벨."""
+    settings = Settings(
+        NUTTI_DRY_RUN=True,
+        NUTTI_VIDEO_BACKEND="veo",
+        NUTTI_VEO_MODEL="veo-9.9-unknown-preview",
+    )
+    cost = estimate_run_cost(_run_with_video(8.0), settings)
+    video_item = next(i for i in cost.items if i.label.startswith("영상 생성"))
+    assert "단가추정" in video_item.label
+    assert abs(video_item.usd - 0.40 * 8.0) < 1e-9  # 보수적 standard 단가
+
+
 def test_veo_standard_when_not_fast():
     """fast/lite가 아닌 veo 모델은 standard 단가($0.40/초)로 떨어진다."""
     settings = Settings(
@@ -119,3 +145,16 @@ def test_orchestrator_attaches_cost_to_run():
     assert run.cost is not None
     assert run.cost.total_usd > 0
     assert run.cost.dry_run is True
+    # 영상 라인이 dry_run 실측 길이로 채워졌는지(8초 클립 × 비트) — veo 단가 적용.
+    video_item = next(i for i in run.cost.items if i.label.startswith("영상 생성"))
+    assert "Veo Fast" in video_item.label
+
+
+def test_orchestrator_cost_wired_for_kling_backend():
+    """Kling 백엔드 오케스트레이터 경로에서도 cost가 Kling 단가로 집계된다."""
+    settings = Settings(NUTTI_DRY_RUN=True, NUTTI_ENV="test", NUTTI_VIDEO_BACKEND="kling")
+    orch = Orchestrator(settings, telegram=AutoApproveGate(), discord=AutoApproveGate())
+    run = orch.run("강아지 간식")
+    assert run.cost is not None and run.cost.total_usd > 0
+    video_item = next(i for i in run.cost.items if i.label.startswith("영상 생성"))
+    assert "Kling" in video_item.label

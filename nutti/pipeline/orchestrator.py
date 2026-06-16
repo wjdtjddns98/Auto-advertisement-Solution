@@ -173,6 +173,8 @@ class Orchestrator:
             run.uploads.append(self.publisher.upload_instagram(run.video, run.metadata))
 
         # 비용 집계: 산출물(영상 길이·프레임·생성 텍스트) 기준으로 편당 제작 비용을 명세화.
+        # 업로드까지 완주한 경우에만 도달한다 — 게이트 거절/팩트체크 실패 경로에서는
+        # 예외로 빠져 run.cost는 None으로 남는다(CLI는 None 가드로 출력을 건너뛴다).
         run.cost = estimate_run_cost(run, self.settings)
         log.info("pipeline.cost", run_id=run.id, total_usd=run.cost.total_usd, dry_run=run.cost.dry_run)
 

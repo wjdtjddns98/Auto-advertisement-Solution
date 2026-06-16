@@ -15,7 +15,10 @@ dry_run 실행이면 실제 지출은 0이지만, "라이브였다면" 들었을
 from __future__ import annotations
 
 from nutti.config import Settings
+from nutti.logging import get_logger
 from nutti.models import CostBreakdown, CostLineItem, PipelineRun
+
+log = get_logger(__name__)
 
 # 시작 프레임 1장(나노바나나 / Gemini 2.5 Flash Image) 단가(USD).
 _FRAME_USD = 0.05
@@ -28,21 +31,28 @@ _TEXT_USD_PER_1K_TOKENS = 0.0025
 def _video_unit_price(settings: Settings) -> tuple[float, str]:
     """영상 백엔드·모델에 따른 초당 단가(USD)와 표시용 모델명을 돌려준다.
 
-    단가표는 docs/cost-analysis.md 기준. 모델 ID에 단가가 고정돼 있지 않은 신규
-    모델이 와도 합리적 기본값(veo=standard, kling=standard)으로 떨어진다.
+    단가표는 docs/cost-analysis.md 기준. 단가가 표에 없는 신규/미확정 모델이 오면
+    조용히 틀린 값을 쓰지 않도록 경고 로그를 남기고 보수적 기본값으로 떨어진다
+    (veo=standard $0.40, kling=standard $0.084). 라벨에 "(단가추정)"을 붙여 표시한다.
     """
     if settings.video_backend == "kling":
         model = settings.kling_model.lower()
         if "pro" in model:
             return 0.112, "Kling Pro"
-        return 0.084, "Kling Standard"
+        if "standard" in model:
+            return 0.084, "Kling Standard"
+        log.warning("cost.unknown_video_model", backend="kling", model=settings.kling_model)
+        return 0.084, "Kling(단가추정)"
     # 기본 veo 경로.
     model = settings.veo_model.lower()
     if "fast" in model:
         return 0.10, "Veo Fast"
     if "lite" in model:
         return 0.05, "Veo Lite"
-    return 0.40, "Veo Standard"
+    if "standard" in model or "generate" in model:
+        return 0.40, "Veo Standard"
+    log.warning("cost.unknown_video_model", backend="veo", model=settings.veo_model)
+    return 0.40, "Veo(단가추정)"
 
 
 def _text_output_chars(run: PipelineRun) -> int:
@@ -111,7 +121,7 @@ def format_cost(cost: CostBreakdown) -> str:
     lines = [header]
     for item in cost.items:
         mark = " (추정)" if item.estimated else ""
-        detail = f"  {item.detail}" if item.detail else ""
+        detail = f" ({item.detail})" if item.detail else ""
         lines.append(f"  - {item.label}{mark}: ${item.usd:.4f}{detail}")
     if cost.dry_run:
         lines.append(f"  합계(라이브 예상): ${cost.total_usd:.4f}  ·  실제 지출: $0 (DRY_RUN)")
