@@ -102,12 +102,12 @@ def test_script_system_prompt_pins_beat_char_range():
     """SCRIPT_SYSTEM_PROMPT가 비트당 길이 범위(8초 채움~50자 상한)를 명시한다(리버트 가드).
 
     하한(40자·충분히 길게)은 비트 사이 빈 구간을 막고(2026-06-16 PO 피드백: 비트 간
-    공백), 상한(50자)은 내레이션이 Kling 10초 캡을 넘어 video_kling 길이 가드에 걸리는
-    것을 막는다(2026-06-11 대본 잘림 결함 예방). 둘 다 풀리면 회귀하므로 핀한다.
+    공백), 상한(50자)은 대사가 8초 클립 안에 다 못 들어가 잘리는 것을 막는다
+    (대본 잘림 결함 예방). 둘 다 풀리면 회귀하므로 핀한다.
     """
     assert "40~48자" in SCRIPT_SYSTEM_PROMPT  # 8초 채움 하한(공백 방지)
     assert "충분히 길게" in SCRIPT_SYSTEM_PROMPT
-    assert "50자를 넘기면" in SCRIPT_SYSTEM_PROMPT  # 상한(Kling 10초 보호)
+    assert "50자를 넘기면" in SCRIPT_SYSTEM_PROMPT  # 상한(8초 클립 보호)
     assert "잘린다" in SCRIPT_SYSTEM_PROMPT
 
 
@@ -267,7 +267,7 @@ def test_fact_check_fallback_prompt_omits_tool_instruction(monkeypatch):
     """회귀 핀: 폴백 팩트체크 프롬프트는 'record_fact_check 도구' 지시를 담지 않는다.
 
     공통 시스템 프롬프트(FACT_CHECK_SYSTEM_PROMPT)에 '도구를 써라'가 있으면 도구가 없는
-    Gemini/claude -p 폴백에서 모델이 record_fact_check 호출/JSON을 환각해 마커를 못 찍고
+    claude -p 폴백에서 모델이 record_fact_check 호출/JSON을 환각해 마커를 못 찍고
     매번 FAIL로 떨어진다(실측 결함). 폴백 경로는 FACT_CHECK_ROLE만 쓰고 도구/JSON 형식을
     명시적으로 금지해야 한다.
     """
@@ -277,9 +277,7 @@ def test_fact_check_fallback_prompt_omits_tool_instruction(monkeypatch):
     marker = f"NUTTI-VERDICT-{script.id[:8]}".upper()
     captured: dict = {}
 
-    # _llm_text(디스패처) 자체를 가로채 Gemini·claude -p 어느 경로든 무관하게 폴백
-    # 프롬프트를 캡처한다(실제 버그는 Gemini 경로에서 났으므로 _claude_cli만 패치하면
-    # 그 경로가 테스트로 커버되지 않는다 — HIGH 회귀 핀 보강).
+    # _llm_text(디스패처) 자체를 가로채 폴백 프롬프트를 캡처한다(claude -p 단일 경로).
     def fake_llm(full, **_kw):
         captured["prompt"] = full
         return f"검토 완료\n{marker}: PASS"
@@ -511,265 +509,3 @@ def test_clean_topic_empty_returns_blank():
     assert _clean_topic("") == ""
     assert _clean_topic("   \n  ") == ""
 
-
-# --- Gemini 텍스트 백엔드 (text_backend="gemini") ---
-
-
-class _FakeResp:
-    """httpx.Response 흉내 — status_code와 json()만 제공."""
-
-    def __init__(self, status_code: int, payload: dict):
-        self.status_code = status_code
-        self._payload = payload
-
-    def json(self) -> dict:
-        return self._payload
-
-
-def _gemini_payload(text: str) -> dict:
-    return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
-
-
-def _gemini_client() -> AITextClient:
-    """라이브 + Gemini 백엔드(Anthropic 키 없음). conftest가 .env를 격리하므로 키는 명시 주입.
-
-    text_backend 기본값이 2026-06-16 PO 롤백으로 claude가 됐으므로, Gemini 경로 테스트는
-    NUTTI_TEXT_BACKEND="gemini"를 명시해 opt-in한다.
-    """
-    settings = Settings(
-        NUTTI_DRY_RUN=False,
-        NUTTI_TEXT_BACKEND="gemini",
-        ANTHROPIC_API_KEY="",
-        GEMINI_API_KEY="k",
-        NUTTI_ENV="test",
-    )
-    return AITextClient(settings)
-
-
-def test_use_gemini_text_true_with_key():
-    assert _gemini_client()._use_gemini_text() is True
-
-
-def test_use_gemini_text_false_without_key():
-    settings = Settings(NUTTI_DRY_RUN=False, GEMINI_API_KEY="", NUTTI_ENV="test")
-    assert AITextClient(settings)._use_gemini_text() is False
-
-
-def test_default_text_backend_is_claude():
-    """2026-06-16 PO 롤백 핀: 텍스트 백엔드 기본값은 claude(Gemini는 명시 opt-in)."""
-    settings = Settings(NUTTI_DRY_RUN=False, NUTTI_ENV="test")
-    assert settings.text_backend == "claude"
-
-
-def test_default_backend_does_not_use_gemini_even_with_key():
-    """기본(claude)에서는 GEMINI_API_KEY가 있어도 Gemini 경로로 가지 않는다."""
-    settings = Settings(NUTTI_DRY_RUN=False, GEMINI_API_KEY="k", NUTTI_ENV="test")
-    assert AITextClient(settings)._use_gemini_text() is False
-
-
-def test_use_gemini_text_false_for_comment_placeholder():
-    # `.env`의 `GEMINI_API_KEY=  # 설명`이 더미 truthy로 파싱돼도 Gemini를 쓰지 않는다.
-    settings = Settings(NUTTI_DRY_RUN=False, GEMINI_API_KEY="# 설명", NUTTI_ENV="test")
-    assert AITextClient(settings)._use_gemini_text() is False
-
-
-def test_generate_script_uses_gemini_when_selected(monkeypatch):
-    """text_backend=gemini + 키 있음 → claude -p가 아니라 Gemini REST로 대본 생성."""
-    client = _gemini_client()
-    captured: dict = {}
-
-    def fake_post(url, headers=None, json=None, timeout=None):
-        captured["url"] = url
-        captured["key"] = headers["x-goog-api-key"]
-        return _FakeResp(200, _gemini_payload("훅 문장\n핵심 문장\n팁 문장\n마무리 문장"))
-
-    monkeypatch.setattr("httpx.post", fake_post)
-    script = client.generate_script("강아지 간식")
-    assert script.beats == ["훅 문장", "핵심 문장", "팁 문장", "마무리 문장"]
-    assert script.fact_checked is False
-    assert "gemini-2.5-flash" in captured["url"]
-    assert captured["key"] == "k"  # 키가 Gemini 도메인 헤더로만 전달됨
-
-
-def test_fact_check_via_gemini_pass(monkeypatch):
-    """Gemini 경로도 nonce 마커 PASS면 통과(injection-safe 프로토콜 유지)."""
-    client = _gemini_client()
-    script = Script(topic="t", body="안전한 내용")
-    marker = f"NUTTI-VERDICT-{script.id[:8]}".upper()
-    monkeypatch.setattr(
-        "httpx.post", lambda *a, **k: _FakeResp(200, _gemini_payload(f"검토 완료\n{marker}: PASS"))
-    )
-    result = client.fact_check_script(script)
-    assert result.passed is True
-    assert result.issues == []
-
-
-def test_fact_check_via_gemini_fail_blocks(monkeypatch):
-    """CRITICAL 회귀 핀: Gemini FAIL이면 문제를 담아 차단(조용히 통과 금지)."""
-    client = _gemini_client()
-    script = Script(topic="t", body="위험한 주장")
-    marker = f"NUTTI-VERDICT-{script.id[:8]}".upper()
-    monkeypatch.setattr(
-        "httpx.post", lambda *a, **k: _FakeResp(200, _gemini_payload(f"급여량 근거 없음\n{marker}: FAIL"))
-    )
-    result = client.fact_check_script(script)
-    assert result.passed is False
-    assert any("급여량" in i for i in result.issues)
-
-
-def test_fact_check_via_gemini_http_error_fails_safe(monkeypatch):
-    """Gemini HTTP 오류(429 등) 시 통과를 지어내지 않고 passed=False(fail-safe)."""
-    client = _gemini_client()
-    # 429는 일시 오류라 재시도된다 — 테스트가 실제로 잠들지 않도록 sleep을 무력화.
-    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
-    monkeypatch.setattr("httpx.post", lambda *a, **k: _FakeResp(429, {}))
-    result = client.fact_check_script(Script(topic="t", body="x"))
-    assert result.passed is False
-    assert result.issues
-
-
-def test_gemini_text_no_candidates_raises(monkeypatch):
-    """세이프티 차단 등으로 후보가 없으면 RuntimeError(빈 응답을 통과로 두지 않음)."""
-    client = _gemini_client()
-    monkeypatch.setattr("httpx.post", lambda *a, **k: _FakeResp(200, {"candidates": []}))
-    with pytest.raises(RuntimeError):
-        client._gemini_text("아무 프롬프트")
-
-
-def test_gemini_text_disables_thinking_budget(monkeypatch):
-    """회귀 핀(#57 대본 잘림): 요청 body가 thinkingBudget=0으로 추론을 끄는지 검증.
-
-    gemini-2.5-flash는 thinking이 기본 켜져 있어 추론 토큰이 maxOutputTokens 예산을
-    잠식 → 대본이 잘리거나 빈 응답으로 떨어졌다. generationConfig.thinkingConfig.
-    thinkingBudget=0이 빠지면 그 회귀가 재발하므로 body 구조를 고정한다.
-    """
-    client = _gemini_client()
-    captured: dict = {}
-
-    def fake_post(url, **kwargs):
-        captured["json"] = kwargs.get("json")
-        return _FakeResp(200, _gemini_payload("훅\n핵심\n팁\n마무리"))
-
-    monkeypatch.setattr("httpx.post", fake_post)
-    out = client._gemini_text("p", max_tokens=256)
-    assert out == "훅\n핵심\n팁\n마무리"
-    gen_cfg = captured["json"]["generationConfig"]
-    assert gen_cfg["maxOutputTokens"] == 256
-    assert gen_cfg["thinkingConfig"]["thinkingBudget"] == 0
-
-
-def test_gemini_text_truncated_max_tokens_still_returns(monkeypatch):
-    """본문이 일부 와도(finishReason=MAX_TOKENS) 있는 만큼 반환하고 잘림 경고를 남긴다.
-
-    가진 텍스트는 버리지 않되(빈 텍스트만 RuntimeError), MAX_TOKENS 잘림은 경고 로그로
-    남겨 진단 가능해야 한다. 경고 emit까지 핀으로 고정해, 신규 블록을 지우면 red가 되게 한다.
-    """
-    client = _gemini_client()
-    payload = {
-        "candidates": [
-            {"content": {"parts": [{"text": "잘린 본문"}]}, "finishReason": "MAX_TOKENS"}
-        ]
-    }
-    monkeypatch.setattr("httpx.post", lambda *a, **k: _FakeResp(200, payload))
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        "nutti.integrations.ai_text.log.warning",
-        lambda event, **kw: warnings.append(event),
-    )
-    assert client._gemini_text("p") == "잘린 본문"
-    assert "gemini_text.truncated" in warnings
-
-
-def test_text_backend_claude_ignores_gemini_key(monkeypatch):
-    """text_backend=claude면 GEMINI_API_KEY가 있어도 Gemini를 쓰지 않고 claude -p로 간다."""
-    settings = Settings(
-        NUTTI_DRY_RUN=False,
-        ANTHROPIC_API_KEY="",
-        GEMINI_API_KEY="k",
-        NUTTI_TEXT_BACKEND="claude",
-        NUTTI_ENV="test",
-    )
-    client = AITextClient(settings)
-    assert client._use_gemini_text() is False
-    monkeypatch.setattr(client, "_claude_cli", lambda _full: "훅\n핵심\n팁\n마무리")
-    script = client.generate_script("t")
-    assert script.beats == ["훅", "핵심", "팁", "마무리"]
-
-
-def test_suggest_topic_uses_gemini_when_selected(monkeypatch):
-    """text_backend=gemini + 키 있음 → Gemini로 주제 생성(정상 응답을 _clean_topic 통과)."""
-    client = _gemini_client()
-    monkeypatch.setattr(
-        "httpx.post", lambda *a, **k: _FakeResp(200, _gemini_payload("강아지 여름철 수분 보충법"))
-    )
-    topic = client.suggest_topic()
-    assert topic == "강아지 여름철 수분 보충법"
-
-
-def test_suggest_topic_gemini_failure_falls_back_to_seed(monkeypatch):
-    """CRITICAL 회귀 핀: Gemini 429/오류 시 크래시하지 않고 시드 주제로 폴백한다."""
-    from nutti.integrations.ai_text import _SEED_TOPICS
-
-    client = _gemini_client()
-    # 429는 일시 오류라 재시도된다 — 테스트가 실제로 잠들지 않도록 sleep을 무력화.
-    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
-    monkeypatch.setattr("httpx.post", lambda *a, **k: _FakeResp(429, {}))
-    topic = client.suggest_topic()  # RuntimeError가 전파되면 이 호출이 터진다(리버트 감지).
-    assert topic == _SEED_TOPICS[0]
-
-
-def test_gemini_text_retries_transient_then_succeeds(monkeypatch):
-    """503(일시 과부하) 두 번 뒤 200 → 재시도로 성공. 503 한 번에 풀런이 죽던 결함의 회귀 핀."""
-    client = _gemini_client()
-    responses = [
-        _FakeResp(503, {}),
-        _FakeResp(503, {}),
-        _FakeResp(200, _gemini_payload("성공 텍스트")),
-    ]
-    calls = {"n": 0}
-
-    def fake_post(*a, **k):
-        resp = responses[calls["n"]]
-        calls["n"] += 1
-        return resp
-
-    monkeypatch.setattr("httpx.post", fake_post)
-    slept: list[float] = []
-    out = client._gemini_text("p", sleep=slept.append)
-    assert out == "성공 텍스트"
-    assert calls["n"] == 3  # 503·503·200
-    assert slept == [2.0, 4.0]  # 지수 backoff(2·4), 3번째는 200이라 sleep 없음
-
-
-def test_gemini_text_exhausts_retries_then_raises(monkeypatch):
-    """일시 오류가 한도까지 지속되면 RuntimeError 전파(최초 1 + 재시도 3 = 4회 호출)."""
-    client = _gemini_client()
-    calls = {"n": 0}
-
-    def fake_post(*a, **k):
-        calls["n"] += 1
-        return _FakeResp(503, {})
-
-    monkeypatch.setattr("httpx.post", fake_post)
-    slept: list[float] = []
-    with pytest.raises(RuntimeError):
-        client._gemini_text("p", sleep=slept.append)
-    assert calls["n"] == 4  # 1 + 3 재시도
-    assert slept == [2.0, 4.0, 8.0]
-
-
-def test_gemini_text_no_retry_on_permanent_4xx(monkeypatch):
-    """영구 4xx(400 등)는 재시도하지 않고 즉시 RuntimeError(일시 오류만 재시도)."""
-    client = _gemini_client()
-    calls = {"n": 0}
-
-    def fake_post(*a, **k):
-        calls["n"] += 1
-        return _FakeResp(400, {})
-
-    monkeypatch.setattr("httpx.post", fake_post)
-    slept: list[float] = []
-    with pytest.raises(RuntimeError):
-        client._gemini_text("p", sleep=slept.append)
-    assert calls["n"] == 1  # 재시도 없음
-    assert slept == []

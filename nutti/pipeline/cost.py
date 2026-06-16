@@ -29,42 +29,23 @@ _TEXT_USD_PER_1K_TOKENS = 0.0025
 
 
 def _video_unit_price(settings: Settings) -> tuple[float, str]:
-    """영상 백엔드·모델에 따른 초당 단가(USD)와 표시용 모델명을 돌려준다.
+    """영상 백엔드(veo_fal) 모델에 따른 초당 단가(USD)와 표시용 모델명을 돌려준다.
 
     단가표는 docs/cost-analysis.md 기준. 단가가 표에 없는 신규/미확정 모델이 오면
-    조용히 틀린 값을 쓰지 않도록 경고 로그를 남기고 보수적 기본값으로 떨어진다
-    (veo=standard $0.40, kling=standard $0.084). 라벨에 "(단가추정)"을 붙여 표시한다.
+    조용히 틀린 값을 쓰지 않도록 경고 로그를 남기고 보수적 기본값($0.40)으로 떨어진다.
+    라벨에 "(단가추정)"을 붙여 표시한다.
     """
-    if settings.video_backend == "kling":
-        model = settings.kling_model.lower()
-        if "pro" in model:
-            return 0.112, "Kling Pro"
-        if "standard" in model:
-            return 0.084, "Kling Standard"
-        log.warning("cost.unknown_video_model", backend="kling", model=settings.kling_model)
-        return 0.084, "Kling(단가추정)"
-    if settings.video_backend == "veo_fal":
-        # fal.ai Veo 3.1 단가: Lite=$0.05/s, Fast=$0.15/s, 그 외(standard)=$0.40/s.
-        # 모델 문자열("fal-ai/veo3.1/lite/image-to-video" 등)에서 tier를 판별한다.
-        model = settings.veo_fal_model.lower()
-        if "lite" in model:
-            return 0.05, "Veo(fal) Lite"
-        if "fast" in model:
-            return 0.15, "Veo(fal) Fast"
-        if "standard" in model:
-            return 0.40, "Veo(fal) Standard"
-        log.warning("cost.unknown_video_model", backend="veo_fal", model=settings.veo_fal_model)
-        return 0.40, "Veo(fal)(단가추정)"
-    # 기본 veo 경로(Gemini API).
-    model = settings.veo_model.lower()
-    if "fast" in model:
-        return 0.10, "Veo Fast"
+    # fal.ai Veo 3.1 단가: Lite=$0.05/s, Fast=$0.15/s, 그 외(standard)=$0.40/s.
+    # 모델 문자열("fal-ai/veo3.1/lite/image-to-video" 등)에서 tier를 판별한다.
+    model = settings.veo_fal_model.lower()
     if "lite" in model:
-        return 0.05, "Veo Lite"
-    if "standard" in model or "generate" in model:
-        return 0.40, "Veo Standard"
-    log.warning("cost.unknown_video_model", backend="veo", model=settings.veo_model)
-    return 0.40, "Veo(단가추정)"
+        return 0.05, "Veo(fal) Lite"
+    if "fast" in model:
+        return 0.15, "Veo(fal) Fast"
+    if "standard" in model:
+        return 0.40, "Veo(fal) Standard"
+    log.warning("cost.unknown_video_model", backend="veo_fal", model=settings.veo_fal_model)
+    return 0.40, "Veo(fal)(단가추정)"
 
 
 def _text_output_chars(run: PipelineRun) -> int:

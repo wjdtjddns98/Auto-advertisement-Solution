@@ -1,10 +1,10 @@
 """영상 백엔드 실연동 1편 생성 테스트 (수동 실행 전용).
 
-NUTTI_DRY_RUN=false + GEMINI_API_KEY 설정 상태에서 .env의 NUTTI_VIDEO_BACKEND
-경로를 그대로 타고 실제로 프레임→비트별 클립×N→ffmpeg 스티칭까지 돌려
-산출물 경로/길이를 출력한다. 비용이 드는 실 API를 호출하므로 CI/테스트에서 실행 금지.
+NUTTI_DRY_RUN=false + FAL_KEY 설정 상태에서 영상 백엔드(veo_fal)를 그대로 타고
+실제로 프레임→비트별 클립×N→ffmpeg 스티칭까지 돌려 산출물 경로/길이를 출력한다.
+비용이 드는 실 API를 호출하므로 CI/테스트에서 실행 금지.
 
-기본 백엔드 = veo(3.1 Lite): 비트당 8초, 네이티브 한국어 발화(별도 TTS 없음).
+백엔드 = veo_fal(fal.ai Veo 3.1 Lite): 비트당 8초, 네이티브 한국어 발화(별도 TTS 없음).
 풀 4비트 기준 예상 비용 약 $1.60(720p $0.05/초) + 프레임 생성비.
 """
 
@@ -36,7 +36,7 @@ SCRIPT = Script(
 def main() -> None:
     s = Settings()
     print(f"[설정] dry_run={s.dry_run}  backend={s.video_backend}  "
-          f"fal={'O' if s.fal_key else 'X'}  gemini={'O' if s.gemini_api_key else 'X'}")
+          f"fal={'O' if s.fal_key else 'X'}")
     if s.dry_run:
         raise SystemExit("dry_run=True 상태 - .env에서 NUTTI_DRY_RUN=false로 바꿔야 실제 생성됩니다.")
 

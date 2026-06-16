@@ -48,7 +48,7 @@ from nutti.integrations.video import (
     _send_json,
     _write_bytes,
 )
-from nutti.integrations.video_kling import (
+from nutti.integrations._fal_common import (
     _FAL_QUEUE_BASE,
     _FAL_SAFE_HOSTS,
     _MAX_TRANSIENT_RETRIES,
@@ -90,7 +90,7 @@ class FalKontextClient(_HttpClosingMixin):
         )
         # fal 큐 status/result 조회는 앱 ID(앞 2세그먼트)만 사용한다.
         # "fal-ai/flux-pro/kontext" → app_id = "fal-ai/flux-pro"
-        # (KlingClient, FalVeoClient와 동일한 fal 큐 GET 405 방어 패턴).
+        # (FalVeoClient와 동일한 fal 큐 GET 405 방어 패턴).
         _segs = self._model.split("/")
         self._app_id = "/".join(_segs[:2]) if len(_segs) >= 2 else self._model
         # 폴링 간격·타임아웃 검증. 이미지 생성은 영상보다 빠르므로 기본값이 작다.

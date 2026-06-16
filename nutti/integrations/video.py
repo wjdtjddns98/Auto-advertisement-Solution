@@ -1,26 +1,28 @@
-"""영상 생성 연동: FLUX Kontext(fal.ai 시작 프레임) → Veo 3.1 image-to-video 단일컷 8초.
+"""영상 생성 연동: FLUX Kontext(fal.ai 시작 프레임) → fal.ai Veo 3.1 image-to-video.
 
 흐름: ① FalKontextClient(FLUX.1 Kontext pro)가 마스코트 레퍼런스 이미지를 편집해
 시작 프레임 이미지를 생성해 로컬 저장 →
 ② VeoPromptBuilder가 대사를 작은따옴표로 인용한 프롬프트를 만들고 →
-③ VeoClient가 image-to-video 작업을 제출·폴링한 뒤 **완료 즉시** 영상을 내려받아
-로컬에 저장한다(Veo 산출물은 48시간 후 삭제되므로 무음 유실 방지).
+③ FalVeoClient(video_veo_fal)가 비트마다 같은 시작 프레임에서 8초 클립을 생성한 뒤
+VideoStudio가 앞뒤 침묵을 트림하고 ffmpeg로 이어붙인다(_stitch).
+
+이 모듈은 백엔드 무관 공통 헬퍼(VideoRenderError·HTTP/저장 헬퍼·프롬프트 빌더·
+편별 스타일)와 파사드 VideoStudio를 담는다. 실 fal 클라이언트는 image_kontext.py·
+video_veo_fal.py에 있고, fal 큐 공통 헬퍼는 _fal_common.py에 있다.
 
 dry_run에서는 네트워크/키 없이 결정적 더미 경로를 채워 파이프라인을 검증한다.
 모든 오류는 `VideoRenderError`(타임아웃은 `VideoTimeoutError`)로만 전파한다 —
 HTTP 상태·전송·JSON 파싱·디스크 쓰기 실패 전부 포함(오케스트레이터 계약).
-에러 메시지는 상태 코드/예외 타입명만 남기고 URL·operation id·응답 본문은
+에러 메시지는 상태 코드/예외 타입명만 남기고 URL·request id·응답 본문은
 노출하지 않는다(redaction).
 """
 
 from __future__ import annotations
 
-import re
 import time
 import zlib
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import urlparse
 from uuid import uuid4
 
 from nutti.config import Settings
@@ -29,88 +31,23 @@ from nutti.models import Script, VideoAsset
 
 log = get_logger(__name__)
 
-# Gemini API 베이스 URL. 인증은 `x-goog-api-key` 헤더(Bearer 아님).
-_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
-# 리다이렉트 Location 헤더 판별에 사용하는 Gemini 호스트 prefix.
-# /v1beta 뿐만 아니라 /download/v1beta 등 다른 경로로도 302가 올 수 있으므로
-# 호스트 레벨에서 비교한다.
-_GEMINI_HOST = "https://generativelanguage.googleapis.com"
-# 폴링 중 일시 오류(429 쿼터·5xx 백엔드 장애)의 최대 재시도 횟수와 backoff 기준(초).
-# 600s 폴링 윈도우에서 단 1회의 일시 오류로 작업을 영구 포기하지 않기 위한 장치다.
+# 일시 오류(429 쿼터·5xx 백엔드 장애)의 최대 재시도 횟수와 backoff 기준(초).
+# 폴링 윈도우에서 단 1회의 일시 오류로 작업을 영구 포기하지 않기 위한 장치다.
 _MAX_TRANSIENT_RETRIES = 3
 _RETRY_BACKOFF_SEC = 2.0
 # 프롬프트에 삽입하는 AI 생성 텍스트의 길이 상한(주입 표면 제한).
-# 비트 1개(8초/7초)의 대사는 짧으므로 이 한도를 넘을 이유가 없다.
+# 비트 1개(8초)의 대사는 짧으므로 이 한도를 넘을 이유가 없다.
 _MAX_DIALOGUE_CHARS = 500
 _MAX_TOPIC_CHARS = 200
-# 영상 길이 구성(veo 경로): 첫 비트는 image-to-video 8초 클립, 이후 비트는 Veo 영상
-# 연장(extend)으로 직전 클립을 이어 받아 +7초씩 늘린다 — 점프컷 없는 단일 연속 영상.
-# 9:16 세로 extend는 요청에 aspectRatio="9:16"을 명시해야만 동작한다 — 생략하면 Gemini
-# API가 출력을 16:9로 가정해 9:16 입력을 400으로 거부한다(2026-06-15 유료 실측; 공식 문서는
-# 지원으로 표기하나 실 API는 이 파라미터 없이는 막힘). 단 extend는 Fast/Standard 모델만 —
-# Lite 미지원. 비트 N개 → 8+7*(N-1)초, 기본 4비트 = 29초. kling 경로는 별도(ffmpeg 스티칭).
+# 비트 1개(독립 클립)의 길이(초). veo_fal 경로는 비트마다 8초 클립을 만들어 스티칭한다.
 _CLIP_SEC = 8.0
-# Veo extend 1회가 추가하는 길이(초). durationSeconds=8로 요청해도 출력 추가분은 7초.
-_EXTEND_SEC = 7.0
-# Veo가 화면에 텍스트(특히 깨진 한글 자막)를 임의 렌더하는 것을 억제하는 negativePrompt.
-# 대사를 음성으로만 내보내기 위함 — 실측에서 이 파라미터로 자막이 사라짐을 확인.
+# 화면에 텍스트(특히 깨진 한글 자막)를 임의 렌더하는 것을 억제하는 negativePrompt.
+# 대사를 음성으로만 내보내기 위함. **미사용** — veo_fal 자막 억제 포팅 예정으로 보존한다
+# (Gemini Veo 경로 제거 후에도 향후 veo_fal 제출 파라미터에 적용하기 위해 남겨 둠).
 _VEO_NEGATIVE_PROMPT = (
     "text, subtitles, captions, words, letters, writing, watermark, "
     "on-screen text, caption bar, hardcoded subtitles, korean text overlay"
 )
-# Veo 제출 응답의 operation name 허용 형태. API 응답값을 그대로 폴링 URL에
-# 끼워 넣으므로(_poll의 `{base}/{op_name}`) 신뢰할 수 없는 입력으로 보고 검증한다.
-# 허용 문자(영숫자·`.`·`_`·`/`·`-`)만으로 구성돼야 하며, 이를 벗어나는 문자
-# (`:` 스킴·`?`·`#` 쿼리/프래그먼트·`@`·공백·제어문자)는 요청 대상 변조(SSRF)·
-# 쿼리 주입을 가능케 하므로 거부한다. `/operations/…`·`/tasks/…` 등 실 API가
-# 어떤 경로 세그먼트를 쓰든(키 확보 전 미확정) 허용하되, 형태만 좁게 검증한다.
-_OP_NAME_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
-_MAX_OP_NAME_CHARS = 256
-# 302 리다이렉트 Location URL에서 허용할 호스트. _validate_op_name과 동일한
-# 방어 원칙: API 응답값(Location 헤더)은 신뢰 불가 입력.
-_SAFE_REDIRECT_HOSTS = frozenset(
-    {"storage.googleapis.com", "generativelanguage.googleapis.com"}
-)
-
-
-def _validate_op_name(op_name: str) -> str:
-    """Veo operation name이 폴링 URL에 안전하게 삽입 가능한 형태인지 검증한다.
-
-    API 응답의 name을 `{_GEMINI_BASE}/{name}`으로 이어 붙이기 때문에, 이를
-    신뢰하면 `:`(스킴)·`?`·`#`·`@` 등으로 요청 대상이 변조되거나 쿼리/프래그먼트
-    주입이 가능하다(신뢰 불가 입력). ① 선행 슬래시를 정규화하고 ② 허용 문자
-    (영숫자·`.`·`_`·`/`·`-`)만으로 구성됐는지, ③ 길이 상한을 넘지 않는지 확인한다.
-    경로 세그먼트 이름(`operations`/`tasks` 등)은 실 API 미확정이라 강제하지
-    않는다. 불일치 시 VideoRenderError(원문 미노출 — 길이만 진단)로 실패한다.
-    """
-    normalized = op_name.lstrip("/")
-    if (
-        not normalized
-        or len(normalized) > _MAX_OP_NAME_CHARS
-        or not _OP_NAME_RE.match(normalized)
-    ):
-        # 원문에는 내부 식별자가 있을 수 있어 길이만 노출(redaction).
-        raise VideoRenderError(
-            f"Veo operation name 형식이 올바르지 않습니다 (길이 {len(op_name)})"
-        )
-    return normalized
-
-
-def _validate_redirect_location(location: str) -> None:
-    """302 리다이렉트 Location URL이 안전한 호스트인지 검증한다.
-
-    scheme=https + host가 _SAFE_REDIRECT_HOSTS 내에 있어야 한다.
-    _validate_op_name과 동일 원칙: API 응답값은 신뢰 불가 입력(SSRF 방어).
-    """
-    parsed = urlparse(location)
-    if parsed.scheme != "https":
-        raise VideoRenderError("Veo 다운로드: Location URL scheme 불허 (허용: https)")
-    host = (parsed.hostname or "").lower()
-    if not any(host == s or host.endswith(f".{s}") for s in _SAFE_REDIRECT_HOSTS):
-        raise VideoRenderError(
-            "Veo 다운로드: Location URL 호스트 불허"
-            " (허용: storage.googleapis.com, generativelanguage.googleapis.com)"
-        )
 
 
 def _sanitize_prompt_text(text: str, max_chars: int) -> str:
@@ -192,19 +129,6 @@ class VideoRenderError(RuntimeError):
 
 class VideoTimeoutError(VideoRenderError):
     """렌더 작업이 폴링 제한 시간 안에 완료되지 않은 경우의 타임아웃."""
-
-
-def _gemini_headers(settings: Settings) -> dict:
-    """Gemini API 인증 헤더. `x-goog-api-key` 방식이다(Bearer 아님).
-
-    이 헤더는 자격증명이므로 **Gemini API 도메인(_GEMINI_HOST) 요청에만** 붙인다 —
-    외부 호스트(서명된 GCS URL 등)로 보내면 그 호스트의 액세스 로그/중간자에게
-    키가 샌다(VeoClient._download 참조).
-    """
-    return {
-        "x-goog-api-key": settings.gemini_api_key,
-        "Content-Type": "application/json",
-    }
 
 
 def _raise_for_status(resp, what: str) -> None:
@@ -373,19 +297,11 @@ def pick_episode_style(script_id: str) -> EpisodeStyle:
 
     의상과 장소는 서로 다른 salt로 해시해 독립적으로 조합된다 — 같은 salt를 쓰면
     리스트 길이가 같을 때 인덱스가 동기화돼 조합 다양성이 리스트 길이로 줄어든다.
-    Supertone 보이스 로테이션(tts_supertone)과 같은 결정적 선택 패턴.
+    CRC32 기반 결정적 선택 패턴(같은 입력 → 항상 같은 결과).
     """
     outfit_idx = zlib.crc32(f"outfit:{script_id}".encode()) % len(_EPISODE_OUTFITS)
     setting_idx = zlib.crc32(f"setting:{script_id}".encode()) % len(_EPISODE_SETTINGS)
     return EpisodeStyle(_EPISODE_OUTFITS[outfit_idx], _EPISODE_SETTINGS[setting_idx])
-
-
-def _veo_total_sec(n_beats: int) -> float:
-    """veo extend 경로의 총 길이초: 첫 비트 8초 + 이후 비트마다 +7초(extend).
-
-    비트가 0~1개면 extend가 없어 8초(또는 그 이하 1개)다. 음수 방지로 max(0, …).
-    """
-    return _CLIP_SEC + _EXTEND_SEC * max(0, n_beats - 1)
 
 
 # ============== PO 수정 구역 (마스코트 외형 — 캐릭터 일관성의 핵심) ==============
@@ -529,353 +445,19 @@ class VeoPromptBuilder:
             f"{self._NEGATIVE}"
         )
 
-    def build_extend_beat(
-        self,
-        dialogue_text: str,
-        *,
-        off_screen_interviewer: bool = True,
-    ) -> str:
-        """직전 클립을 이어받는 Veo extend용 프롬프트를 만든다(연속 동작·발화만 묘사).
-
-        배경·의상·시작 장면은 직전 세그먼트에서 자동 계승되므로 재명시하지 않는다 —
-        과도한 장면 재설정 지시는 시각적 불연속을 유발할 수 있다(공식 extend 가이드).
-        목소리 고정 묘사(_VOICE)·카메라(_CAMERA)·금지 요소(_NEGATIVE)는 비트 간 드리프트를
-        막기 위해 유지한다. 마스코트가 클립 끝까지 끊김 없이 말하도록 유도해 직전 클립
-        마지막 1초에 음성이 남게 한다 — 마지막 1초에 음성이 없으면 연장 구간에서 발화가
-        이어지지 않기 때문(공식 가이드: voice not extended if not present in last 1 second).
-        대사는 build_beat과 동일하게 `_sanitize_prompt_text`로 정제해 인용 구분자 주입을 막는다.
-        """
-        dialogue = _sanitize_prompt_text(dialogue_text.strip() or "", _MAX_DIALOGUE_CHARS)
-        speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
-        return (
-            "Continue the same uninterrupted shot with no cut and no scene change. "
-            f"The same {self._PERSONA} keeps {speaking}, now saying "
-            f"(as spoken audio only, no on-screen text): '{dialogue}'. "
-            "The mascot keeps talking continuously to the very end with no silent pause. "
-            f"{self._VOICE} "
-            f"{self._CAMERA} "
-            f"{self._NEGATIVE}"
-        )
-
 
 # NanoBananaClient(Gemini 이미지 생성)는 2026-06 PO 결정으로 FalKontextClient로 교체됨.
 # 프레임 클라이언트는 nutti/integrations/image_kontext.py의 FalKontextClient를 사용한다.
 
 
-class VeoClient(_HttpClosingMixin):
-    """Veo 3.1 image-to-video 클라이언트(제출 → 폴링 → 즉시 다운로드).
-
-    `POST /models/{model}:predictLongRunning`으로 작업을 제출하고, 반환된
-    operation name을 `GET /{op_name}`으로 interval 간격·timeout 한도까지
-    폴링한다. 완료되면 응답의 영상 URI에서 **즉시** 바이트를 내려받아
-    `settings.nutti_media_dir`에 저장한다(48시간 삭제 정책 대비).
-
-    오류 계약: HTTP·전송·JSON 파싱·디스크 쓰기 실패는 `VideoRenderError`,
-    제한 시간 초과는 `VideoTimeoutError`. 폴링 중 일시 오류(429/5xx)는
-    backoff와 함께 최대 `_MAX_TRANSIENT_RETRIES`회 재시도한다 — 작업은
-    Google 쪽에서 계속 진행 중이므로 일시 오류 1회로 영구 포기하지 않는다.
-    메시지에는 상태 코드/예외 타입명만 남긴다(operation id·URL·본문 금지).
-    `poll_count`는 폴링 HTTP 시도 횟수(진단용)다.
-    """
-
-    def __init__(self, settings: Settings, *, http=None, sleep=None):
-        self.settings = settings
-        self._http = http
-        # 폴링/재시도 대기. 기본 time.sleep, 테스트에서 가짜 시계로 대체.
-        self._sleep = sleep if sleep is not None else time.sleep
-        self._interval = float(settings.veo_poll_interval_sec)
-        # interval ≤ 0이면 elapsed가 영원히 0에 머물러 _poll이 무한 루프에 빠진다
-        # (NUTTI_VEO_POLL_INTERVAL_SEC=0 같은 환경변수 오설정). 생성 시점에
-        # 명확한 설정 오류로 빠르게 실패시킨다.
-        if self._interval <= 0:
-            raise ValueError(
-                f"veo_poll_interval_sec는 0보다 커야 합니다(현재 {self._interval})"
-            )
-        self._timeout = float(settings.veo_timeout_sec)
-        # timeout ≤ 0이면 _submit(과금 발생) 이후 while 조건이 첫 진입부터 False —
-        # poll_count=0 VideoTimeoutError로 제출된 잡을 조용히 버리게 된다.
-        # interval 가드와 대칭으로 생성 시점에 명확한 설정 오류로 빠르게 실패시킨다.
-        if self._timeout <= 0:
-            raise ValueError(
-                f"veo_timeout_sec는 0보다 커야 합니다(현재 {self._timeout})"
-            )
-        # 진단용: 폴링 HTTP 시도 횟수(재시도 포함). 타임아웃 메시지에 포함된다.
-        self.poll_count = 0
-
-    def _client(self):
-        """httpx 클라이언트를 지연 확보(주입 우선). dry_run에선 호출되지 않는다."""
-        if self._http is not None:
-            return self._http
-        import httpx
-
-        self._http = httpx.Client(timeout=60.0)
-        return self._http
-
-    def generate(self, frame_path: str, prompt: str) -> str:
-        """시작 프레임 + 프롬프트로 8초 영상을 생성하고 로컬 저장 경로를 반환한다.
-
-        단일 비트(연장 없음)와 외부 호출용 경로다. 다중 비트 연속 영상은
-        `_generate_uri`로 첫 클립 URI만 얻어 extend로 체이닝한 뒤 마지막에 1회만
-        다운로드한다(중간 클립 다운로드 불요). 해상도는 720p로 고정한다 — Veo extend
-        출력이 720p 고정이라, 첫 클립도 720p로 맞춰 첫 연장 경계에서 해상도 점프가
-        생기지 않게 한다.
-        """
-        return self._download(self._generate_uri(frame_path, prompt))
-
-    def _generate_uri(self, frame_path: str, prompt: str) -> str:
-        """첫 클립을 생성하고 Files API 영상 URI를 반환한다(다운로드 없음).
-
-        extend 입력은 직전 클립의 **URI 참조**를 요구하므로(인라인 base64 거부, 실측),
-        다중 비트 체이닝에서는 중간 클립을 내려받지 않고 이 URI를 다음 extend로 넘긴다.
-        """
-        op_name = self._submit(frame_path, prompt)
-        return self._poll(op_name)
-
-    def extend(self, prev_video_uri: str, prompt: str) -> str:
-        """직전 클립 URI를 이어 +7초 연장하고, 누적 영상의 새 Files API URI를 반환한다.
-
-        extend 입력은 Files API URI 참조(`instances[].video.uri`)만 받는다 — 인라인
-        base64는 400 "Video URI not found", gcsUri·inlineData는 모델 미지원(2026-06-15
-        실측 확정). 직전 `_generate_uri`/`extend`가 받은 URI를 그대로 넘기므로 중간
-        클립을 재다운로드·재업로드하지 않는다. 각 extend 호출은 입력 영상에 새 구간을
-        덧붙인 **누적 전체 영상**의 URI를 돌려주므로, 마지막 호출 결과가 곧 최종 연속
-        영상이고 호출부가 그것만 1회 다운로드한다(별도 스티칭 불요). 9:16 세로 extend는
-        Fast/Standard 모델만 지원한다(Lite 불가 — 호출부에서 사전 차단). 직전 클립의
-        마지막 1초에 음성이 없으면 연장 구간 음성이 이어지지 않으므로(공식 가이드),
-        extend 프롬프트(VeoPromptBuilder.build_extend_beat)는 끊김 없는 발화를 유도한다.
-        """
-        op_name = self._submit_extend(prev_video_uri, prompt)
-        return self._poll(op_name)
-
-    def _submit(self, frame_path: str, prompt: str) -> str:
-        """image-to-video 작업을 제출하고 operation name을 반환한다.
-
-        `negativePrompt`로 화면 텍스트를 억제한다 — Veo가 대사를 화면 자막으로 임의
-        렌더하면 한글 자형을 못 그려 깨진 글자로 나오기 때문(실측 확인된 약점).
-        """
-        import base64
-
-        frame_bytes = _read_bytes(frame_path, "Veo 시작 프레임")
-        # resolution 720p: extend 출력이 720p 고정이라 첫 클립도 720p로 맞춘다(경계 점프 방지).
-        params: dict = {"aspectRatio": "9:16", "resolution": "720p"}
-        # Veo 3.1 Lite는 negativePrompt를 보내면 HTTP 400으로 거부한다
-        # ("`negativePrompt` isn't supported by this model", 2026-06-12 실측).
-        # Lite에서는 프롬프트 본문의 자막 금지 문구(_NEGATIVE·'no on-screen text')가
-        # 1차 방어로 남는다 — Lite probe 실측에서 자막 없음 확인(PO 판정 ③).
-        if self._supports_negative_prompt():
-            params["negativePrompt"] = _VEO_NEGATIVE_PROMPT
-        body = {
-            "instances": [
-                {
-                    "prompt": prompt,
-                    "image": {
-                        "bytesBase64Encoded": base64.b64encode(frame_bytes).decode("ascii"),
-                        "mimeType": _guess_image_mime(frame_path),
-                    },
-                }
-            ],
-            "parameters": params,
-        }
-        return self._submit_body(body)
-
-    def _submit_extend(self, prev_video_uri: str, prompt: str) -> str:
-        """직전 클립 URI를 입력으로 영상 연장(extend) 작업을 제출하고 operation name을 반환한다.
-
-        image-to-video(`_submit`)와 같은 predictLongRunning 엔드포인트를 쓰되, instance
-        입력이 image가 아니라 직전 클립 `video.uri`(Files API URI 참조)다. 인라인 base64는
-        거부되고(400 "Video URI not found in the request."), `gcsUri`·`inlineData`는 모델
-        미지원이라 거부된다(전부 2026-06-15 실측 확정). 입력 URI는 직전 generate/extend
-        완료 응답의 `generatedSamples[0].video.uri`를 그대로 쓴다(재다운로드·재업로드 불요).
-        출력은 720p 고정. aspectRatio="9:16"을 반드시 명시한다 — 생략하면 extend가 출력을
-        16:9로 가정해 9:16 입력을 HTTP 400("Aspect ratio of the input video must be 16:9,
-        but got: 9:16")으로 거부한다(2026-06-15 유료 실측 확정). 명시하면 9:16 입력을 받아
-        720x1280 연속 영상을 낸다. 공식 문서는 9:16 extend 지원으로 표기하나 실제 Gemini
-        API는 이 파라미터 없이는 막힌다(docs/API 불일치, 미수정).
-        """
-        params: dict = {"aspectRatio": "9:16", "resolution": "720p"}
-        # negativePrompt: 자막 억제. Fast/Standard만 지원(Lite는 400) — 모델명으로 분기.
-        if self._supports_negative_prompt():
-            params["negativePrompt"] = _VEO_NEGATIVE_PROMPT
-        body = {
-            "instances": [{"prompt": prompt, "video": {"uri": prev_video_uri}}],
-            "parameters": params,
-        }
-        return self._submit_body(body)
-
-    def _supports_negative_prompt(self) -> bool:
-        """현재 설정 모델이 negativePrompt 파라미터를 받는지 여부(모델명 기반).
-
-        veo-3.1-lite-generate-preview는 미지원(400 거부, 2026-06-12 실측)이므로
-        모델명에 'lite'가 포함되면 미지원으로 본다. standard/fast는 지원.
-        """
-        return "lite" not in self.settings.veo_model.lower()
-
-    def _submit_body(self, body: dict) -> str:
-        """predictLongRunning 본문을 제출하고 검증된 operation name을 반환한다.
-
-        URL 구성, operation name 추출·검증, redaction 로깅을 한곳에 둔다.
-        """
-        url = f"{_GEMINI_BASE}/models/{self.settings.veo_model}:predictLongRunning"
-        # Veo 제출은 간헐 400(동일 요청 400<->200 비결정, 2026-06-15 실측)을 견디기 위해
-        # 429/5xx에 더해 400도 일시 오류로 재시도한다 — extend 다중 비트 완주율 확보.
-        data = _send_json(
-            lambda: self._client().post(
-                url, headers=_gemini_headers(self.settings), json=body
-            ),
-            "Veo 작업 제출",
-            sleep=self._sleep,
-            max_transient_retries=_MAX_TRANSIENT_RETRIES,
-            retry_400=True,
-        )
-        op_name = data.get("name")
-        if not op_name:
-            # 원본 본문에는 내부 식별자가 있을 수 있어 키 목록만 노출(redaction).
-            log.debug("veo.submit.missing_name", keys=list(data.keys()))
-            raise VideoRenderError(
-                f"Veo 응답에 operation name이 없습니다 (응답 키: {list(data.keys())})"
-            )
-        # API 응답값은 신뢰 불가 입력 — 폴링 URL에 삽입하기 전에 형식을 검증한다.
-        return _validate_op_name(str(op_name))
-
-    def _poll(self, op_name: str) -> str:
-        """operation을 완료까지 폴링해 영상 URI를 반환한다.
-
-        경계는 `< timeout`로 둔다 — `<=`면 deadline에 도달한 뒤에도 1회 더
-        폴링해(off-by-one) 제한 시간을 초과한 호출이 발생한다.
-        """
-        # op_name은 _submit의 _validate_op_name에서 이미 검증·정규화됐다
-        # (선행 슬래시 제거·허용 문자·operations 세그먼트 확인). 일부 Google LRO
-        # API는 선행 슬래시 포함('/v1beta/…') 형태를 반환하지만 정규화로 이중
-        # 슬래시 404를 막는다. TODO(live): 실 Veo 응답의 name 형식(상대
-        # `operations/…` vs 절대 `/v1beta/…`)을 키 확보 후 확정한다.
-        url = f"{_GEMINI_BASE}/{op_name}"
-        elapsed = 0.0
-        while elapsed < self._timeout:
-            data, backoff_sec = self._poll_once(url)
-            # 일시 오류 재시도의 backoff 대기도 wall-clock 한도에 누적한다 —
-            # 누적하지 않으면 매 폴링이 재시도 한도까지 포화할 때(폴링당 +14s)
-            # 실제 대기가 설정 timeout의 약 2배(기본값 기준 ~1160s)에 이른다.
-            elapsed += backoff_sec
-            if data.get("done"):
-                error = data.get("error")
-                if error:
-                    # error.message는 내부 상세가 박힐 수 있어 code만 노출(redaction).
-                    code = error.get("code") if isinstance(error, dict) else error
-                    raise VideoRenderError(f"Veo 작업 실패: error code {code}")
-                return self._extract_video_uri(data)
-            # 아직 진행 중 → 대기 후 재시도. 경과 시간은 sleep 누적으로 추적
-            # (가짜 시계 주입 시에도 결정적).
-            self._sleep(self._interval)
-            elapsed += self._interval
-        # operation id는 메시지에 노출하지 않는다(redaction) — 폴링 횟수로 진단.
-        raise VideoTimeoutError(
-            f"Veo 폴링 타임아웃({self._timeout:.0f}s, 폴링 {self.poll_count}회)"
-        )
-
-    def _poll_once(self, url: str) -> tuple[dict, float]:
-        """상태 1회 조회. 일시 오류(429/5xx)는 지수 backoff로 최대 3회 재시도한다.
-
-        영구 오류(그 외 4xx)·전송 오류·JSON 파싱 실패는 즉시 VideoRenderError로
-        전파한다. 반환은 `(응답 dict, 재시도 backoff 합계 초)` — backoff 대기
-        (2·4·8초, 폴링 1회분당 최대 14초)는 호출부(_poll)가 timeout 경과에
-        누적한다. 누적하지 않으면 재시도 포화 시 wall-clock이 설정 한도를
-        크게 초과한다(기본 600s 설정에서 최악 ~93% 오버런).
-        """
-        attempts = 0
-        backoff_total = 0.0
-        while True:
-            self.poll_count += 1
-            resp = _safe_send(
-                lambda: self._client().get(url, headers=_gemini_headers(self.settings)),
-                "Veo 상태 조회",
-            )
-            code = getattr(resp, "status_code", None)
-            transient = isinstance(code, int) and (code == 429 or code >= 500)
-            if transient and attempts < _MAX_TRANSIENT_RETRIES:
-                attempts += 1
-                # 지수 backoff(2·4·8초). 가짜 sleep 주입 시 즉시 반환된다.
-                wait = _RETRY_BACKOFF_SEC * (2 ** (attempts - 1))
-                self._sleep(wait)
-                backoff_total += wait
-                continue
-            return _json_or_raise(resp, "Veo 상태 조회"), backoff_total
-
-    @staticmethod
-    def _extract_video_uri(data: dict) -> str:
-        """완료 응답에서 영상 URI를 방어적으로 추출한다(직접 인덱싱 금지)."""
-        response = data.get("response")
-        gvr = response.get("generateVideoResponse") if isinstance(response, dict) else None
-        samples = gvr.get("generatedSamples") if isinstance(gvr, dict) else None
-        first = samples[0] if isinstance(samples, list) and samples else None
-        video = first.get("video") if isinstance(first, dict) else None
-        uri = video.get("uri") if isinstance(video, dict) else None
-        if not uri:
-            # 원본 본문에는 서명 URL·내부 메타데이터가 있을 수 있어 키 목록만 노출.
-            log.debug("veo.poll.missing_uri", keys=list(data.keys()))
-            raise VideoRenderError(
-                f"Veo 완료 응답에 영상 URI가 없습니다 (응답 키: {list(data.keys())})"
-            )
-        return str(uri)
-
-    def _download(self, uri: str) -> str:
-        """완료된 영상을 즉시 내려받아 media_dir에 저장하고 경로를 반환한다.
-
-        `x-goog-api-key`는 자격증명이므로 **Gemini API 도메인일 때만** 붙인다.
-        Gemini 파일 API는 실제 바이트를 GCS 서명 URL로 302 리다이렉트할 수 있다.
-        GCS 서명 URL은 쿼리파라미터로 자체 인증하므로 API 키 헤더 없이 재요청한다.
-        """
-        # Veo 완료 응답의 URI도 API 응답값(신뢰 불가 입력) — scheme·host 검증 필수.
-        _validate_redirect_location(uri)
-        headers = _gemini_headers(self.settings) if uri.startswith(_GEMINI_HOST) else None
-        # follow_redirects=False: 리다이렉트 대상이 GCS 등 외부 호스트일 때
-        # API 키 헤더가 새지 않도록 수동으로 처리한다.
-        resp = _safe_send(
-            lambda: self._client().get(uri, headers=headers, follow_redirects=False),
-            "Veo 영상 다운로드",
-        )
-        sc = getattr(resp, "status_code", None)
-        if not isinstance(sc, int):
-            raise VideoRenderError("Veo 영상 다운로드 응답에 유효한 status_code가 없습니다")
-        if 300 <= sc < 400:
-            location = (getattr(resp, "headers", {}) or {}).get("location", "")
-            if not location:
-                raise VideoRenderError("Veo 영상 다운로드: 리다이렉트 응답에 Location 헤더 없음")
-            # SSRF 방어: Location 헤더(API 응답값)는 신뢰 불가 — scheme·host 검증 필수.
-            _validate_redirect_location(location)
-            # Gemini 도메인 리다이렉트는 API 키 헤더를 유지해야 한다.
-            # GCS 서명 URL은 API 키 없이 쿼리파라미터로 자체 인증한다.
-            # follow_redirects=False: 검증된 Location 이후의 추가 hop을 차단(SSRF 체인 방지).
-            redir_headers = _gemini_headers(self.settings) if location.startswith(_GEMINI_HOST) else None
-            resp = _safe_send(
-                lambda: self._client().get(location, headers=redir_headers, follow_redirects=False),
-                "Veo 영상 다운로드(리다이렉트)",
-            )
-            r_sc = getattr(resp, "status_code", None)
-            if isinstance(r_sc, int) and 300 <= r_sc < 400:
-                raise VideoRenderError("Veo 다운로드: 허용 호스트 이후 추가 리다이렉트 금지")
-        _raise_for_status(resp, "Veo 영상 다운로드")
-        content = getattr(resp, "content", None)
-        if not isinstance(content, (bytes, bytearray)) or not content:
-            raise VideoRenderError("Veo 다운로드 응답에 영상 바이트가 없습니다")
-        out_path = Path(self.settings.nutti_media_dir) / f"video_{uuid4().hex[:12]}.mp4"
-        # 디스크 쓰기 실패(OSError)도 VideoRenderError 계약을 지킨다(_write_bytes).
-        _write_bytes(out_path, bytes(content), "Veo 영상")
-        log.info("veo.video.saved", path=str(out_path))
-        return str(out_path)
-
-
 class VideoStudio:
-    """대본 → 시작 프레임(프레임 클라이언트: Kontext) → Veo 영상 생성을 담당하는 파사드(facade)."""
+    """대본 → 시작 프레임(Kontext) → fal.ai Veo 3.1 영상 생성을 담당하는 파사드(facade)."""
 
     def __init__(
         self,
         settings: Settings,
         *,
         nano_client=None,
-        veo_client=None,
-        kling_client=None,
-        tts_client=None,
-        kling_lipsync_client=None,
         veo_fal_client=None,
         sleep=None,
     ):
@@ -883,13 +465,6 @@ class VideoStudio:
         # 주입이 없으면 각 실 경로(non-dry_run)에서 지연 생성한다.
         self.settings = settings
         self._nano_client = nano_client
-        self._veo_client = veo_client
-        # kling 백엔드(무음 영상 + 한국어 TTS 보이스오버)용 주입 클라이언트.
-        self._kling_client = kling_client
-        self._tts_client = tts_client
-        # Kling LipSync 후처리(NUTTI_KLING_LIPSYNC=true)용 주입 클라이언트.
-        # 미주입 시 백엔드(KlingVoiceoverBackend)가 실 경로에서 지연 생성한다.
-        self._kling_lipsync_client = kling_lipsync_client
         # fal.ai Veo 3.1 백엔드(video_backend="veo_fal")용 주입 클라이언트.
         # 미주입 시 _produce_clips_veo_fal에서 지연 생성하고 finally에서 1회 닫는다.
         self._veo_fal_client = veo_fal_client
@@ -908,74 +483,30 @@ class VideoStudio:
         """
         if self.settings.dry_run:
             return
-        # 시작 프레임은 백엔드 무관하게 FalKontextClient(fal.ai)로 만든다 → FAL_KEY 필수.
-        # kling 백엔드는 영상 클립도 fal.ai이므로 FAL_KEY 1개로 프레임+영상 모두 커버한다.
-        if self.settings.video_backend == "kling":
-            if self._nano_client is None and not _usable_key(self.settings.fal_key):
-                raise ValueError(
-                    "FAL_KEY가 비어 있습니다 — kling 백엔드의 프레임(Kontext) 생성에 필수입니다."
-                )
-            # TTS 소스 키 검증: kling_tts에 따라 필요한 키가 다르다.
-            # · gemini(기본): TTS도 Gemini generateContent라 GEMINI_API_KEY 재사용.
-            # · elevenlabs: ELEVENLABS_API_KEY 필수(타 호스트 유출 금지 키).
-            # · supertone: SUPERTONE_API_KEY 필수(supertoneapi.com 전용 키).
-            # tts_client를 직접 주입하면 소스 무관하게 이 키 검사를 건너뛴다(테스트/대체 구현 허용).
-            if self._tts_client is None:
-                if self.settings.kling_tts == "elevenlabs":
-                    if not _usable_key(self.settings.elevenlabs_api_key):
-                        raise ValueError(
-                            "ELEVENLABS_API_KEY가 비어 있습니다 — "
-                            "kling 백엔드의 TTS(kling_tts=elevenlabs)에 필수입니다."
-                        )
-                elif self.settings.kling_tts == "supertone":
-                    if not _usable_key(self.settings.supertone_api_key):
-                        raise ValueError(
-                            "SUPERTONE_API_KEY가 비어 있습니다 — "
-                            "kling 백엔드의 TTS(kling_tts=supertone)에 필수입니다."
-                        )
-                elif not _usable_key(self.settings.gemini_api_key):
-                    raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 TTS에 필수입니다.")
-            if self._kling_client is None and not _usable_key(self.settings.fal_key):
-                raise ValueError("FAL_KEY가 비어 있습니다 — kling 백엔드(dry_run=False) 시 필수입니다.")
-            # LipSync 후처리(kling_lipsync=true)도 fal.ai 큐를 쓰므로 FAL_KEY 요구는 위에서 충족된다.
-            return
-        # veo_fal 백엔드: 시작 프레임(Kontext=FAL_KEY)과 영상 생성(fal.ai=FAL_KEY) 모두 FAL_KEY.
-        # GEMINI_API_KEY 불요 — veo_fal은 FAL_KEY 하나로 프레임+영상 모두 처리한다.
-        if self.settings.video_backend == "veo_fal":
-            if self._nano_client is None and not _usable_key(self.settings.fal_key):
-                raise ValueError(
-                    "FAL_KEY가 비어 있습니다 — veo_fal 백엔드의 프레임(Kontext) 생성에 필수입니다."
-                )
-            if self._veo_fal_client is None and not _usable_key(self.settings.fal_key):
-                raise ValueError(
-                    "FAL_KEY가 비어 있습니다 — veo_fal 백엔드(dry_run=False) 시 필수입니다."
-                )
-            return
-        # 기본 veo 백엔드: 프레임은 Kontext(FAL_KEY), 영상은 Gemini Veo(GEMINI_API_KEY).
+        # veo_fal 백엔드(단일 백엔드): 시작 프레임(Kontext=FAL_KEY)과 영상 생성(fal.ai=FAL_KEY)
+        # 모두 FAL_KEY 하나로 처리한다. GEMINI_API_KEY 불요.
         if self._nano_client is None and not _usable_key(self.settings.fal_key):
             raise ValueError(
-                "FAL_KEY가 비어 있습니다 — 시작 프레임(Kontext) 생성에 필수입니다."
+                "FAL_KEY가 비어 있습니다 — veo_fal 백엔드의 프레임(Kontext) 생성에 필수입니다."
             )
-        if self._veo_client is None and not _usable_key(self.settings.gemini_api_key):
-            raise ValueError("GEMINI_API_KEY가 비어 있습니다 — veo 백엔드(dry_run=False) 시 필수입니다.")
+        if self._veo_fal_client is None and not _usable_key(self.settings.fal_key):
+            raise ValueError(
+                "FAL_KEY가 비어 있습니다 — veo_fal 백엔드(dry_run=False) 시 필수입니다."
+            )
 
     def produce(self, script: Script) -> VideoAsset:
-        """시작 프레임 → 첫 클립 + extend 체이닝(veo) → VideoAsset 반환.
+        """시작 프레임 → 비트별 fal.ai Veo 클립 → 스티칭 → VideoAsset 반환.
 
-        veo 경로: 대본 비트(`script.beats`)가 N개면 첫 비트로 8초 클립을 만들고 이후
-        비트를 extend로 이어 붙여 단일 연속 영상(총 8+7*(N-1)초)을 만든다. kling 경로는
-        비트별 무음 클립 + TTS 보이스오버를 ffmpeg로 스티칭한다. 비트가 없으면 body
-        단일컷(8초)으로 폴백한다. 실 경로의 정확한 길이는 _produce_clips가 돌려준 값으로
-        덮어쓰고, 아래 duration은 dry_run·사전 추정용 계산이다(백엔드별로 분기).
+        veo_fal 경로: 대본 비트(`script.beats`)가 N개면 같은 시작 프레임에서 비트마다
+        8초 클립을 만들어 ffmpeg로 이어붙인다. 비트가 없으면 body 단일컷(8초)으로 폴백한다.
+        실 경로의 정확한 길이는 _produce_clips가 돌려준 값(트림 실측)으로 덮어쓰고,
+        아래 duration은 dry_run·사전 추정용 계산이다(비트당 8초 가정).
         """
         # 실 경로면 시작 전에 필수 키를 검증(미설정 시 빠르게 실패).
         self.validate_config()
         beats = self._beats(script)
-        # veo는 첫 8초 + 비트마다 +7초(extend), kling/그 외는 비트당 8초 가정.
-        if self.settings.video_backend == "veo":
-            duration = _veo_total_sec(len(beats))
-        else:
-            duration = _CLIP_SEC * len(beats)
+        # 비트당 8초 클립을 만들어 스티칭한다(실측 길이는 _produce_clips가 덮어쓴다).
+        duration = _CLIP_SEC * len(beats)
 
         if self.settings.dry_run:
             log.info("dry_run.video", script_id=script.id, beats=len(beats))
@@ -994,8 +525,8 @@ class VideoStudio:
         # 갈릴 때 프레임과 클립의 장면이 어긋날 수 있다(리뷰 지적, PR #52).
         style = pick_episode_style(script.id)
         frame_path = self._generate_frame(script, style)
-        # 실 경로의 총길이는 위 사전 추정 대신 백엔드가 돌려준 실측값으로 덮어쓴다 —
-        # veo는 8+7*(N-1)초, kling은 mux `-shortest`로 음성 길이에 맞춰진 실측 총길이.
+        # 실 경로의 총길이는 위 사전 추정 대신 veo_fal이 돌려준 실측값(비트 클립 앞뒤
+        # 침묵 트림 반영)으로 덮어쓴다.
         video_path, duration = self._produce_clips(frame_path, beats, style)
         return VideoAsset(
             script_id=script.id,
@@ -1019,58 +550,24 @@ class VideoStudio:
     def _produce_clips(
         self, frame_path: str, beats: list[str], style: EpisodeStyle
     ) -> tuple[str, float]:
-        """비트별 클립을 생성해 ffmpeg로 이어붙인 (최종 경로, 실측 총길이초)를 반환한다(백엔드 분기).
+        """비트별 클립을 생성해 ffmpeg로 이어붙인 (최종 경로, 실측 총길이초)를 반환한다.
 
-        `video_backend`가 "kling"이면 무음 Kling 영상 + 한국어 TTS 보이스오버 백엔드로
-        비트 클립을 만든다(편별 스타일 미적용 — 프롬프트 체계가 달라 veo 전용).
-        그 외(기본 "veo")는 Veo 네이티브 음성 경로를 쓰고 스타일을 첫 비트 프롬프트에 반영한다.
-        두 경로 모두 실측/계산된 총길이초를 함께 돌려준다 — kling은 클립 길이가 음성에
-        맞춰지고, veo는 첫 8초 + 비트마다 +7초(extend)로 길이가 정해진다.
+        단일 백엔드 veo_fal: fal.ai Veo 3.1 네이티브 음성 경로로 비트마다 같은 시작
+        프레임에서 8초 클립을 만들고, 편별 스타일(의상·장소)을 각 비트 프롬프트에 반영한다.
+        앞뒤 침묵을 트림한 실측 총길이초를 함께 돌려준다.
         """
-        if self.settings.video_backend == "kling":
-            return self._produce_clips_kling(frame_path, beats)
-        if self.settings.video_backend == "veo":
-            return self._produce_clips_veo(frame_path, beats, style)
-        if self.settings.video_backend == "veo_fal":
-            return self._produce_clips_veo_fal(frame_path, beats, style)
-        # Settings.video_backend는 Literal["veo","kling","veo_fal"]이므로 여기는 도달 불가.
-        # 직접 객체 변조·테스트 주입 등 런타임 우회 대비용 명시적 거부.
-        # 설정 값을 메시지에 포함하면 monkey-patch된 임의 문자열이 로그/텔레그램으로 누출될 수 있다.
-        raise ValueError(
-            "알 수 없는 video_backend 값입니다 — 'veo', 'kling', 'veo_fal' 중 하나여야 합니다."
-        )
-
-    def _produce_clips_kling(self, frame_path: str, beats: list[str]) -> tuple[str, float]:
-        """Kling 무음 + 한국어 TTS 백엔드로 비트 클립을 만들고 스티칭한다.
-
-        무거운 의존(fal/TTS 클라이언트)을 import-time에 끌어오지 않도록 지연 import한다
-        (httpx·imageio_ffmpeg와 동일한 lazy 패턴 → veo-only 경로의 import 비용 0).
-        백엔드가 돌려준 실측 총길이초를 함께 반환해 duration_sec을 정확히 채운다.
-        """
-        from nutti.integrations.video_kling import KlingVoiceoverBackend
-
-        backend = KlingVoiceoverBackend(
-            self.settings,
-            kling_client=self._kling_client,
-            tts_client=self._tts_client,
-            kling_lipsync_client=self._kling_lipsync_client,
-            sleep=self._sleep,
-        )
-        clips, total_sec = backend.produce_beat_clips(frame_path, beats)
-        return self._stitch(clips), total_sec
+        return self._produce_clips_veo_fal(frame_path, beats, style)
 
     def _produce_clips_veo_fal(
         self, frame_path: str, beats: list[str], style: EpisodeStyle
     ) -> tuple[str, float]:
         """fal.ai Veo 3.1로 비트마다 같은 시작 프레임에서 클립을 생성하고 스티칭한다.
 
-        Gemini API Veo와 달리 fal Veo는 extend 엔드포인트를 미노출하므로, 비트별 독립
-        클립을 생성한 뒤 _stitch로 합친다(Kling 스티칭 패턴과 동일). 프롬프트는
-        VeoPromptBuilder.build_beat를 재사용해 마스코트 외형·목소리·연출 일관성을 유지한다.
-        총길이 = _CLIP_SEC × len(beats)(각 클립 8초).
+        fal Veo는 extend 엔드포인트를 미노출하므로, 비트별 독립 클립을 생성한 뒤
+        _stitch로 합친다. 프롬프트는 VeoPromptBuilder.build_beat를 재사용해 마스코트
+        외형·목소리·연출 일관성을 유지한다. 총길이는 각 클립의 트림 실측 합이다.
 
-        FalVeoClient는 주입분 우선, 없으면 지연 생성하고 finally에서 소유분만 닫는다
-        (_produce_clips_veo의 owned 패턴과 동일).
+        FalVeoClient는 주입분 우선, 없으면 지연 생성하고 finally에서 소유분만 닫는다.
         """
         from nutti.integrations.video_veo_fal import FalVeoClient
 
@@ -1184,54 +681,6 @@ class VideoStudio:
         except Exception:
             # 트림은 품질 개선용 best-effort — 어떤 실패도 원본 클립으로 폴백한다.
             return clip, None
-
-    def _produce_clips_veo(
-        self, frame_path: str, beats: list[str], style: EpisodeStyle
-    ) -> tuple[str, float]:
-        """첫 비트를 8초 클립으로 생성한 뒤 이후 비트를 Veo extend로 이어 붙여
-        하나의 연속 영상(점프컷 없음)을 만들고 (최종 경로, 총길이초)를 반환한다.
-
-        첫 클립은 시작 프레임 + 편별 스타일(의상·장소)을 쓴 image-to-video다. 이후
-        비트는 직전 클립을 입력으로 한 extend라, 각 호출이 누적된 전체 영상을 돌려주므로
-        마지막 결과가 최종 영상이다(별도 스티칭 불요). 배경·의상은 첫 클립에서 정해져
-        extend 구간에 자동 계승되므로 extend 프롬프트(build_extend_beat)는 이어지는
-        동작·발화만 묘사한다. 음성 일관성은 모든 프롬프트의 고정 목소리 묘사(_VOICE)와
-        extend의 연속 발화 유도로 통제한다. Veo 클라이언트는 한 번만 확보해 재사용하고,
-        자체 생성분만 finally에서 정확히 1회 닫는다(주입분은 소유자가 닫음 — 풀 누수 방지).
-
-        extend는 Fast/Standard 모델만 지원하므로, 다중 비트 + Lite 조합은 과금되는
-        제출 전에 명확한 ValueError로 빠르게 막는다(라이브에서 400으로 늦게 실패 방지).
-        """
-        if len(beats) > 1 and "lite" in self.settings.veo_model.lower():
-            raise ValueError(
-                "Veo extend(다중 비트 연속 영상)는 Lite 모델을 지원하지 않습니다 — "
-                "NUTTI_VEO_MODEL을 fast 또는 standard로 설정하세요."
-            )
-        builder = VeoPromptBuilder()
-        client = self._veo_client
-        owned = None
-        if client is None:
-            client = owned = VeoClient(self.settings, sleep=self._sleep)
-        try:
-            if len(beats) == 1:
-                # 단일 비트는 연장 없이 generate 한 클립을 그대로 쓴다(다운로드 경로).
-                video_path = client.generate(
-                    frame_path, builder.build_beat(beats[0], style=style)
-                )
-                log.info("video.veo.clip.done", path=video_path, beat=1, of=1)
-                return video_path, _veo_total_sec(1)
-            # 다중 비트: 첫 클립 URI → extend로 URI 체이닝(중간 다운로드 없음) → 마지막
-            # 누적 URI만 1회 다운로드. extend 입력은 URI 참조여야 한다(인라인 base64 거부, 실측).
-            uri = client._generate_uri(frame_path, builder.build_beat(beats[0], style=style))
-            log.info("video.veo.clip.done", beat=1, of=len(beats))
-            for i, beat in enumerate(beats[1:], start=2):
-                uri = client.extend(uri, builder.build_extend_beat(beat))
-                log.info("video.veo.extend.done", beat=i, of=len(beats))
-            video_path = client._download(uri)
-        finally:
-            if owned is not None:
-                _close_owned(owned)
-        return video_path, _veo_total_sec(len(beats))
 
     def _stitch(self, clips: list[str]) -> str:
         """여러 8초 클립을 ffmpeg로 이어붙여 하나의 MP4로 만든다(재인코딩 concat).

@@ -10,7 +10,7 @@ NUTTI_VEO_FAL_MODEL만 Fast로 교체하면 바로 승격된다.
   다운로드(_download) → VideoStudio._stitch로 비트 클립 합산.
   (Veo extend는 fal에 미노출 — 비트마다 독립 생성·스티칭.)
 
-fal 큐 공통 헬퍼(video_kling.py): _FAL_QUEUE_BASE, _fal_headers, _validate_request_id,
+fal 큐 공통 헬퍼(_fal_common.py): _FAL_QUEUE_BASE, _fal_headers, _validate_request_id,
 _validate_model_id, _validate_fal_video_url, _HttpClosingMixin, _guess_image_mime, _read_bytes
 를 재사용한다(중복 구현 금지).
 
@@ -44,14 +44,14 @@ from nutti.integrations.video import (
     _send_json,
     _write_bytes,
 )
-from nutti.integrations.video_kling import (
+from nutti.integrations._fal_common import (
     _FAL_QUEUE_BASE,
-    _HttpClosingMixin,
-    _MAX_TRANSIENT_RETRIES,
-    _RETRY_BACKOFF_SEC,
     _fal_headers,
     _guess_image_mime,
+    _HttpClosingMixin,
+    _MAX_TRANSIENT_RETRIES,
     _read_bytes,
+    _RETRY_BACKOFF_SEC,
     _validate_fal_video_url,
     _validate_model_id,
     _validate_request_id,
