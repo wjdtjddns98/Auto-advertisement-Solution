@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 import typer
@@ -17,6 +18,7 @@ from nutti.config import get_settings
 from nutti.logging import configure_logging
 from nutti.models import ContentFormat
 from nutti.pipeline.cost import format_cost
+from nutti.pipeline.cost_ledger import CostLedger, format_summary, summarize_records
 from nutti.pipeline.orchestrator import GateRejected, Orchestrator
 
 app = typer.Typer(help="Nutti 애견간식 콘텐츠 자동화 파이프라인")
@@ -64,6 +66,25 @@ def run(
 
     analysis = orchestrator.collect_and_analyze(result)
     typer.echo(f"\n[성과 분석 → 다음 사이클 피드백으로 저장됨]\n{analysis}")
+
+
+@app.command()
+def cost(
+    days: int = typer.Option(
+        0, "--days", help="최근 N일 누적도 함께 표시(0=생략)"
+    ),
+) -> None:
+    """누적 제작 비용 조회 — 오늘·이번 달·전체 실제 지출(+선택 최근 N일).
+
+    각 `nutti run` 실행이 비용 원장에 기록되며, 여기서 일/월/전체로 합산한다.
+    dry_run 실행은 실제 지출 0으로 집계되고, 라이브였다면 들었을 예상치는 별도 표시.
+    """
+    s = get_settings()
+    ledger = CostLedger(s.cost_ledger_path)
+    buckets = summarize_records(
+        ledger.records(), now=datetime.now().astimezone(), days=(days or None)
+    )
+    typer.secho(format_summary(buckets, days=(days or None)), fg=typer.colors.MAGENTA)
 
 
 @app.command()

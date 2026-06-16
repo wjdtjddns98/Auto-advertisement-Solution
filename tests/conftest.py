@@ -67,6 +67,7 @@ _NUTTI_ENV_VARS: tuple[str, ...] = (
     "NUTTI_MEDIA_DIR",
     "NUTTI_MASCOT_IMAGE",
     "NUTTI_STATE_PATH",
+    "NUTTI_COST_LEDGER_PATH",
     "NUTTI_REVIEW_TIMEOUT_SEC",
     "NUTTI_REVIEW_POLL_INTERVAL_SEC",
     "NUTTI_REVIEW_STORE_PATH",
@@ -116,6 +117,17 @@ def _isolate_settings_env(monkeypatch):
     # teardown: yield 이후 monkeypatch가 자동 원복하지만, cache도 재클리어해
     # 다음 테스트가 오염된 캐시를 보지 않도록 한다.
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cost_ledger(tmp_path, monkeypatch, _isolate_settings_env):
+    """비용 원장이 리포지토리 data/cost_ledger.json을 오염시키지 않도록 tmp로 격리한다.
+
+    _isolate_settings_env를 의존성으로 선언해 그 뒤에 실행되므로(env 삭제 후 set),
+    명시 경로를 주입하지 않는 Orchestrator(예: test_cost 오케스트레이터 케이스)도
+    tmp 원장을 쓴다. Settings(cost_ledger_path)는 이 env에서 읽힌다.
+    """
+    monkeypatch.setenv("NUTTI_COST_LEDGER_PATH", str(tmp_path / "cost_ledger.json"))
 
 
 @pytest.fixture(autouse=True)
