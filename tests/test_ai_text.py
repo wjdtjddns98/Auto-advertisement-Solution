@@ -528,9 +528,17 @@ def _gemini_payload(text: str) -> dict:
 
 
 def _gemini_client() -> AITextClient:
-    """라이브 + Gemini 백엔드(Anthropic 키 없음). conftest가 .env를 격리하므로 키는 명시 주입."""
+    """라이브 + Gemini 백엔드(Anthropic 키 없음). conftest가 .env를 격리하므로 키는 명시 주입.
+
+    text_backend 기본값이 2026-06-16 PO 롤백으로 claude가 됐으므로, Gemini 경로 테스트는
+    NUTTI_TEXT_BACKEND="gemini"를 명시해 opt-in한다.
+    """
     settings = Settings(
-        NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", GEMINI_API_KEY="k", NUTTI_ENV="test"
+        NUTTI_DRY_RUN=False,
+        NUTTI_TEXT_BACKEND="gemini",
+        ANTHROPIC_API_KEY="",
+        GEMINI_API_KEY="k",
+        NUTTI_ENV="test",
     )
     return AITextClient(settings)
 
@@ -541,6 +549,18 @@ def test_use_gemini_text_true_with_key():
 
 def test_use_gemini_text_false_without_key():
     settings = Settings(NUTTI_DRY_RUN=False, GEMINI_API_KEY="", NUTTI_ENV="test")
+    assert AITextClient(settings)._use_gemini_text() is False
+
+
+def test_default_text_backend_is_claude():
+    """2026-06-16 PO 롤백 핀: 텍스트 백엔드 기본값은 claude(Gemini는 명시 opt-in)."""
+    settings = Settings(NUTTI_DRY_RUN=False, NUTTI_ENV="test")
+    assert settings.text_backend == "claude"
+
+
+def test_default_backend_does_not_use_gemini_even_with_key():
+    """기본(claude)에서는 GEMINI_API_KEY가 있어도 Gemini 경로로 가지 않는다."""
+    settings = Settings(NUTTI_DRY_RUN=False, GEMINI_API_KEY="k", NUTTI_ENV="test")
     assert AITextClient(settings)._use_gemini_text() is False
 
 
