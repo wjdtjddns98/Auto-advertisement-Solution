@@ -129,6 +129,20 @@ class Settings(BaseSettings):
         alias="NUTTI_KLING_LIPSYNC_MODEL",
     )
 
+    # ---- fal.ai FLUX.1 Kontext 프레임 생성(영상 백엔드 무관) ----
+    # 영상 시작 프레임을 FLUX.1 Kontext [pro]로 생성한다. 마스코트 레퍼런스 이미지를
+    # image_url로 넣고 의상·장소 프롬프트를 주면 마스코트를 유지한 채 편집한다.
+    # FAL_KEY(기존 Kling/Veo fal 키)를 재사용한다 — 추가 키 불요.
+    kontext_model: str = Field(
+        default="fal-ai/flux-pro/kontext", alias="NUTTI_KONTEXT_MODEL"
+    )
+    kontext_poll_interval_sec: float = Field(
+        default=3.0, alias="NUTTI_KONTEXT_POLL_INTERVAL_SEC"
+    )
+    kontext_timeout_sec: float = Field(
+        default=120.0, alias="NUTTI_KONTEXT_TIMEOUT_SEC"
+    )
+
     # ---- fal.ai Veo 3.1 백엔드(video_backend="veo_fal") ----
     # Gemini API Veo와 동일한 모델을 fal.ai 종량제로 호스팅해 일일 쿼터 벽을 우회한다.
     # Lite 화질로 싸게 검증하고, Fast로 승격할 때는 모델명만 바꾼다(PO 승인 후).

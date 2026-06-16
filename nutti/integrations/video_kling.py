@@ -51,7 +51,10 @@ log = get_logger(__name__)
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 # fal.ai 큐 API 베이스. 제출/상태/결과 모두 이 호스트(자격증명 헤더는 여기에만 붙인다).
 _FAL_QUEUE_BASE = "https://queue.fal.run"
-# 결과 영상 다운로드를 허용하는 fal CDN 호스트(신뢰 불가 응답 URL의 SSRF 방어).
+# 결과 영상/이미지 다운로드를 허용하는 fal CDN 루트 호스트(신뢰 불가 응답 URL의 SSRF 방어).
+# 검증은 `host == s or host.endswith(".{s}")`(suffix 매칭)이라 v3.fal.media 등 모든
+# *.fal.media 서브도메인이 자동 포함된다(Kontext pro 결과 URL = v3.fal.media). 루트만 둬
+# 허용 표면을 명확히 한다 — v3.fal.media를 따로 추가하면 중복(동작 동일)이라 두지 않는다.
 _FAL_SAFE_HOSTS = frozenset({"fal.media", "fal.run"})
 # fal request id 허용 형태(폴링 URL에 삽입 전 검증). 영숫자·`-`·`_`만 허용.
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -341,7 +344,7 @@ class GeminiTtsClient(_HttpClosingMixin):
     def _extract_audio(data: dict) -> tuple[bytes, int]:
         """generateContent 응답에서 첫 오디오 파트의 PCM 바이트와 샘플레이트를 추출한다.
 
-        NanoBananaClient._extract_image_bytes와 동일한 방어 패턴(순회·isinstance,
+        video.py의 방어 파싱 패턴(순회·isinstance,
         snake/camelCase 둘 다 허용). mimeType의 `rate=` 파라미터로 샘플레이트를
         파싱하고, 없으면 기본값(24000)을 쓴다. 오디오 파트가 없으면 명시적으로 실패.
         """

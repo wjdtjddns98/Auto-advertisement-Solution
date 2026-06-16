@@ -1,6 +1,7 @@
-"""영상 생성 연동: NanoBanana(Gemini 시작 프레임) → Veo 3.1 image-to-video 단일컷 8초.
+"""영상 생성 연동: FLUX Kontext(fal.ai 시작 프레임) → Veo 3.1 image-to-video 단일컷 8초.
 
-흐름: ① NanoBananaClient가 마스코트 시작 프레임 이미지를 생성해 로컬 저장 →
+흐름: ① FalKontextClient(FLUX.1 Kontext pro)가 마스코트 레퍼런스 이미지를 편집해
+시작 프레임 이미지를 생성해 로컬 저장 →
 ② VeoPromptBuilder가 대사를 작은따옴표로 인용한 프롬프트를 만들고 →
 ③ VeoClient가 image-to-video 작업을 제출·폴링한 뒤 **완료 즉시** 영상을 내려받아
 로컬에 저장한다(Veo 산출물은 48시간 후 삭제되므로 무음 유실 방지).
@@ -547,145 +548,8 @@ class VeoPromptBuilder:
         )
 
 
-class NanoBananaClient(_HttpClosingMixin):
-    """Gemini 이미지 생성(NanoBanana)으로 영상 시작 프레임을 만드는 클라이언트.
-
-    실 경로(non-dry_run)에서만 생성되며, `httpx`는 메서드 안에서 lazy import한다.
-    `POST /models/{model}:generateContent`에 텍스트 프롬프트(+선택적 레퍼런스
-    이미지 inline_data)를 보내고, 응답의 이미지 파트를 base64 디코드해
-    `settings.nutti_media_dir`에 저장한 뒤 로컬 경로를 반환한다.
-
-    모든 오류(HTTP·전송·JSON 파싱·이미지 파트 누락·디스크 쓰기)는
-    `VideoRenderError`로 전파한다. 테스트는 `http=`로 fake를 주입한다.
-    """
-
-    def __init__(self, settings: Settings, *, http=None, sleep=None):
-        self.settings = settings
-        self._http = http
-        # 재시도 backoff 대기(기본 time.sleep). VeoClient와 동일하게 주입 가능 —
-        # 테스트가 전역 monkeypatch 없이 가짜 시계를 넣어 결정적으로 검증한다.
-        self._sleep = sleep if sleep is not None else time.sleep
-
-    def _client(self):
-        """httpx 클라이언트를 지연 확보(주입 우선). dry_run에선 호출되지 않는다.
-
-        이미지 생성(generateContent)은 동기 응답이라 생성 시간만큼 응답이 늦는다 —
-        60초에서 ReadTimeout이 실측 2회 발생(2026-06-12)해 120초로 늘렸다.
-        """
-        if self._http is not None:
-            return self._http
-        import httpx
-
-        self._http = httpx.Client(timeout=120.0)
-        return self._http
-
-    # Gemini 이미지 API는 간헐적으로 이미지 파트 없이 응답한다(알려진 flakiness).
-    # 일시적 실패로 간주하고 최대 이 횟수만큼 재시도한다.
-    _MAX_FRAME_RETRIES = 2
-
-    def generate_frame(self, scene_prompt: str, *, reference_image_path: str | None = None) -> str:
-        """시작 프레임 이미지를 생성해 media_dir에 저장하고 로컬 경로를 반환한다.
-
-        `reference_image_path`가 있으면 마스코트 일관성을 위해 base64
-        inline_data 파트로 첨부한다(이미지 컨디셔닝).
-        Gemini가 이미지 파트 없이 응답하면 _MAX_FRAME_RETRIES 횟수만큼 재시도한다.
-        """
-        import base64
-
-        parts: list[dict] = [{"text": scene_prompt}]
-        if reference_image_path:
-            ref_bytes = _read_bytes(reference_image_path, "마스코트 레퍼런스 이미지")
-            parts.append(
-                {
-                    "inline_data": {
-                        "mime_type": _guess_image_mime(reference_image_path),
-                        "data": base64.b64encode(ref_bytes).decode("ascii"),
-                    }
-                }
-            )
-        body = {
-            "contents": [{"parts": parts}],
-            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-        }
-        url = f"{_GEMINI_BASE}/models/{self.settings.gemini_image_model}:generateContent"
-
-        last_exc: Exception | None = None
-        for attempt in range(1 + self._MAX_FRAME_RETRIES):
-            if attempt > 0:
-                wait = 2.0 * attempt
-                log.warning("nano_banana.frame.retry", attempt=attempt, wait=wait)
-                self._sleep(wait)
-            data = _send_json(
-                lambda: self._client().post(
-                    url, headers=_gemini_headers(self.settings), json=body
-                ),
-                "Gemini 프레임 생성",
-                sleep=self._sleep,
-                max_transient_retries=_MAX_TRANSIENT_RETRIES,
-            )
-            try:
-                image_bytes = self._extract_image_bytes(data)
-            except VideoRenderError as exc:
-                last_exc = exc
-                continue
-            out_path = Path(self.settings.nutti_media_dir) / f"frame_{uuid4().hex[:12]}.png"
-            _write_bytes(out_path, image_bytes, "Gemini 프레임 이미지")
-            log.info("nano_banana.frame.saved", path=str(out_path))
-            return str(out_path)
-
-        raise last_exc  # type: ignore[misc]
-
-    @staticmethod
-    def _extract_image_bytes(data: dict) -> bytes:
-        """generateContent 응답에서 첫 이미지 파트의 바이트를 방어적으로 추출한다.
-
-        `candidates[0].content.parts[i].inline_data.data`를 직접 인덱싱하지 않고
-        순회·isinstance 검사로 찾는다(실 API는 camelCase `inlineData`를 쓸 수
-        있으므로 둘 다 허용). 이미지 파트가 없으면 무음 결함 대신 명시적으로
-        실패하고, 본문 노출 없이 키 목록만 디버그 로그에 남긴다.
-        """
-        import base64
-        import binascii
-
-        candidates = data.get("candidates")
-        if isinstance(candidates, list):
-            for candidate in candidates:
-                if not isinstance(candidate, dict):
-                    continue
-                content = candidate.get("content")
-                parts = content.get("parts") if isinstance(content, dict) else None
-                if not isinstance(parts, list):
-                    continue
-                for part in parts:
-                    if not isinstance(part, dict):
-                        continue
-                    inline = part.get("inline_data") or part.get("inlineData")
-                    if not isinstance(inline, dict):
-                        continue
-                    encoded = inline.get("data")
-                    if not encoded:
-                        continue
-                    try:
-                        return base64.b64decode(encoded)
-                    except (binascii.Error, ValueError) as exc:
-                        raise VideoRenderError(
-                            f"Gemini 이미지 base64 디코드 실패: {type(exc).__name__}"
-                        ) from None
-        # finishReason이 있으면 더 명확한 오류 메시지 제공(SAFETY 필터 등 진단용).
-        finish_reason = None
-        if isinstance(candidates, list) and candidates:
-            first = candidates[0]
-            if isinstance(first, dict):
-                finish_reason = first.get("finishReason")
-        log.debug("nano_banana.missing_image", keys=list(data.keys()), finish_reason=finish_reason)
-        if finish_reason:
-            raise VideoRenderError(
-                f"Gemini 이미지 파트 없음 — finishReason={finish_reason} "
-                f"(응답 키: {list(data.keys())})"
-            )
-        raise VideoRenderError(
-            f"Gemini 응답에 이미지 파트가 없습니다 (응답 키: {list(data.keys())})"
-        )
+# NanoBananaClient(Gemini 이미지 생성)는 2026-06 PO 결정으로 FalKontextClient로 교체됨.
+# 프레임 클라이언트는 nutti/integrations/image_kontext.py의 FalKontextClient를 사용한다.
 
 
 class VeoClient(_HttpClosingMixin):
@@ -991,7 +855,7 @@ class VeoClient(_HttpClosingMixin):
 
 
 class VideoStudio:
-    """대본 → 시작 프레임(NanoBanana) → Veo 영상 생성을 담당하는 파사드(facade)."""
+    """대본 → 시작 프레임(프레임 클라이언트: Kontext) → Veo 영상 생성을 담당하는 파사드(facade)."""
 
     def __init__(
         self,
@@ -1034,11 +898,13 @@ class VideoStudio:
         """
         if self.settings.dry_run:
             return
-        # 시작 프레임은 백엔드 무관하게 NanoBanana(Gemini)로 만든다 → GEMINI_API_KEY 필수.
-        # kling 백엔드는 추가로 FAL_KEY가 필요하다(TTS 소스는 kling_tts로 분기 — 아래 참조).
+        # 시작 프레임은 백엔드 무관하게 FalKontextClient(fal.ai)로 만든다 → FAL_KEY 필수.
+        # kling 백엔드는 영상 클립도 fal.ai이므로 FAL_KEY 1개로 프레임+영상 모두 커버한다.
         if self.settings.video_backend == "kling":
-            if self._nano_client is None and not _usable_key(self.settings.gemini_api_key):
-                raise ValueError("GEMINI_API_KEY가 비어 있습니다 — kling 백엔드의 프레임에 필수입니다.")
+            if self._nano_client is None and not _usable_key(self.settings.fal_key):
+                raise ValueError(
+                    "FAL_KEY가 비어 있습니다 — kling 백엔드의 프레임(Kontext) 생성에 필수입니다."
+                )
             # TTS 소스 키 검증: kling_tts에 따라 필요한 키가 다르다.
             # · gemini(기본): TTS도 Gemini generateContent라 GEMINI_API_KEY 재사용.
             # · elevenlabs: ELEVENLABS_API_KEY 필수(타 호스트 유출 금지 키).
@@ -1062,23 +928,26 @@ class VideoStudio:
             if self._kling_client is None and not _usable_key(self.settings.fal_key):
                 raise ValueError("FAL_KEY가 비어 있습니다 — kling 백엔드(dry_run=False) 시 필수입니다.")
             # LipSync 후처리(kling_lipsync=true)도 fal.ai 큐를 쓰므로 FAL_KEY 요구는 위에서 충족된다.
-            # LipSync 클라이언트(kling_lipsync_client) 주입 여부와 무관하게 프레임용 GEMINI_API_KEY·
-            # FAL_KEY 요구는 유지된다(무음 클립 생성은 여전히 Kling=fal, 프레임은 Gemini).
             return
-        # veo_fal 백엔드: 시작 프레임(Gemini)과 영상 생성(fal.ai) 모두 키 필요.
+        # veo_fal 백엔드: 시작 프레임(Kontext=FAL_KEY)과 영상 생성(fal.ai=FAL_KEY) 모두 FAL_KEY.
+        # GEMINI_API_KEY 불요 — veo_fal은 FAL_KEY 하나로 프레임+영상 모두 처리한다.
         if self.settings.video_backend == "veo_fal":
-            if self._nano_client is None and not _usable_key(self.settings.gemini_api_key):
+            if self._nano_client is None and not _usable_key(self.settings.fal_key):
                 raise ValueError(
-                    "GEMINI_API_KEY가 비어 있습니다 — veo_fal 백엔드의 프레임(NanoBanana)에 필수입니다."
+                    "FAL_KEY가 비어 있습니다 — veo_fal 백엔드의 프레임(Kontext) 생성에 필수입니다."
                 )
             if self._veo_fal_client is None and not _usable_key(self.settings.fal_key):
                 raise ValueError(
                     "FAL_KEY가 비어 있습니다 — veo_fal 백엔드(dry_run=False) 시 필수입니다."
                 )
             return
-        needs_key = self._nano_client is None or self._veo_client is None
-        if needs_key and not _usable_key(self.settings.gemini_api_key):
-            raise ValueError("GEMINI_API_KEY가 비어 있습니다 — dry_run=False 시 필수입니다.")
+        # 기본 veo 백엔드: 프레임은 Kontext(FAL_KEY), 영상은 Gemini Veo(GEMINI_API_KEY).
+        if self._nano_client is None and not _usable_key(self.settings.fal_key):
+            raise ValueError(
+                "FAL_KEY가 비어 있습니다 — 시작 프레임(Kontext) 생성에 필수입니다."
+            )
+        if self._veo_client is None and not _usable_key(self.settings.gemini_api_key):
+            raise ValueError("GEMINI_API_KEY가 비어 있습니다 — veo 백엔드(dry_run=False) 시 필수입니다.")
 
     def produce(self, script: Script) -> VideoAsset:
         """시작 프레임 → 첫 클립 + extend 체이닝(veo) → VideoAsset 반환.
@@ -1309,17 +1178,21 @@ class VideoStudio:
         return str(out_path)
 
     def _generate_frame(self, script: Script, style: EpisodeStyle) -> str:
-        """NanoBanana로 시작 프레임을 생성한다(마스코트 레퍼런스 이미지 선택 첨부).
+        """프레임 클라이언트(Kontext)로 시작 프레임을 생성한다(마스코트 레퍼런스 이미지 첨부).
 
         `style`은 produce()에서 한 번 계산된 편별 스타일 — 비트 클립과 동일한
         의상·장소가 프레임에 들어가야 장면이 이어진다.
         주입된 클라이언트는 소유자가 닫고, 여기서 만든 것만 finally에서 닫는다
         (httpx 연결 풀 누수 방지). 주입분은 owned=None으로 둬 close하지 않는다.
+        nano_client / self._nano_client 이름은 테스트 더블(FakeNanoBananaClient) 호환을
+        위해 유지한다 — 덕타이핑으로 generate_frame 시그니처만 맞으면 동작한다.
         """
+        from nutti.integrations.image_kontext import FalKontextClient
+
         client = self._nano_client
         owned = None
         if client is None:
-            client = owned = NanoBananaClient(self.settings, sleep=self._sleep)
+            client = owned = FalKontextClient(self.settings, sleep=self._sleep)
         try:
             path = client.generate_frame(
                 self._frame_prompt(script, style),

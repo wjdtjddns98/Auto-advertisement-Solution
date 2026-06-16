@@ -452,16 +452,16 @@ def test_videostudio_kling_validate_config_missing_fal_key_raises():
 
 
 def test_videostudio_kling_validate_config_injected_tts_skips_gemini_key():
-    """tts_client만 주입해도 nano_client가 없으면 프레임용 GEMINI_API_KEY 검증이 먼저 발화한다.
+    """tts_client만 주입해도 nano_client가 없으면 프레임용 FAL_KEY 검증이 먼저 발화한다.
 
-    tts_client 주입은 TTS용 GEMINI_API_KEY 검사만 건너뛰게 한다 — 시작 프레임은
-    백엔드 무관하게 NanoBanana(Gemini)로 만들므로 nano_client 미주입 + 키 없음이면
-    GEMINI_API_KEY 검증이 먼저 막는다(검증 순서·메시지를 match로 고정).
+    시작 프레임이 NanoBanana(Gemini) → FalKontext(fal)로 바뀌어, 프레임 키 요건은 이제
+    FAL_KEY다. tts_client 주입은 TTS 키 검사만 건너뛰게 하지만, nano_client 미주입 +
+    FAL_KEY 없음이면 프레임용 FAL_KEY 검증이 먼저 막는다(검증 순서·메시지를 match로 고정).
     """
     settings = _live_settings(NUTTI_VIDEO_BACKEND="kling", GEMINI_API_KEY="", FAL_KEY="")
-    # tts_client만 주입(nano_client·kling_client 미주입) → 첫 GEMINI_API_KEY 검사가 발화.
+    # tts_client만 주입(nano_client·kling_client 미주입) → 첫 FAL_KEY(프레임) 검사가 발화.
     studio = VideoStudio(settings, tts_client=FakeTtsClient())
-    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+    with pytest.raises(ValueError, match="FAL_KEY"):
         studio.validate_config()
 
 

@@ -33,18 +33,18 @@ def _run_with_video(duration: float) -> PipelineRun:
 
 
 def test_veo_fast_cost_matches_unit_price():
-    """Veo Fast(=$0.10/초) + 프레임 $0.05 + 텍스트 추정의 합계가 맞아야 한다."""
+    """Veo Fast(=$0.10/초) + 프레임 $0.04(FLUX Kontext) + 텍스트 추정의 합계가 맞아야 한다."""
     settings = Settings(NUTTI_DRY_RUN=True, NUTTI_VIDEO_BACKEND="veo")
     cost = estimate_run_cost(_run_with_video(32.0), settings)
 
     labels = {item.label for item in cost.items}
-    assert "시작 프레임 (나노바나나)" in labels
+    assert "시작 프레임 (FLUX Kontext)" in labels
     assert "영상 생성 (Veo Fast)" in labels
 
     video_item = next(i for i in cost.items if i.label.startswith("영상 생성"))
     assert video_item.usd == 0.10 * 32.0  # 정확히 초당 단가 × 길이
-    # 합계 = 프레임(0.05) + 영상(3.20) + 텍스트 추정(작은 양수)
-    assert cost.total_usd > 0.05 + 3.20
+    # 합계 = 프레임(0.04) + 영상(3.20) + 텍스트 추정(작은 양수)
+    assert cost.total_usd > 0.04 + 3.20
     assert cost.dry_run is True
 
 
