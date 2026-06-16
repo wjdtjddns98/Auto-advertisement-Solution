@@ -395,7 +395,7 @@ def _veo_total_sec(n_beats: int) -> float:
 # 강아지를 지어낸다(실제 증상). 반드시 레퍼런스 이미지(assets/mascot.png,
 # NUTTI_MASCOT_IMAGE)의 실제 모습과 일치시킬 것 — 텍스트와 이미지가 어긋나면 둘을
 # 섞어 오히려 더 들쭉날쭉해진다. 현재 값은 assets/mascot.png(흰 비숑프리제, PO 제공
-# 페르소나.png) 기준의 "얌전하고 귀여운 puppy". ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
+# 마스코트.png 1254x1254) 기준의 "얌전하고 귀여운 puppy". ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
 _MASCOT_APPEARANCE = (
     "a real, photorealistic, live small white Bichon Frise puppy with a soft, fluffy, "
     "rounded pure-white powder-puff coat groomed into a round teddy-bear face, round dark "
