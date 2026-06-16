@@ -27,8 +27,9 @@ from nutti.storage.state_store import PipelineState
 
 log = get_logger(__name__)
 
-# 한국어 발화 기준 8초 ≈ 35~45자. 비트가 이보다 길면 Veo가 8초에 다 못 말할 수 있어 경고한다.
-_BEAT_CHARS_WARN = 45
+# 한국어 발화 기준 8초 ≈ 40~48자(이 정도로 채워야 비트 사이 빈 구간이 안 생긴다).
+# 50자보다 길면 8~10초 안에 다 못 말하고 잘릴 수 있어 경고한다.
+_BEAT_CHARS_WARN = 50
 
 
 def _beats_preview(script: Script) -> str:
