@@ -397,8 +397,10 @@ def _veo_total_sec(n_beats: int) -> float:
 # 섞어 오히려 더 들쭉날쭉해진다. 현재 값은 assets/mascot.png(솜털 크림색 새끼강아지)
 # 기준의 "얌전하고 귀여운 puppy". ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
 _MASCOT_APPEARANCE = (
-    "a small fluffy cream-and-white puppy with soft fur, round dark eyes, "
-    "a tiny black nose, and a gentle calm cute face"
+    "a real, photorealistic, live small fluffy cream-and-white Pomeranian-type puppy "
+    "with soft fur, round dark eyes, a tiny black nose, a gentle calm cute face, and a "
+    "normal four-legged small dog body — a real live animal, never a person in an animal "
+    "costume, never a mascot suit or fursuit, never a plush toy or stuffed animal"
 )
 # ==================== PO 수정 구역 끝 (마스코트 외형) ====================
 
@@ -447,10 +449,13 @@ class VeoPromptBuilder:
     #   임의로 박는 걸 막는 핵심 방어 — 함부로 빼지 말 것(_VEO_NEGATIVE_PROMPT와 이중 방어)
     # 모든 템플릿에 ASCII 작은따옴표(') 금지 — 대사 인용 구분자와 충돌(주입 방어 깨짐).
     # 한국어로 "이렇게 바꾸고 싶다"만 정해도 됨 — 영어 반영은 개발자에게 요청 권장.
+    # 주의: 브랜드명("Nutti")·치수("9:16") 같은 리터럴을 넣지 말 것 — Veo가 그 글자를
+    # 화면 자막으로 렌더한다(실측: "Nutti"·"9:16" 자막 박힘). "mascot"도 금지 — 인형탈
+    # 코스튬으로 해석된다(실측). 캐릭터는 항상 "진짜 실사 강아지"로 못박는다.
     _PERSONA = (
-        f"Nutti, {_MASCOT_APPEARANCE}, a calm and gentle puppy mascot behaving like a "
-        "friendly guest in a relaxed street interview, with soft, natural, subtle facial "
-        "expressions and no exaggerated or distorted faces"
+        f"{_MASCOT_APPEARANCE}, calm and gentle, behaving like a friendly guest in a "
+        "relaxed street interview, with soft, natural, subtle facial expressions and no "
+        "exaggerated or distorted faces"
     )
     _VOICE = (
         "Voice (must be EXACTLY the same voice in every clip of this series): a bright, "
@@ -458,15 +463,17 @@ class VeoPromptBuilder:
         "speaking at a lively natural pace."
     )
     _MIC = (
-        "A handheld interview microphone is pointed at the mascot from off-screen; "
+        "A handheld interview microphone is pointed at the puppy from off-screen; "
         "the person holding it stays completely out of frame."
     )
     _SPEAKING_OFF = "speaking in Korean to an off-screen interviewer"
     _SPEAKING_DIRECT = "speaking in Korean directly to the camera"
     _CAMERA = "Camera: locked-off tripod shot, no camera movement."
     _NEGATIVE = (
-        "Strictly no additional animals, no people. Absolutely no text, subtitles, "
-        "captions, letters, words, or writing anywhere in the frame."
+        "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
+        "costume, person in a costume, or plush toy. Strictly no additional animals, no "
+        "people. Absolutely no text, subtitles, captions, letters, numbers, words, logos, "
+        "brand names, watermarks, or UI overlays anywhere in the frame."
     )
     # ========================= PO 수정 구역 끝 (영상 연출) =========================
 
@@ -506,7 +513,7 @@ class VeoPromptBuilder:
         speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
         scene = ""
         if style is not None:
-            scene = f"The mascot wears {style.outfit}, {style.setting}. "
+            scene = f"The puppy wears {style.outfit}, {style.setting}. "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
         return (
             f"A photorealistic shot of {self._PERSONA}, {speaking}, "
@@ -515,7 +522,7 @@ class VeoPromptBuilder:
             f"{self._VOICE} "
             f"{self._CAMERA} "
             f"{_CINEMATIC_LOOK} "
-            "Format: vertical 9:16, single continuous 8-second shot. "
+            "Format: tall vertical portrait orientation, single continuous 8-second shot. "
             f"{self._NEGATIVE}"
         )
 
@@ -1219,13 +1226,16 @@ class VideoStudio:
         # 배경·의상은 위 로테이션 리스트(PO 수정 구역 — 편별 연출 로테이션)에서 고친다.
         # 마스코트 외형 자체는 NUTTI_MASCOT_IMAGE(레퍼런스 이미지)가 결정한다 — 여긴 구도/연출.
         # ASCII 작은따옴표(') 금지(주입 방어 검증과 충돌). 한국어로 원하는 그림만 정해도 됨.
+        # 리터럴 "9:16"·브랜드명은 화면 자막으로 렌더되므로 넣지 않는다(세로 비율은 Kontext
+        # aspect_ratio 파라미터가 담당). 캐릭터는 "진짜 실사 강아지"로 못박아 인형탈 방지.
         return (
-            "A photorealistic vertical 9:16 starting frame for a short-form video: "
-            f"the Nutti mascot, {_MASCOT_APPEARANCE}, wearing {style.outfit}, {style.setting}, "
+            "A photorealistic tall vertical portrait-orientation starting frame for a "
+            f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}, {style.setting}, "
             "looking at the camera with a calm, gentle, friendly face, like a guest in a "
-            "street interview. A handheld interview microphone is pointed at the mascot "
+            "street interview. A handheld interview microphone is pointed at the puppy "
             f"from off-screen; the person holding it is not visible. {_CINEMATIC_LOOK} "
-            f"Topic: {topic}. "
-            "No people, no additional animals, no on-screen text."
+            f"Scene context: {topic}. "
+            "Absolutely no text, letters, numbers, words, captions, logos, brand names, or "
+            "watermarks anywhere. No people, no humans in costume, no other animals."
         )
         # =================== PO 수정 구역 끝 (첫 장면 비주얼) ===================

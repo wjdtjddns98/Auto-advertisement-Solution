@@ -18,6 +18,11 @@ def _no_sleep(_seconds: float) -> None:
     return None
 
 
+# 정상 프레임 크기(FalKontextClient._MIN_FRAME_BYTES=50KB 이상)를 흉내내는 더미 바이트.
+# 가드가 검정/퇴화(작은) 프레임을 거부하므로, 정상 경로 테스트는 충분히 큰 콘텐츠를 쓴다.
+_BIG_IMG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 60_000
+
+
 def _kontext_settings(**overrides) -> Settings:
     base = {
         "NUTTI_DRY_RUN": False,
@@ -86,7 +91,7 @@ class FakeKontextHttp:
         self.download_response = (
             download_response
             if download_response is not None
-            else _Resp(content=b"FAKE-PNG-BYTES", headers={"content-type": "image/png"})
+            else _Resp(content=_BIG_IMG, headers={"content-type": "image/png"})
         )
         self.post_calls: list[tuple[str, dict | None]] = []
         self.post_headers: list[dict | None] = []
@@ -144,14 +149,14 @@ def test_generate_frame_success_returns_local_path(tmp_path):
         get_result_response=_Resp(
             json_data={"images": [{"url": "https://fal.media/files/frame.png"}]}
         ),
-        download_response=_Resp(content=b"PNG", headers={"content-type": "image/png"}),
+        download_response=_Resp(content=_BIG_IMG, headers={"content-type": "image/png"}),
     )
     from pathlib import Path
 
     path = _client(tmp_path, fake).generate_frame("강아지 프레임", reference_image_path=_frame_file(tmp_path))
     assert Path(path).parent == tmp_path
     assert Path(path).name.startswith("frame_") and Path(path).suffix == ".png"
-    assert Path(path).read_bytes() == b"PNG"
+    assert Path(path).read_bytes() == _BIG_IMG
 
 
 def test_reference_image_required(tmp_path):
@@ -320,9 +325,25 @@ def test_content_type_jpeg_saves_jpg(tmp_path):
     fake = FakeKontextHttp(
         get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
         get_result_response=_Resp(json_data={"images": [{"url": "https://fal.media/x"}]}),
-        download_response=_Resp(content=b"JPG", headers={"content-type": "image/jpeg"}),
+        download_response=_Resp(content=_BIG_IMG, headers={"content-type": "image/jpeg"}),
     )
     from pathlib import Path
 
     path = _client(tmp_path, fake).generate_frame("p", reference_image_path=_frame_file(tmp_path))
     assert Path(path).suffix == ".jpg"
+
+
+def test_degenerate_small_frame_retries_then_raises(tmp_path):
+    """검정/퇴화 프레임(파일이 비정상적으로 작음)은 거부·재시도하고, 계속 작으면 실패한다.
+
+    검정 시작 프레임이 영상 단계에서 캐릭터를 무에서 제각각 만드는 결함의 회귀 핀.
+    """
+    fake = FakeKontextHttp(
+        # 최초 + 재시도 2회 = 3회 시도 각각 COMPLETED.
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"}) for _ in range(3)],
+        # 매번 비정상적으로 작은 다운로드(검정 프레임 흉내).
+        download_response=_Resp(content=b"X" * 100, headers={"content-type": "image/png"}),
+    )
+    with pytest.raises(VideoRenderError, match="비정상"):
+        _client(tmp_path, fake).generate_frame("p", reference_image_path=_frame_file(tmp_path))
+    assert len(fake.post_calls) == 3  # 퇴화 프레임마다 재제출(재시도)했다

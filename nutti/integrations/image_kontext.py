@@ -107,6 +107,12 @@ class FalKontextClient(_HttpClosingMixin):
         self._http = httpx.Client(timeout=60.0)
         return self._http
 
+    # 정상 프레임은 수백 KB~수 MB. 검정/빈/실패 프레임은 ~10KB로 비정상적으로 작다(실측:
+    # 검정 10KB 프레임이 영상에 무에서 다른 캐릭터를 만들게 했다). 이 미만이면 퇴화로 보고
+    # 재시도한다 — 디코딩 라이브러리 없이 가능한 경량 검정/실패 휴리스틱.
+    _MIN_FRAME_BYTES = 51_200
+    _MAX_FRAME_RETRIES = 2
+
     def generate_frame(
         self, scene_prompt: str, *, reference_image_path: str | None = None
     ) -> str:
@@ -117,15 +123,36 @@ class FalKontextClient(_HttpClosingMixin):
 
         reference_image_path가 None이면 마스코트 일관성이 보장되지 않으므로
         VideoRenderError로 즉시 실패한다(NUTTI_MASCOT_IMAGE 미설정 안내).
+
+        Kontext가 간헐적으로 검정/빈 프레임(파일이 비정상적으로 작음)을 돌려주면 영상
+        단계에서 캐릭터가 무에서 제각각 생성되므로, 그런 프레임은 거부하고 재시도한다.
+        계속 비정상이면 영상(과금) 단계로 넘기지 않고 명확히 실패한다.
         """
         if reference_image_path is None:
             raise VideoRenderError(
                 "Kontext는 레퍼런스 이미지가 필요합니다 — "
                 "NUTTI_MASCOT_IMAGE 설정 필요"
             )
-        request_id = self._submit(scene_prompt, reference_image_path)
-        image_url = self._poll(request_id)
-        return self._download(image_url)
+        for attempt in range(self._MAX_FRAME_RETRIES + 1):
+            request_id = self._submit(scene_prompt, reference_image_path)
+            image_url = self._poll(request_id)
+            path = self._download(image_url)
+            try:
+                size = Path(path).stat().st_size
+            except OSError:
+                size = 0
+            if size >= self._MIN_FRAME_BYTES:
+                return path
+            # 검정/퇴화 프레임(파일 비정상적으로 작음) — 정리하고 재시도.
+            log.warning("kontext.frame.degenerate", bytes=size, attempt=attempt)
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise VideoRenderError(
+            "Kontext 프레임이 반복적으로 비정상(검정/빈 이미지로 의심)입니다 — "
+            "fal 응답·레퍼런스·프롬프트를 확인하세요"
+        )
 
     def _submit(self, scene_prompt: str, reference_image_path: str) -> str:
         """이미지 편집 작업을 제출하고 검증된 request_id를 반환한다.
