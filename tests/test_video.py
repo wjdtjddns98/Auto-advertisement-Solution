@@ -121,11 +121,10 @@ def test_prompt_builder_falls_back_to_topic_when_body_empty():
 
 
 def test_prompt_builder_includes_camera_directives():
-    """고정 카메라 지시(locked-off tripod·medium close-up·eye-level)가 포함된다."""
+    """고정 카메라 지시(locked-off tripod·무빙 없음)가 포함된다 — 흔들림/컷 전환 방지."""
     prompt = VeoPromptBuilder().build(_script())
     assert "locked-off" in prompt
-    assert "medium close-up" in prompt
-    assert "eye-level" in prompt
+    assert "no camera movement" in prompt
 
 
 def test_prompt_builder_excludes_forbidden_elements():
@@ -1926,6 +1925,32 @@ def test_build_beat_always_includes_persona_and_fixed_voice():
         assert "Nutti" in prompt
         assert "EXACTLY the same voice" in prompt
         assert "Korean voice" in prompt
+
+
+def test_persona_is_calm_and_pins_fixed_appearance():
+    """페르소나가 고정 외형을 박고 차분한 톤이어야 한다(괴랄·드리프트 방지).
+
+    외형을 텍스트로 고정(_MASCOT_APPEARANCE)해 편이 바뀌어도 같은 강아지로 보이게 하고,
+    과장 표정 단어(cheeky)를 빼 얼굴이 일그러지지 않게 한다.
+    """
+    persona = VeoPromptBuilder._PERSONA
+    assert video_module._MASCOT_APPEARANCE in persona       # 외형 고정 = 일관성
+    assert "calm" in persona                                # 차분한 톤
+    assert "cheeky" not in persona                          # 과장 리액션 제거(외형/태도)
+    assert "exaggerated comedic" not in persona
+    # 고정 외형이 실제 비트 프롬프트에 박혀 비트 간 드리프트를 막는지 확인.
+    assert video_module._MASCOT_APPEARANCE in VeoPromptBuilder().build_beat("대사")
+    # extend(다중 비트 2번째~)도 _PERSONA를 통해 같은 외형을 이어받아야 한다 —
+    # 다중 비트 영상의 대부분이 이 경로라 일관성 핀을 함께 건다.
+    assert video_module._MASCOT_APPEARANCE in VeoPromptBuilder().build_extend_beat("대사")
+
+
+def test_frame_prompt_pins_fixed_appearance():
+    """시작 프레임도 비트와 동일한 고정 외형을 박아 프레임-영상 외형이 일치한다."""
+    script = _script(topic="강아지 간식")
+    prompt = VideoStudio._frame_prompt(script, pick_episode_style(script.id))
+    assert video_module._MASCOT_APPEARANCE in prompt
+    assert "cheeky" not in prompt
 
 
 def test_build_beat_style_adds_outfit_and_setting():
