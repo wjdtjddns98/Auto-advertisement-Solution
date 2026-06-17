@@ -1010,6 +1010,37 @@ def test_youtube_privacy_status_rejects_invalid_value():
         _live_settings(NUTTI_YOUTUBE_PRIVACY_STATUS="privat")
 
 
+def test_youtube_upload_video_algo_metadata_in_snippet(tmp_path):
+    """알고리즘 최적화 메타데이터(카테고리·언어·madeForKids·태그 # 제거)가 업로드 body에 실린다."""
+    settings = _live_settings(
+        YOUTUBE_CLIENT_ID="cid",
+        YOUTUBE_CLIENT_SECRET="csecret",
+        YOUTUBE_REFRESH_TOKEN="rtoken",
+        NUTTI_YOUTUBE_CATEGORY_ID="15",
+        NUTTI_YOUTUBE_DEFAULT_LANGUAGE="ko",
+        NUTTI_YOUTUBE_MADE_FOR_KIDS=False,
+    )
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI}),
+            FakeHttpResponse(status_code=200, body={"id": "yt_algo"}),
+        ]
+    )
+    client = YouTubeClient(settings, http=http)
+    meta = Metadata(title="t", description="d", hashtags=["#강아지", "#Shorts", "  "])
+
+    client.upload_video(_local_video(tmp_path), meta, "access_tok")
+
+    body = http.post_calls[0][1]["json"]
+    snippet, status = body["snippet"], body["status"]
+    assert snippet["categoryId"] == "15"
+    assert snippet["defaultLanguage"] == "ko"
+    assert snippet["defaultAudioLanguage"] == "ko"
+    # tags는 '#' 제거 + 빈 항목 제외
+    assert snippet["tags"] == ["강아지", "Shorts"]
+    assert status["selfDeclaredMadeForKids"] is False
+
+
 def test_youtube_upload_video_missing_location_raises(tmp_path):
     """initiation 응답에 Location 헤더가 없으면 PublishError를 발생시키고 PUT을 시도하지 않는다."""
     http = FakeHttpClient([FakeHttpResponse(status_code=200, headers={})])
