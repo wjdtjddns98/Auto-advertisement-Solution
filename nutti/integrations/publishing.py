@@ -174,14 +174,26 @@ class YouTubeClient:
         """
         import httpx  # lazy import — dry_run 경로에서는 불필요
 
+        # tags는 검색 키워드이므로 해시태그 '#' 접두를 제거해 전달한다(빈 항목 제외).
+        # strip을 먼저 해 앞공백("  #강아지")이 있어도 '#'가 잔존하지 않게 한다.
+        def _clean_tag(t: str) -> str:
+            return t.strip().lstrip("#").strip()
+
+        tags = [_clean_tag(t) for t in meta.hashtags if _clean_tag(t)]
+        lang = self.settings.youtube_default_language
         body = {
             "snippet": {
                 "title": meta.title,
                 "description": meta.description,
-                "tags": meta.hashtags,
-                "categoryId": "22",  # People & Blogs
+                "tags": tags,
+                "categoryId": self.settings.youtube_category_id,
+                "defaultLanguage": lang,
+                "defaultAudioLanguage": lang,
             },
-            "status": {"privacyStatus": self.settings.youtube_privacy_status},
+            "status": {
+                "privacyStatus": self.settings.youtube_privacy_status,
+                "selfDeclaredMadeForKids": self.settings.youtube_made_for_kids,
+            },
         }
         # 1) Initiation POST — 세션 URI 발급
         try:

@@ -107,6 +107,20 @@ class Settings(BaseSettings):
     youtube_privacy_status: Literal["public", "unlisted", "private"] = Field(
         default="public", alias="NUTTI_YOUTUBE_PRIVACY_STATUS"
     )
+    # --- 알고리즘 노출 최적화 메타데이터 ---
+    # YouTube 카테고리 ID. 애견 콘텐츠는 15(Pets & Animals)가 추천 노출에 가장 적합.
+    # (참고: 22=People & Blogs, 24=Entertainment). 문자열 ID로 보낸다.
+    youtube_category_id: str = Field(default="15", alias="NUTTI_YOUTUBE_CATEGORY_ID")
+    # 영상 언어(제목/설명·음성). 한국 시청자 추천 타겟팅을 위해 ko 기본.
+    # defaultLanguage·defaultAudioLanguage 양쪽에 쓴다.
+    youtube_default_language: str = Field(
+        default="ko", alias="NUTTI_YOUTUBE_DEFAULT_LANGUAGE"
+    )
+    # 아동용 콘텐츠 선언(COPPA). 애견 콘텐츠는 보통 False — True면 댓글·알림·맞춤광고가
+    # 제한돼 알고리즘 노출에 불리하다. 업로드 시 status.selfDeclaredMadeForKids로 명시.
+    youtube_made_for_kids: bool = Field(
+        default=False, alias="NUTTI_YOUTUBE_MADE_FOR_KIDS"
+    )
     instagram_access_token: str = Field(default="", alias="INSTAGRAM_ACCESS_TOKEN")
     instagram_account_id: str = Field(default="", alias="INSTAGRAM_ACCOUNT_ID")
 

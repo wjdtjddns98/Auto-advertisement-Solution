@@ -161,6 +161,9 @@ def test_generate_metadata_dry_run():
     assert meta.title.strip()
     assert len(meta.hashtags) >= 1
     assert calculator_url in meta.description
+    # dry_run도 _build_metadata 경유 — 알고리즘 최적화 후처리(#Shorts·해시태그 블록)가 적용된다.
+    assert any(h.lower() == "#shorts" for h in meta.hashtags)
+    assert " ".join(meta.hashtags) in meta.description
 
 
 # --- 라이브 경로 헬퍼(dry_run이 건드리지 않음) 단위 테스트 ---
@@ -377,7 +380,44 @@ def test_generate_metadata_live_without_key_uses_claude_code(monkeypatch):
     assert meta.title == "강아지 사과 급여 꿀팁"
     assert "강아지 건강 간식 꿀팁" not in meta.title  # 정적 더미가 아님
     assert url in meta.description
-    assert meta.hashtags == ["#사과"]
+    # CLI가 준 해시태그를 보존하되, 알고리즘 최적화 후처리로 #Shorts가 보장된다.
+    assert "#사과" in meta.hashtags
+    assert any(h.lower() == "#shorts" for h in meta.hashtags)
+
+
+def test_build_metadata_algo_optimization():
+    """_build_metadata가 #Shorts를 보장하고 설명 끝에 클릭가능 해시태그 블록·링크를 넣는다."""
+    from nutti.integrations.ai_text import AITextClient
+
+    url = "https://example.com/calc/"
+    meta = AITextClient._build_metadata(
+        Script(topic="강아지 사과", body="b"),
+        url,
+        title="제목",
+        description="설명 본문",
+        hashtags=["#강아지간식"],
+    )
+    # #Shorts 보장(중복 추가 안 함)
+    assert sum(1 for h in meta.hashtags if h.lower() == "#shorts") == 1
+    assert "#강아지간식" in meta.hashtags
+    # 설명에 링크 + 클릭가능 해시태그 블록(#강아지간식 #Shorts)이 모두 포함
+    assert url in meta.description
+    assert "#강아지간식" in meta.description
+    assert "#Shorts" in meta.description
+
+
+def test_build_metadata_does_not_duplicate_shorts():
+    """이미 #shorts가 있으면(대소문자 무관) 중복 추가하지 않는다."""
+    from nutti.integrations.ai_text import AITextClient
+
+    meta = AITextClient._build_metadata(
+        Script(topic="t", body="b"),
+        "https://example.com/calc/",
+        title="제목",
+        description="본문",
+        hashtags=["#강아지", "#shorts"],
+    )
+    assert sum(1 for h in meta.hashtags if h.lower() == "#shorts") == 1
 
 
 def test_generate_metadata_live_without_key_parse_failure_falls_back(monkeypatch):
