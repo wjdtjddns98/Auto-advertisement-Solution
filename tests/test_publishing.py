@@ -1002,6 +1002,14 @@ def test_youtube_upload_video_privacy_status_defaults_public(tmp_path):
     assert post_kwargs["json"]["status"]["privacyStatus"] == "public"
 
 
+def test_youtube_privacy_status_rejects_invalid_value():
+    """오타 등 허용되지 않은 privacy 값은 Settings 생성 시점에 ValidationError로 잡는다."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _live_settings(NUTTI_YOUTUBE_PRIVACY_STATUS="privat")
+
+
 def test_youtube_upload_video_missing_location_raises(tmp_path):
     """initiation 응답에 Location 헤더가 없으면 PublishError를 발생시키고 PUT을 시도하지 않는다."""
     http = FakeHttpClient([FakeHttpResponse(status_code=200, headers={})])

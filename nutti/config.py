@@ -103,7 +103,8 @@ class Settings(BaseSettings):
     youtube_refresh_token: str = Field(default="", alias="YOUTUBE_REFRESH_TOKEN")
     # 업로드 공개 범위: "public"(운영 기본) | "unlisted" | "private".
     # 첫 라이브 검증은 "private"로 override해 채널에 공개 노출 없이 안전하게 확인한다.
-    youtube_privacy_status: str = Field(
+    # Literal로 제한해 오타("privat" 등)를 Settings 생성 시점에 잡는다(쿼터 낭비 방지).
+    youtube_privacy_status: Literal["public", "unlisted", "private"] = Field(
         default="public", alias="NUTTI_YOUTUBE_PRIVACY_STATUS"
     )
     instagram_access_token: str = Field(default="", alias="INSTAGRAM_ACCESS_TOKEN")
