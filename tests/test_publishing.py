@@ -789,23 +789,32 @@ def test_fetch_performance_unsupported_platform():
 
 
 class FakeHttpResponse:
-    """httpx.Response 최소 fake(상태 코드 + json())."""
+    """httpx.Response 최소 fake(상태 코드 + json() + headers + content)."""
 
-    def __init__(self, status_code: int = 200, body: dict | None = None):
+    def __init__(
+        self,
+        status_code: int = 200,
+        body: dict | None = None,
+        headers: dict | None = None,
+        content: bytes = b"",
+    ):
         self.status_code = status_code
         self._body = body or {}
+        self.headers = headers or {}
+        self.content = content
 
     def json(self) -> dict:
         return self._body
 
 
 class FakeHttpClient:
-    """httpx.Client 최소 fake. get/post 호출을 응답 큐로 처리한다."""
+    """httpx.Client 최소 fake. get/post/put 호출을 응답 큐로 처리한다."""
 
     def __init__(self, responses: list[FakeHttpResponse]):
         self._responses: deque[FakeHttpResponse] = deque(responses)
         self.get_calls: list[tuple] = []
         self.post_calls: list[tuple] = []
+        self.put_calls: list[tuple] = []
 
     def get(self, url: str, **kwargs) -> FakeHttpResponse:
         self.get_calls.append((url, kwargs))
@@ -813,6 +822,10 @@ class FakeHttpClient:
 
     def post(self, url: str, **kwargs) -> FakeHttpResponse:
         self.post_calls.append((url, kwargs))
+        return self._responses.popleft()
+
+    def put(self, url: str, **kwargs) -> FakeHttpResponse:
+        self.put_calls.append((url, kwargs))
         return self._responses.popleft()
 
 
@@ -901,6 +914,196 @@ def test_youtube_client_exchange_token_missing_access_token():
 
     with pytest.raises(PublishError, match="access_token"):
         client.exchange_token()
+
+
+# ---------------------------------------------------------------------------
+# YouTubeClient.upload_video — resumable upload(initiation POST → PUT 바이트) 단위 테스트
+# ---------------------------------------------------------------------------
+
+
+_SESSION_URI = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&upload_id=xyz"
+
+
+def _yt_live_settings() -> Settings:
+    return _live_settings(
+        YOUTUBE_CLIENT_ID="cid",
+        YOUTUBE_CLIENT_SECRET="csecret",
+        YOUTUBE_REFRESH_TOKEN="rtoken",
+    )
+
+
+def _local_video(tmp_path, data: bytes = b"FAKE_MP4_BYTES") -> VideoAsset:
+    """실제 로컬 파일을 가진 VideoAsset(업로드 바이트 소스)."""
+    p = tmp_path / "clip.mp4"
+    p.write_bytes(data)
+    return VideoAsset(script_id="abc123", video_path=str(p), final_url=str(p))
+
+
+def test_youtube_upload_video_resumable_success(tmp_path):
+    """initiation POST(Location 헤더) → 로컬 파일 PUT → 응답 id를 video_id로 반환한다."""
+    data = b"HELLO_VIDEO_BYTES"
+    video = _local_video(tmp_path, data)
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI}),
+            FakeHttpResponse(status_code=200, body={"id": "yt_real_id"}),
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    video_id = client.upload_video(video, _meta(), "access_tok")
+
+    assert video_id == "yt_real_id"
+    # initiation은 POST 1회, 바이트 전송은 PUT 1회
+    assert len(http.post_calls) == 1
+    assert len(http.put_calls) == 1
+    # PUT은 세션 URI로, 실제 바이트를 content로 보냈는지 확인
+    put_url, put_kwargs = http.put_calls[0]
+    assert put_url == _SESSION_URI
+    assert put_kwargs["content"] == data
+    assert put_kwargs["headers"]["Content-Length"] == str(len(data))
+
+
+def test_youtube_upload_video_missing_location_raises(tmp_path):
+    """initiation 응답에 Location 헤더가 없으면 PublishError를 발생시키고 PUT을 시도하지 않는다."""
+    http = FakeHttpClient([FakeHttpResponse(status_code=200, headers={})])
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    with pytest.raises(PublishError, match="Location"):
+        client.upload_video(_local_video(tmp_path), _meta(), "access_tok")
+
+    assert len(http.put_calls) == 0
+
+
+def test_youtube_upload_video_put_http_error_propagates(tmp_path):
+    """PUT 단계에서 HTTP 4xx/5xx면 PublishError(상태 코드)를 발생시킨다."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI}),
+            FakeHttpResponse(status_code=403, body={"error": "forbidden"}),
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    with pytest.raises(PublishError, match="403"):
+        client.upload_video(_local_video(tmp_path), _meta(), "access_tok")
+
+
+def test_youtube_upload_video_missing_id_raises(tmp_path):
+    """PUT 응답에 id가 없으면 PublishError를 발생시킨다."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI}),
+            FakeHttpResponse(status_code=200, body={"kind": "youtube#video"}),
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    with pytest.raises(PublishError, match="id"):
+        client.upload_video(_local_video(tmp_path), _meta(), "access_tok")
+
+
+def test_youtube_upload_video_file_not_found_raises(tmp_path):
+    """업로드할 로컬 영상 파일이 없으면 PublishError를 발생시키되 전체 경로는 노출하지 않는다."""
+    missing = tmp_path / "secret_dir" / "nope.mp4"
+    video = VideoAsset(script_id="abc123", video_path=str(missing), final_url=str(missing))
+    http = FakeHttpClient([FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI})])
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    with pytest.raises(PublishError) as exc_info:
+        client.upload_video(video, _meta(), "access_tok")
+
+    msg = str(exc_info.value)
+    assert "nope.mp4" in msg  # 파일명은 노출
+    assert "secret_dir" not in msg  # 전체 경로는 가림
+    # 파일이 없으면 PUT 시도하지 않음
+    assert len(http.put_calls) == 0
+
+
+def test_youtube_upload_video_remote_url_downloads_then_puts():
+    """video_path가 비고 final_url이 원격 URL이면 GET 다운로드 후 그 바이트를 PUT한다."""
+    remote_bytes = b"REMOTE_DOWNLOADED_BYTES"
+    video = VideoAsset(script_id="abc123", final_url="https://cdn.example.com/clip.mp4")
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI}),  # initiation POST
+            FakeHttpResponse(status_code=200, content=remote_bytes),  # GET 다운로드
+            FakeHttpResponse(status_code=200, body={"id": "yt_remote_id"}),  # PUT
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    video_id = client.upload_video(video, _meta(), "access_tok")
+
+    assert video_id == "yt_remote_id"
+    assert len(http.get_calls) == 1  # 원격 다운로드 1회
+    put_url, put_kwargs = http.put_calls[0]
+    assert put_kwargs["content"] == remote_bytes
+
+
+def test_youtube_upload_video_no_source_raises():
+    """video_path·final_url이 모두 비면 업로드 위치 없음 PublishError를 발생시킨다."""
+    video = VideoAsset(script_id="abc123")
+    http = FakeHttpClient([FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI})])
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    with pytest.raises(PublishError, match="영상 위치"):
+        client.upload_video(video, _meta(), "access_tok")
+
+    # 바이트 확보는 initiation POST '이후'에 일어난다 — 순서 의존을 핀(M-2 회귀 방지).
+    assert len(http.post_calls) == 1
+    assert len(http.put_calls) == 0
+
+
+def test_youtube_upload_video_put_308_resume_incomplete_raises(tmp_path):
+    """PUT이 308 Resume Incomplete를 반환하면 미완료 오류로 분리한다(id 누락으로 오분류 금지)."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI}),
+            FakeHttpResponse(status_code=308, headers={"Range": "bytes=0-99"}),
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    with pytest.raises(PublishError, match="308"):
+        client.upload_video(_local_video(tmp_path), _meta(), "access_tok")
+
+
+def test_youtube_upload_video_lowercase_location_header(tmp_path):
+    """initiation 응답의 Location 헤더가 소문자여도 세션 URI를 인식한다(케이스 무관 조회 핀)."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, headers={"location": _SESSION_URI}),
+            FakeHttpResponse(status_code=200, body={"id": "yt_lower_id"}),
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    video_id = client.upload_video(_local_video(tmp_path), _meta(), "access_tok")
+
+    assert video_id == "yt_lower_id"
+    assert http.put_calls[0][0] == _SESSION_URI
+
+
+def test_youtube_upload_video_put_transport_error_does_not_leak_token(tmp_path):
+    """PUT 전송 오류 시 세션 URI/access_token이 PublishError에 노출되지 않는다."""
+    secret = "PUT_SESSION_SECRET"
+    fake_request = httpx.Request("PUT", f"{_SESSION_URI}&t={secret}")
+
+    class _PutRaisingClient:
+        def post(self, url, **kwargs):
+            return FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI})
+
+        def put(self, url, **kwargs):
+            raise httpx.TransportError("연결 오류", request=fake_request)
+
+    client = YouTubeClient(_yt_live_settings(), http=_PutRaisingClient())
+
+    with pytest.raises(PublishError) as exc_info:
+        client.upload_video(_local_video(tmp_path), _meta(), secret)
+
+    err = str(exc_info.value)
+    assert secret not in err
 
 
 # ---------------------------------------------------------------------------
