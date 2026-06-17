@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nutti.config import Settings
@@ -158,21 +159,20 @@ class YouTubeClient:
         return str(access_token)
 
     def upload_video(self, video: VideoAsset, meta: Metadata, access_token: str) -> str:
-        """YouTube Data API v3 videos.insert로 영상을 업로드하고 video_id를 반환한다.
+        """YouTube Data API v3 videos.insert(resumable)로 영상을 업로드하고 video_id를 반환한다.
 
-        TODO(live): 실제 YouTube Data API v3 resumable upload는 두 단계다.
+        resumable upload 2단계:
         (1) Initiation POST — 메타데이터 JSON으로 세션 URI를 발급받는다.
             POST https://www.googleapis.com/upload/youtube/v3/videos
               ?uploadType=resumable&part=snippet,status
             Location 헤더에 세션 URI 반환.
-        (2) Upload PUT — 세션 URI에 실제 바이트를 전송한다.
-            VideoAsset.final_url이 원격 URL이면 먼저 httpx.stream("GET", url)으로
-            다운로드해 임시 파일에 저장 후 PUT 바이트로 전송해야 한다.
-            실제 바이트 스트리밍은 TODO(live) — 현재는 Initiation POST까지만 수행한다.
-        최종 응답(HTTP 201) 최상위 `id` 필드가 video_id다.
+        (2) Upload PUT — 세션 URI에 실제 영상 바이트를 단일 청크로 전송한다.
+            바이트 소스는 `_load_video_bytes`가 결정한다(로컬 파일 또는 원격 URL).
+            쇼츠/릴스는 용량이 작아 단일 PUT으로 충분하다(청크 분할 불요).
+        최종 응답(HTTP 200/201) 최상위 `id` 필드가 video_id다.
         """
-        # TODO(live): video_url이 원격 URL이면 다운로드→임시파일 저장 필요
-        # TODO(live): 실제 바이트 스트리밍(PUT to session URI) 미구현
+        import httpx  # lazy import — dry_run 경로에서는 불필요
+
         body = {
             "snippet": {
                 "title": meta.title,
@@ -180,34 +180,87 @@ class YouTubeClient:
                 "tags": meta.hashtags,
                 "categoryId": "22",  # People & Blogs
             },
-            "status": {"privacyStatus": "public"},
+            "status": {"privacyStatus": self.settings.youtube_privacy_status},
         }
-        # Initiation POST — 세션 URI 발급
-        resp = self.http.post(
-            "https://www.googleapis.com/upload/youtube/v3/videos",
-            params={"uploadType": "resumable", "part": "snippet,status"},
-            json=body,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json; charset=UTF-8",
-                "X-Upload-Content-Type": "video/*",
-            },
-        )
+        # 1) Initiation POST — 세션 URI 발급
+        try:
+            resp = self.http.post(
+                "https://www.googleapis.com/upload/youtube/v3/videos",
+                params={"uploadType": "resumable", "part": "snippet,status"},
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "X-Upload-Content-Type": "video/*",
+                },
+            )
+        except (httpx.TransportError, httpx.TooManyRedirects):
+            # 전송 계층 오류 — Authorization 헤더(access_token)를 노출하지 않는다.
+            raise PublishError("YouTube 업로드 initiation 전송 오류") from None
         self._raise_for_publish(resp, "YouTube 업로드 initiation")
         # 세션 URI는 Location 헤더에 반환됨
         location = resp.headers.get("Location") or resp.headers.get("location", "")
         if not location:
-            raise PublishError(
-                "YouTube 업로드 initiation 응답에 Location 헤더가 없습니다 "
-                "— TODO(live): 실제 바이트 스트리밍 구현 필요"
+            raise PublishError("YouTube 업로드 initiation 응답에 Location 헤더가 없습니다")
+
+        # 2) 영상 바이트 확보 후 세션 URI로 단일 PUT 전송
+        data = self._load_video_bytes(video)
+        try:
+            put_resp = self.http.put(
+                location,
+                content=data,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "video/*",
+                    "Content-Length": str(len(data)),
+                },
             )
-        # TODO(live): location으로 PUT 바이트 스트리밍 → 최종 video_id 추출
-        # 현재는 세션 URI에서 upload_id를 추출해 video_id 대용으로 반환
-        # 실제 완료 응답의 video_id는 최상위 "id" 필드: response["id"]
-        raise PublishError(
-            "YouTube 실제 바이트 업로드(PUT)는 TODO(live) — "
-            "fake 주입 테스트는 이 메서드를 완전히 대체해 검증한다."
-        )
+        except (httpx.TransportError, httpx.TooManyRedirects):
+            # 전송 계층 오류 — 세션 URI(업로드 토큰 포함 가능)를 노출하지 않는다.
+            raise PublishError("YouTube 영상 업로드(PUT) 전송 오류") from None
+        # 308 Resume Incomplete: 서버가 바이트를 전부 받지 못한 상태(부분 업로드).
+        # 단일 청크 PUT만 지원하므로 재개 로직이 없다 → 명확한 미완료 오류로 분리.
+        # (2xx 미만이라 _raise_for_publish는 308을 통과시켜 id 누락 오류로 오분류된다.)
+        if getattr(put_resp, "status_code", None) == 308:
+            raise PublishError("YouTube 업로드 미완료 — 308 Resume Incomplete (단일 PUT 재개 미지원)")
+        self._raise_for_publish(put_resp, "YouTube 영상 업로드")
+        payload = put_resp.json()
+        video_id = payload.get("id")
+        if not video_id:
+            raise PublishError(
+                f"YouTube 업로드 응답에 id가 없습니다 (응답 키: {list(payload.keys())})"
+            )
+        return str(video_id)
+
+    def _load_video_bytes(self, video: VideoAsset) -> bytes:
+        """업로드할 영상 바이트를 확보한다.
+
+        소스 우선순위: `video_path`(FalVeoClient가 다운로드한 로컬 경로) → `final_url`.
+        - 로컬 파일 경로면 그대로 읽는다(현재 파이프라인 기본 — final_url=video_path).
+        - http(s) URL이면 다운로드한다(원격 산출물 대비).
+        에러 메시지에는 파일명만 노출하고 전체 경로/URL은 가린다(redaction).
+        """
+        import httpx  # lazy import — dry_run 경로에서는 불필요
+
+        source = video.video_path or video.final_url
+        if not source:
+            raise PublishError(
+                "업로드할 영상 위치가 없습니다 (video_path·final_url 모두 비어 있음)"
+            )
+        if source.startswith(("http://", "https://")):
+            # 공개 URL 전용 경로 — Authorization 헤더 없이 GET 한다(현재 파이프라인 미도달:
+            # final_url=video_path 로컬 경로). 인증 필요 URL(만료 presigned 등)을 쓰려면
+            # 인증 전략을 별도로 정해야 한다.
+            try:
+                resp = self.http.get(source)
+            except (httpx.TransportError, httpx.TooManyRedirects):
+                raise PublishError("YouTube 업로드용 영상 다운로드 전송 오류") from None
+            self._raise_for_publish(resp, "YouTube 업로드용 영상 다운로드")
+            return resp.content
+        path = Path(source)
+        if not path.is_file():
+            raise PublishError(f"업로드할 영상 파일을 찾을 수 없습니다: {path.name}")
+        return path.read_bytes()
 
     def fetch_analytics(self, external_id: str) -> dict:
         """YouTube Analytics API로 영상 성과 지표를 조회한다.
