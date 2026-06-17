@@ -1153,6 +1153,125 @@ def test_youtube_upload_video_put_transport_error_does_not_leak_token(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# YouTubeClient.fetch_analytics — Analytics API v2 실연동 단위 테스트
+# ---------------------------------------------------------------------------
+
+
+def _analytics_report(rows: list[list] | None) -> FakeHttpResponse:
+    """Analytics API v2 reports 응답(columnHeaders + rows) fake."""
+    return FakeHttpResponse(
+        status_code=200,
+        body={
+            "columnHeaders": [
+                {"name": "views"},
+                {"name": "likes"},
+                {"name": "comments"},
+                {"name": "averageViewDuration"},
+            ],
+            "rows": rows,
+        },
+    )
+
+
+def test_youtube_fetch_analytics_parses_report():
+    """exchange_token → reports 조회 → columnHeaders 순서로 메트릭을 매핑한다."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, body={"access_token": "tok"}),  # exchange_token
+            _analytics_report([[999, 42, 7, 35.5]]),  # reports
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    result = client.fetch_analytics("video_123")
+
+    assert result == {"views": 999, "likes": 42, "comments": 7, "averageViewDuration": 35.5}
+    # reports 요청에 video 필터와 Bearer 토큰이 실렸는지 확인
+    get_url, get_kwargs = http.get_calls[0]
+    assert "youtubeanalytics.googleapis.com" in get_url
+    assert get_kwargs["params"]["filters"] == "video==video_123"
+    assert get_kwargs["headers"]["Authorization"] == "Bearer tok"
+
+
+def test_youtube_fetch_analytics_no_rows_returns_empty():
+    """rows가 없으면(업로드 직후 등) 빈 dict를 반환한다(상위에서 0 정규화)."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, body={"access_token": "tok"}),
+            _analytics_report(None),  # rows 없음
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    assert client.fetch_analytics("video_new") == {}
+
+
+def test_youtube_fetch_analytics_http_error_propagates():
+    """reports 단계에서 HTTP 4xx/5xx면 PublishError(상태 코드)를 발생시킨다."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, body={"access_token": "tok"}),
+            FakeHttpResponse(status_code=403, body={"error": "forbidden"}),
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    with pytest.raises(PublishError, match="403"):
+        client.fetch_analytics("video_403")
+
+
+def test_youtube_fetch_analytics_transport_error_does_not_leak_token():
+    """reports 전송 오류 시 access_token이 PublishError에 노출되지 않는다.
+
+    실제 구현은 access_token을 Authorization 헤더로 보내므로, TransportError의
+    request.headers에 토큰이 박힌 상황을 시뮬레이션한다. `from None`으로 원본 예외
+    체인을 끊는지(__cause__ is None)까지 단언해 redaction revert를 검출한다.
+    """
+    secret = "ANALYTICS_SECRET_TOKEN"
+    fake_request = httpx.Request(
+        "GET",
+        "https://youtubeanalytics.googleapis.com/v2/reports",
+        headers={"Authorization": f"Bearer {secret}"},
+    )
+
+    class _GetRaisingClient:
+        def post(self, url, **kwargs):
+            return FakeHttpResponse(status_code=200, body={"access_token": secret})
+
+        def get(self, url, **kwargs):
+            raise httpx.TransportError("연결 오류", request=fake_request)
+
+    client = YouTubeClient(_yt_live_settings(), http=_GetRaisingClient())
+
+    with pytest.raises(PublishError) as exc_info:
+        client.fetch_analytics("video_x")
+
+    assert secret not in str(exc_info.value)
+    # from None 적용 확인 — 제거하면 __cause__에 토큰 보유 TransportError가 붙어 실패한다.
+    assert exc_info.value.__cause__ is None
+
+
+def test_youtube_fetch_analytics_malformed_columns_returns_empty():
+    """columnHeaders 개수가 rows 값 개수와 불일치하면(부분 응답) 빈 dict를 반환한다."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, body={"access_token": "tok"}),
+            FakeHttpResponse(
+                status_code=200,
+                body={
+                    # 헤더 2개인데 값은 4개 → zip이 조용히 자르는 상황
+                    "columnHeaders": [{"name": "views"}, {"name": "likes"}],
+                    "rows": [[10, 5, 2, 30.0]],
+                },
+            ),
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    assert client.fetch_analytics("video_partial") == {}
+
+
+# ---------------------------------------------------------------------------
 # 항목 12: Instagram PUBLISHED 상태 분기 / permalink-fallback URL / no-client fallback
 # ---------------------------------------------------------------------------
 

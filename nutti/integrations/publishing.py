@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -263,18 +264,57 @@ class YouTubeClient:
         return path.read_bytes()
 
     def fetch_analytics(self, external_id: str) -> dict:
-        """YouTube Analytics API로 영상 성과 지표를 조회한다.
+        """YouTube Analytics API v2로 영상 성과 지표를 조회한다.
 
-        TODO(live): YouTube Analytics API v2 엔드포인트 확정 필요.
-        - GET https://youtubeanalytics.googleapis.com/v2/reports
-          ?ids=channel==MINE&startDate=...&endDate=...
+        GET https://youtubeanalytics.googleapis.com/v2/reports
+          ?ids=channel==MINE&startDate=2005-02-14&endDate=오늘
           &metrics=views,likes,comments,averageViewDuration
           &filters=video=={external_id}
-        현재는 NotImplementedError 없이 빈 dict를 반환(fetch_performance에서 0으로 정규화됨).
+        응답: {"columnHeaders":[{"name":"views"},...], "rows":[[views,likes,comments,dur]]}
+        Analytics는 OAuth 토큰을 직접 요구하므로 내부에서 exchange_token으로 교환한다
+        (refresh token scope에 yt-analytics.readonly 필요).
+        데이터가 없으면(업로드 직후·지표 미집계 등) rows가 비어 빈 dict를 반환하고
+        상위 _fetch_youtube_performance가 0으로 정규화한다.
         """
-        # TODO(live): 실제 YouTube Analytics API v2 호출 구현 필요
-        log.warning("youtube.fetch_analytics.not_implemented", video_id=external_id)
-        return {}
+        import httpx  # lazy import — dry_run 경로에서는 불필요
+
+        access_token = self.exchange_token()
+        metrics = ["views", "likes", "comments", "averageViewDuration"]
+        try:
+            resp = self.http.get(
+                "https://youtubeanalytics.googleapis.com/v2/reports",
+                params={
+                    "ids": "channel==MINE",
+                    "startDate": "2005-02-14",  # YouTube 출시일 — 영상 전체 누적 집계
+                    "endDate": date.today().isoformat(),
+                    "metrics": ",".join(metrics),
+                    "filters": f"video=={external_id}",
+                },
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+        except (httpx.TransportError, httpx.TooManyRedirects):
+            # 전송 계층 오류 — Authorization 헤더(access_token)를 노출하지 않는다.
+            raise PublishError("YouTube Analytics 조회 전송 오류") from None
+        self._raise_for_publish(resp, "YouTube Analytics 조회")
+        data = resp.json()
+        rows = data.get("rows") or []
+        if not rows:
+            log.info("youtube.analytics.no_data", video_id=external_id)
+            return {}
+        # columnHeaders 순서로 메트릭→값을 매핑(API가 메트릭 순서를 바꿔도 안전).
+        headers = [c.get("name", "") for c in data.get("columnHeaders", [])]
+        row = rows[0]
+        # columnHeaders 누락·개수 불일치(부분 응답)는 zip이 조용히 잘라 지표를 누락시킨다.
+        # 방어적으로 빈 dict 반환 → 상위에서 0 정규화(잘못된 부분 지표 저장 방지).
+        if not headers or len(headers) != len(row):
+            log.warning(
+                "youtube.analytics.malformed",
+                video_id=external_id,
+                n_headers=len(headers),
+                n_values=len(row),
+            )
+            return {}
+        return dict(zip(headers, row))
 
 
 # ---------------------------------------------------------------------------
