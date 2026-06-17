@@ -1027,7 +1027,8 @@ def test_youtube_upload_video_algo_metadata_in_snippet(tmp_path):
         ]
     )
     client = YouTubeClient(settings, http=http)
-    meta = Metadata(title="t", description="d", hashtags=["#강아지", "#Shorts", "  "])
+    # "  #반려견"=앞공백+해시(둘 다 제거돼야), "  "=빈항목(제외돼야)
+    meta = Metadata(title="t", description="d", hashtags=["#강아지", "  #반려견", "#Shorts", "  "])
 
     client.upload_video(_local_video(tmp_path), meta, "access_tok")
 
@@ -1036,8 +1037,8 @@ def test_youtube_upload_video_algo_metadata_in_snippet(tmp_path):
     assert snippet["categoryId"] == "15"
     assert snippet["defaultLanguage"] == "ko"
     assert snippet["defaultAudioLanguage"] == "ko"
-    # tags는 '#' 제거 + 빈 항목 제외
-    assert snippet["tags"] == ["강아지", "Shorts"]
+    # tags는 '#'(앞공백 포함) 제거 + 빈 항목 제외
+    assert snippet["tags"] == ["강아지", "반려견", "Shorts"]
     assert status["selfDeclaredMadeForKids"] is False
 
 

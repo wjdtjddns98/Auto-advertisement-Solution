@@ -161,6 +161,9 @@ def test_generate_metadata_dry_run():
     assert meta.title.strip()
     assert len(meta.hashtags) >= 1
     assert calculator_url in meta.description
+    # dry_run도 _build_metadata 경유 — 알고리즘 최적화 후처리(#Shorts·해시태그 블록)가 적용된다.
+    assert any(h.lower() == "#shorts" for h in meta.hashtags)
+    assert " ".join(meta.hashtags) in meta.description
 
 
 # --- 라이브 경로 헬퍼(dry_run이 건드리지 않음) 단위 테스트 ---
