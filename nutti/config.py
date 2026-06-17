@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     youtube_client_id: str = Field(default="", alias="YOUTUBE_CLIENT_ID")
     youtube_client_secret: str = Field(default="", alias="YOUTUBE_CLIENT_SECRET")
     youtube_refresh_token: str = Field(default="", alias="YOUTUBE_REFRESH_TOKEN")
+    # 업로드 공개 범위: "public"(운영 기본) | "unlisted" | "private".
+    # 첫 라이브 검증은 "private"로 override해 채널에 공개 노출 없이 안전하게 확인한다.
+    youtube_privacy_status: str = Field(
+        default="public", alias="NUTTI_YOUTUBE_PRIVACY_STATUS"
+    )
     instagram_access_token: str = Field(default="", alias="INSTAGRAM_ACCESS_TOKEN")
     instagram_account_id: str = Field(default="", alias="INSTAGRAM_ACCOUNT_ID")
 

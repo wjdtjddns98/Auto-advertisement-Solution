@@ -180,7 +180,7 @@ class YouTubeClient:
                 "tags": meta.hashtags,
                 "categoryId": "22",  # People & Blogs
             },
-            "status": {"privacyStatus": "public"},
+            "status": {"privacyStatus": self.settings.youtube_privacy_status},
         }
         # 1) Initiation POST — 세션 URI 발급
         try:

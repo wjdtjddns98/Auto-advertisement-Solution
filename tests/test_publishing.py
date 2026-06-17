@@ -964,6 +964,44 @@ def test_youtube_upload_video_resumable_success(tmp_path):
     assert put_kwargs["headers"]["Content-Length"] == str(len(data))
 
 
+def test_youtube_upload_video_privacy_status_from_settings(tmp_path):
+    """initiation POST의 privacyStatus가 설정값을 따른다(검증용 private override 핀)."""
+    settings = _live_settings(
+        YOUTUBE_CLIENT_ID="cid",
+        YOUTUBE_CLIENT_SECRET="csecret",
+        YOUTUBE_REFRESH_TOKEN="rtoken",
+        NUTTI_YOUTUBE_PRIVACY_STATUS="private",
+    )
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI}),
+            FakeHttpResponse(status_code=200, body={"id": "yt_priv"}),
+        ]
+    )
+    client = YouTubeClient(settings, http=http)
+
+    client.upload_video(_local_video(tmp_path), _meta(), "access_tok")
+
+    _, post_kwargs = http.post_calls[0]
+    assert post_kwargs["json"]["status"]["privacyStatus"] == "private"
+
+
+def test_youtube_upload_video_privacy_status_defaults_public(tmp_path):
+    """설정이 없으면 운영 기본값 public을 사용한다."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, headers={"Location": _SESSION_URI}),
+            FakeHttpResponse(status_code=200, body={"id": "yt_pub"}),
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    client.upload_video(_local_video(tmp_path), _meta(), "access_tok")
+
+    _, post_kwargs = http.post_calls[0]
+    assert post_kwargs["json"]["status"]["privacyStatus"] == "public"
+
+
 def test_youtube_upload_video_missing_location_raises(tmp_path):
     """initiation 응답에 Location 헤더가 없으면 PublishError를 발생시키고 PUT을 시도하지 않는다."""
     http = FakeHttpClient([FakeHttpResponse(status_code=200, headers={})])
