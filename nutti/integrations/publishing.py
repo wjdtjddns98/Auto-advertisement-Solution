@@ -569,8 +569,17 @@ def _validate_fal_upload_url(url: str) -> None:
     except ValueError:
         ip = None
     if ip is not None:
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            raise PublishError("fal 업로드: 사설/loopback IP 불허")
+        # not is_global이 CGNAT(100.64.0.0/10, RFC6598)·비공개 대역을 한 번에 덮지만,
+        # 명시 체크를 함께 남겨 의도를 드러낸다. image_kontext._validate_upload_url도
+        # 동일 강화 대상(레포 전역 통일 권장 — 현재는 CGNAT 미차단 갭 존재).
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or not ip.is_global
+        ):
+            raise PublishError("fal 업로드: 사설/loopback/비공개 IP 불허")
         return
     # 도메인명이면 내부망 suffix를 차단한다(metadata.google.internal, *.internal/.local 등).
     if host == "localhost" or any(

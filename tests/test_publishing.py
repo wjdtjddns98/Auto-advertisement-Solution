@@ -1948,3 +1948,53 @@ def test_fal_uploader_initiate_transport_error_does_not_leak_key():
 
     assert secret not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
+
+
+def test_fal_uploader_put_transport_error_does_not_leak_presigned_url():
+    """presigned PUT 전송 오류 시 upload_url(서명 포함)이 PublishError에 노출되지 않는다.
+
+    initiate는 정상 응답하고 그 다음 PUT에서 TransportError가 발생하는 경로를 핀한다
+    (initiate만 커버하는 테스트로는 PUT 단계 from None 제거를 못 잡는다)."""
+    sig_secret = "PRESIGNED_SIGNATURE_SECRET"
+    presigned = f"https://storage.fal.media/upload/out.mp4?sig={sig_secret}"
+    settings = _fal_live_settings()
+    fake_request = httpx.Request("PUT", presigned)
+
+    class _PutRaisingClient:
+        def post(self, url, **kwargs):
+            return FakeHttpResponse(
+                status_code=200,
+                body={"file_url": "https://v3.fal.media/files/out.mp4", "upload_url": presigned},
+            )
+
+        def put(self, url, **kwargs):
+            raise httpx.TransportError("연결 오류", request=fake_request)
+
+    uploader = FalMediaUploader(settings, http=_PutRaisingClient())
+
+    with pytest.raises(PublishError) as exc_info:
+        uploader.upload(b"V", content_type="video/mp4", file_name="out.mp4")
+
+    assert sig_secret not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+
+
+def test_fal_uploader_rejects_cgnat_upload_url():
+    """upload_url이 CGNAT 대역(100.64.0.0/10)이면 거부(not is_global 강화 핀)."""
+    settings = _fal_live_settings()
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(
+                status_code=200,
+                body={
+                    "file_url": "https://v3.fal.media/files/out.mp4",
+                    "upload_url": "https://100.64.0.1/upload",
+                },
+            )
+        ]
+    )
+    uploader = FalMediaUploader(settings, http=http)
+
+    with pytest.raises(PublishError, match="비공개"):
+        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
+    assert len(http.put_calls) == 0
