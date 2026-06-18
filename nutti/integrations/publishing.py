@@ -11,6 +11,7 @@ from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from nutti.config import Settings
 from nutti.logging import get_logger
@@ -27,6 +28,17 @@ INSTAGRAM_POLL_INTERVAL_SEC = 5.0
 
 # Instagram Graph API 버전
 _IG_BASE = "https://graph.facebook.com/v25.0"
+
+# fal-storage REST 베이스(영상 공개 URL 호스팅 업로드 개시 전용). 자격증명(Authorization: Key)은
+# 이 호스트에만 붙인다 — presigned upload_url(PUT)에는 미첨부(쿼리스트링에 서명 포함).
+# image_kontext._upload_reference와 동일한 흐름·엔드포인트(rest.alpha.fal.ai + storage_type=fal-cdn-v3)를
+# 따른다 — 레포 내 단일 fal-storage 컨벤션으로 통일(둘이 갈라지면 한쪽만 동작하는 위험).
+# ⚠️ 라이브 미검증: fal Python SDK 최신 소스는 rest.fal.ai + storage_type=gcs를 쓴다(조사 2026-06-18).
+#    실 FAL_KEY 검증 시 image_kontext와 함께 두 엔드포인트를 reconcile할 것(둘 다 file_url=*.fal.media 반환).
+_FAL_REST_BASE = "https://rest.alpha.fal.ai"
+# 업로드 후 받은 공개 file_url이 fal CDN인지 검증한다(신뢰 불가 입력 — Instagram에 넘기기 전 차단).
+# suffix 매칭이라 v3.fal.media 등 *.fal.media 서브도메인이 자동 포함된다.
+_FAL_PUBLIC_HOSTS = frozenset({"fal.media", "fal.run"})
 
 # YouTube OAuth2 토큰 교환 엔드포인트
 _YT_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -379,17 +391,21 @@ class InstagramClient:
         if code >= 400:
             raise PublishError(f"{what} HTTP {code}")
 
-    def create_container(self, video: VideoAsset, meta: Metadata) -> str:
+    def create_container(
+        self, video: VideoAsset, meta: Metadata, *, video_url: str | None = None
+    ) -> str:
         """Reels 미디어 컨테이너를 생성하고 creation_id를 반환한다.
 
-        TODO(live): video_url은 Meta 서버가 직접 cURL로 다운로드할 수 있는
-        공개 URL이어야 한다. VideoAsset.final_url이 로컬 경로이거나 인증이
-        필요한 URL이면 컨테이너 생성이 실패한다.
+        video_url은 Meta 서버가 직접 cURL로 다운로드할 수 있는 공개 URL이어야 한다.
+        Publisher가 로컬 산출물을 fal-storage에 업로드해 만든 공개 URL을 넘긴다
+        (Publisher._resolve_instagram_video_url). 명시 인자가 없으면 VideoAsset.final_url로
+        폴백하지만, 로컬 경로면 Meta가 받지 못해 컨테이너 생성이 실패한다.
         """
         import httpx  # lazy import — dry_run 경로에서는 불필요
 
         account_id = self.settings.instagram_account_id
         access_token = self.settings.instagram_access_token
+        media_url = video_url or video.final_url
         caption_parts = [meta.description]
         if meta.hashtags:
             caption_parts.append(" ".join(f"#{tag}" for tag in meta.hashtags))
@@ -400,7 +416,7 @@ class InstagramClient:
                 f"{_IG_BASE}/{account_id}/media",
                 data={
                     "media_type": "REELS",
-                    "video_url": video.final_url,  # TODO(live): 반드시 공개 URL
+                    "video_url": media_url,  # 공개 URL(Meta가 직접 cURL로 다운로드)
                     "caption": caption,
                     "access_token": access_token,
                 },
@@ -526,6 +542,149 @@ class InstagramClient:
 
 
 # ---------------------------------------------------------------------------
+# fal-storage 영상 호스팅(Instagram 공개 URL용)
+# ---------------------------------------------------------------------------
+
+
+def _validate_fal_upload_url(url: str) -> None:
+    """presigned 업로드 URL(PUT 대상)을 검증한다(SSRF 방어).
+
+    upload_url은 fal 클라우드 스토리지의 presigned URL이라 호스트가 fal.media가 아닐 수
+    있다(예: 오브젝트 스토리지). 따라서 호스트를 화이트리스트로 제한하지 않되,
+    ① scheme=https ② 호스트가 loopback/사설/링크로컬/예약 IP나 내부망 도메인이 아님은
+    강제해 내부망 접근을 차단한다. 이 URL은 인증된 initiate 응답에서만 오므로 신뢰도는 높다.
+    (image_kontext._validate_upload_url과 동일 원칙 — publishing 독립 모듈이라 재구현.)
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise PublishError("fal 업로드: URL scheme 불허 (허용: https)")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise PublishError("fal 업로드: URL 호스트가 비어 있습니다")
+    # IP 리터럴이면 사설/loopback/링크로컬/예약 대역 차단(클라우드 메타데이터 169.254.x 포함).
+    try:
+        import ipaddress
+
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise PublishError("fal 업로드: 사설/loopback IP 불허")
+        return
+    # 도메인명이면 내부망 suffix를 차단한다(metadata.google.internal, *.internal/.local 등).
+    if host == "localhost" or any(
+        host == s or host.endswith(f".{s}")
+        for s in ("localhost", "internal", "local", "metadata")
+    ):
+        raise PublishError("fal 업로드: 사설/내부망 호스트 불허")
+
+
+def _validate_fal_public_url(url: str) -> None:
+    """업로드 후 받은 공개 file_url이 허용된 fal CDN 호스트인지 검증한다(SSRF 방어).
+
+    이 URL은 Instagram에 video_url로 넘어가므로(Meta 서버가 cURL) 신뢰 불가 입력으로 본다.
+    scheme=https + host가 _FAL_PUBLIC_HOSTS(또는 그 서브도메인)여야 한다.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise PublishError("fal 호스팅 URL: scheme 불허 (허용: https)")
+    host = (parsed.hostname or "").lower()
+    if not any(host == s or host.endswith(f".{s}") for s in _FAL_PUBLIC_HOSTS):
+        raise PublishError("fal 호스팅 URL: 호스트 불허 (허용: fal.media, fal.run 및 서브도메인)")
+
+
+class FalMediaUploader:
+    """로컬 영상을 fal-storage에 업로드해 공개 https URL(*.fal.media)을 반환한다.
+
+    Instagram Graph API는 video_url로 Meta 서버가 직접 cURL로 받을 수 있는 공개 URL을
+    요구하는데, 파이프라인 산출물은 stitch된 로컬 mp4다. fal-storage(FAL_KEY 재사용)에
+    업로드해 공개 URL을 얻는다. image_kontext._upload_reference와 동일한 2단계 흐름:
+      ① initiate POST(Authorization: Key) → {"file_url", "upload_url"}
+      ② presigned upload_url에 바이트 PUT(자격증명 미첨부, Content-Type만)
+
+    httpx는 실 경로에서만 lazy import한다. `http` 주입 시 네트워크 없이 테스트.
+    close()/컨텍스트 매니저로 커넥션 풀을 명시적으로 닫는다.
+    """
+
+    def __init__(self, settings: Settings, *, http=None):
+        self.settings = settings
+        self._http = http
+
+    @property
+    def http(self):
+        """httpx.Client를 지연 생성한다(주입이 없을 때만, 실 경로 전용)."""
+        if self._http is None:
+            import httpx
+
+            self._http = httpx.Client(timeout=httpx.Timeout(60.0))
+        return self._http
+
+    def close(self) -> None:
+        """httpx 커넥션 풀을 닫는다. 멱등 — 이미 닫혔거나 http가 None이면 no-op."""
+        if self._http is not None:
+            self._http.close()
+            self._http = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
+    def upload(self, data: bytes, *, content_type: str, file_name: str) -> str:
+        """바이트를 fal-storage에 업로드하고 검증된 공개 file_url을 반환한다.
+
+        ① initiate: POST {rest}/storage/upload/initiate?storage_type=fal-cdn-v3
+           (Authorization: Key) → {"file_url", "upload_url"}.
+        ② PUT upload_url: presigned URL이므로 자격증명 미첨부, Content-Type만.
+        보안: upload_url/file_url은 신뢰 불가 입력 → PUT/반환 전에 host를 검증한다(SSRF).
+        redaction: 응답 키 목록은 log.debug로만, 예외 메시지에 금지.
+        """
+        import httpx  # lazy import — dry_run 경로에서는 불필요
+
+        initiate_url = f"{_FAL_REST_BASE}/storage/upload/initiate?storage_type=fal-cdn-v3"
+        try:
+            resp = self.http.post(
+                initiate_url,
+                headers={
+                    "Authorization": f"Key {self.settings.fal_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"content_type": content_type, "file_name": file_name},
+            )
+        except (httpx.TransportError, httpx.TooManyRedirects):
+            # 전송 계층 오류 — Authorization 헤더(FAL_KEY)를 노출하지 않는다.
+            raise PublishError("fal 업로드 개시 전송 오류") from None
+        InstagramClient._raise_for_publish(resp, "fal 업로드 개시")
+        body = resp.json()
+        file_url = body.get("file_url")
+        upload_url = body.get("upload_url")
+        if not file_url or not upload_url:
+            # redaction: 예외 메시지에 응답 키 목록 금지 — log.debug로만 기록.
+            log.debug("fal.upload.missing_url", keys=list(body.keys()))
+            raise PublishError("fal 업로드 개시 응답에 URL이 없습니다")
+        upload_url = str(upload_url)
+        file_url = str(file_url)
+        # 두 URL 모두 PUT(왕복) 전에 검증한다. file_url은 이후 Instagram에 넘어가므로
+        # 허용 CDN 호스트인지 미리 검증해 불필요한 PUT 왕복을 막는다.
+        _validate_fal_upload_url(upload_url)
+        _validate_fal_public_url(file_url)
+        try:
+            put_resp = self.http.put(
+                upload_url,
+                content=data,
+                headers={"Content-Type": content_type},
+            )
+        except (httpx.TransportError, httpx.TooManyRedirects):
+            # 전송 계층 오류 — presigned URL(서명 포함)을 노출하지 않는다.
+            raise PublishError("fal 업로드(PUT) 전송 오류") from None
+        InstagramClient._raise_for_publish(put_resp, "fal 업로드(PUT)")
+        log.info("fal.upload.done", file_name=file_name, bytes=len(data))
+        return file_url
+
+
+# ---------------------------------------------------------------------------
 # Publisher 파사드
 # ---------------------------------------------------------------------------
 
@@ -539,12 +698,14 @@ class Publisher:
         *,
         yt_client=None,
         ig_client=None,
+        fal_uploader=None,
         clock: Callable[[], float] | None = None,
         sleep: Callable[[float], None] | None = None,
     ):
         self.settings = settings
         self._yt_client = yt_client
         self._ig_client = ig_client
+        self._fal_uploader = fal_uploader
         self._clock: Callable[[], float] = clock or time.monotonic
         self._sleep: Callable[[float], None] = sleep or time.sleep
 
@@ -611,13 +772,17 @@ class Publisher:
                     "INSTAGRAM_ACCOUNT_ID가 비어 있습니다 — dry_run=False 시 필수입니다."
                 )
 
+        # 0) 공개 URL 확보 — Meta 서버가 직접 cURL로 받을 수 있어야 한다.
+        #    로컬 산출물(stitch된 mp4)은 fal-storage에 업로드해 공개 URL로 바꾼다.
+        video_url = self._resolve_instagram_video_url(video)
+
         # 주입 클라이언트: 호출자가 수명 관리 → close 금지.
         # 내부 생성 클라이언트: Publisher가 소유 → try/finally로 반드시 close.
         _own_ig = self._ig_client is None
         client = self._ig_client or InstagramClient(self.settings)
         try:
-            # 1) 컨테이너 생성
-            creation_id = client.create_container(video, meta)
+            # 1) 컨테이너 생성(공개 video_url 주입)
+            creation_id = client.create_container(video, meta, video_url=video_url)
             log.info("instagram.container.created", creation_id=creation_id)
 
             # 2) 컨테이너 처리 완료까지 폴링 (wall-clock 기반 타임아웃)
@@ -657,6 +822,46 @@ class Publisher:
             external_id=media_id,
             url=url,
         )
+
+    def _resolve_instagram_video_url(self, video: VideoAsset) -> str:
+        """Instagram이 받을 수 있는 공개 영상 URL을 확보한다.
+
+        - final_url(우선)·video_path 중 존재하는 소스를 본다.
+        - 이미 공개 http(s) URL이면 그대로 쓴다(업로드 생략) — 우리가 fetch하지 않고
+          Meta 서버가 직접 받으므로 우리 쪽 SSRF 표면은 없다.
+        - 로컬 파일 경로면 fal-storage에 업로드해 공개 URL로 바꾼다(FAL_KEY 재사용).
+        업로더 미주입 시 FAL_KEY가 없으면 ValueError로 빠르게 실패한다(쿼터·시간 낭비 방지).
+        """
+        source = video.final_url or video.video_path
+        if not source:
+            raise PublishError(
+                "Instagram 업로드할 영상 위치가 없습니다 (final_url·video_path 모두 비어 있음)"
+            )
+        # 이미 공개 URL이면 추가 업로드 없이 그대로 넘긴다(Meta가 직접 cURL).
+        if source.startswith(("http://", "https://")):
+            return source
+
+        # 로컬 파일 → fal-storage 업로드. 업로더 미주입 시 FAL_KEY 필수.
+        if self._fal_uploader is None and not _usable_key(self.settings.fal_key):
+            raise ValueError(
+                "FAL_KEY가 비어 있습니다 — Instagram 공개 URL 호스팅(dry_run=False)에 필수입니다."
+            )
+        path = Path(source)
+        if not path.is_file():
+            raise PublishError(f"Instagram 업로드할 영상 파일을 찾을 수 없습니다: {path.name}")
+        data = path.read_bytes()
+
+        _own = self._fal_uploader is None
+        uploader = self._fal_uploader or FalMediaUploader(self.settings)
+        try:
+            file_url = uploader.upload(
+                data, content_type="video/mp4", file_name=path.name
+            )
+        finally:
+            if _own:
+                uploader.close()
+        log.info("instagram.video.hosted", file_name=path.name)
+        return file_url
 
     def fetch_performance(self, upload: UploadResult) -> PerformanceReport:
         """업로드된 콘텐츠의 성과 지표를 조회해 PerformanceReport를 반환한다."""
