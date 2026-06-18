@@ -463,7 +463,11 @@ def test_frame_prompt_includes_episode_style_and_no_microphone():
     assert "No microphone" in prompt  # 마이크 억제 명시
 
 
-def test_veo_negative_prompt_constant_preserved():
-    """_VEO_NEGATIVE_PROMPT 상수는 보존된다(veo_fal 자막 억제 포팅 예정 — 미사용)."""
-    assert "subtitles" in video_module._VEO_NEGATIVE_PROMPT
-    assert "korean text overlay" in video_module._VEO_NEGATIVE_PROMPT
+def test_veo_fal_negative_prompt_default_suppresses_subtitles():
+    """자막 억제 negative_prompt는 이제 설정값(veo_fal_negative_prompt)으로 단일화됐고,
+    기본값에 핵심 금지어(subtitles·korean text overlay)가 들어 있다."""
+    from nutti.config import Settings
+
+    neg = Settings(NUTTI_DRY_RUN=True).veo_fal_negative_prompt
+    assert "subtitles" in neg
+    assert "korean text overlay" in neg

@@ -41,13 +41,9 @@ _MAX_DIALOGUE_CHARS = 500
 _MAX_TOPIC_CHARS = 200
 # 비트 1개(독립 클립)의 길이(초). veo_fal 경로는 비트마다 8초 클립을 만들어 스티칭한다.
 _CLIP_SEC = 8.0
-# 화면에 텍스트(특히 깨진 한글 자막)를 임의 렌더하는 것을 억제하는 negativePrompt.
-# 대사를 음성으로만 내보내기 위함. **미사용** — veo_fal 자막 억제 포팅 예정으로 보존한다
-# (Gemini Veo 경로 제거 후에도 향후 veo_fal 제출 파라미터에 적용하기 위해 남겨 둠).
-_VEO_NEGATIVE_PROMPT = (
-    "text, subtitles, captions, words, letters, writing, watermark, "
-    "on-screen text, caption bar, hardcoded subtitles, korean text overlay"
-)
+# 화면 자막(깨진 한글 텍스트) 억제용 negative_prompt는 이제 설정값
+# `Settings.veo_fal_negative_prompt`로 단일화되어 FalVeoClient._submit이 fal에 직접
+# 보낸다(2026-06-18). 프롬프트 본문의 "no on-screen text" 지시와 이중 방어를 이룬다.
 
 
 def _sanitize_prompt_text(text: str, max_chars: int) -> str:
@@ -363,7 +359,7 @@ class VeoPromptBuilder:
     # · _SPEAKING_OFF / _SPEAKING_DIRECT: 마스코트가 누구에게 말하는지(인터뷰 톤 vs 정면)
     # · _CAMERA: 카메라 워크(고정·클로즈업). 흔들면 립싱크/일관성 깨짐 위험 ↑
     # · _NEGATIVE: 금지 요소(사람·다른 동물·화면 자막/글자). Veo가 깨진 한글 자막을
-    #   임의로 박는 걸 막는 핵심 방어 — 함부로 빼지 말 것(_VEO_NEGATIVE_PROMPT와 이중 방어)
+    #   임의로 박는 걸 막는 핵심 방어 — 함부로 빼지 말 것(settings.veo_fal_negative_prompt와 이중 방어)
     # 모든 템플릿에 ASCII 작은따옴표(') 금지 — 대사 인용 구분자와 충돌(주입 방어 깨짐).
     # 한국어로 "이렇게 바꾸고 싶다"만 정해도 됨 — 영어 반영은 개발자에게 요청 권장.
     # 주의: 브랜드명("Nutti")·치수("9:16") 같은 리터럴을 넣지 말 것 — Veo가 그 글자를
@@ -424,7 +420,7 @@ class VeoPromptBuilder:
         인터뷰 마이크 연출(_MIC)은 off_screen_interviewer=True일 때만 붙는다 —
         정면 발화 모드는 마이크 없는 1인 방송 톤.
         대사는 음성(spoken audio only)으로만 발화시키고 화면 자막을 금지한다 — Veo가
-        한글 자막을 임의 렌더하면 깨진 글자로 나오기 때문(negativePrompt와 이중 방어).
+        한글 자막을 임의 렌더하면 깨진 글자로 나오기 때문(settings.veo_fal_negative_prompt와 이중 방어).
         대사는 `_sanitize_prompt_text`로 정제한다 — 작은따옴표가 있으면 인용 구분자를
         탈출해 금지 지시(추가 동물·사람·텍스트 금지)를 덮어쓰는 주입이 가능하기 때문이다.
         """

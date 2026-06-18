@@ -299,6 +299,42 @@ class _RejectGate:
         return ReviewDecision.REJECTED
 
 
+class _TrackingGate:
+    """승인하되 어떤 단계에서 호출됐는지 기록하는 검수 게이트(라우팅 핀용)."""
+
+    def __init__(self) -> None:
+        self.stages: list[Stage] = []
+
+    def request(self, review: ReviewRequest) -> ReviewDecision:
+        self.stages.append(review.stage)
+        return ReviewDecision.APPROVED
+
+
+def test_metadata_review_defaults_to_telegram_when_no_discord():
+    """텔레그램 원툴: discord 미주입(기본)이면 메타데이터 검수도 텔레그램으로 간다."""
+    tg = _TrackingGate()
+    orch = Orchestrator(_dry_settings(), telegram=tg)  # discord 생략 → self.discord=None
+
+    orch.run("강아지 간식")
+
+    # 대본·영상·메타데이터 3단계 모두 텔레그램 게이트로 라우팅된다.
+    assert Stage.SCRIPT in tg.stages
+    assert Stage.VIDEO in tg.stages
+    assert tg.stages.count(Stage.METADATA) == 1
+
+
+def test_metadata_review_uses_discord_when_injected():
+    """discord를 주입하면 메타데이터 검수는 디스코드로, 텔레그램엔 메타데이터가 가지 않는다."""
+    tg = _TrackingGate()
+    dc = _TrackingGate()
+    orch = Orchestrator(_dry_settings(), telegram=tg, discord=dc)
+
+    orch.run("강아지 간식")
+
+    assert dc.stages == [Stage.METADATA]
+    assert Stage.METADATA not in tg.stages
+
+
 def test_gate_rejection_stops_pipeline():
     orch = Orchestrator(_dry_settings(), telegram=_RejectGate(), discord=AutoApproveGate())
     try:

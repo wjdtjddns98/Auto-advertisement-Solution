@@ -83,6 +83,17 @@ class Settings(BaseSettings):
     veo_fal_timeout_sec: float = Field(default=600.0, alias="NUTTI_VEO_FAL_TIMEOUT_SEC")
     # fal Veo 출력 해상도. "720p"(기본·저비용) | "1080p"(고품질).
     veo_fal_resolution: str = Field(default="720p", alias="NUTTI_VEO_FAL_RESOLUTION")
+    # fal Veo 제출 시 보낼 negative_prompt — 화면에 텍스트(특히 깨진 한글 자막)를 임의로
+    # 렌더하는 것을 억제한다(대사는 음성으로만). Veo가 대사 프롬프트를 받을 때 자막을
+    # 그리는 경향에 대한 핵심 방어(프롬프트 본문의 "no on-screen text" 지시와 이중 방어).
+    # 빈 값으로 두면 negative_prompt를 제출 페이로드에서 생략한다.
+    veo_fal_negative_prompt: str = Field(
+        default=(
+            "text, subtitles, captions, words, letters, writing, watermark, "
+            "on-screen text, caption bar, hardcoded subtitles, korean text overlay"
+        ),
+        alias="NUTTI_VEO_FAL_NEGATIVE_PROMPT",
+    )
 
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
