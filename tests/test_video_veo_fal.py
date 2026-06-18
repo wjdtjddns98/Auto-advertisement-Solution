@@ -306,6 +306,34 @@ def test_fal_veo_client_submit_payload_contains_required_fields(tmp_path):
     assert payload.get("aspect_ratio") == "9:16"
 
 
+def test_fal_veo_client_submit_payload_includes_negative_prompt(tmp_path):
+    """제출 페이로드에 자막 억제 negative_prompt(설정값)가 실린다(화면 자막 방어)."""
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+    )
+    client = _fal_veo_client(
+        tmp_path, fake, NUTTI_VEO_FAL_NEGATIVE_PROMPT="no text, subtitles, korean text overlay"
+    )
+
+    client.generate(_frame_file(tmp_path), "test prompt")
+
+    _, payload = fake.post_calls[0]
+    assert payload["negative_prompt"] == "no text, subtitles, korean text overlay"
+
+
+def test_fal_veo_client_submit_omits_empty_negative_prompt(tmp_path):
+    """negative_prompt 설정이 비면 제출 페이로드에서 필드를 생략한다(불필요한 빈 값 미전송)."""
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+    )
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_NEGATIVE_PROMPT="   ")
+
+    client.generate(_frame_file(tmp_path), "test prompt")
+
+    _, payload = fake.post_calls[0]
+    assert "negative_prompt" not in payload
+
+
 def test_fal_veo_client_submit_missing_request_id_raises(tmp_path):
     """제출 응답에 request_id가 없으면 VideoRenderError를 즉시 던진다."""
     fake = FakeVeoFalHttp(

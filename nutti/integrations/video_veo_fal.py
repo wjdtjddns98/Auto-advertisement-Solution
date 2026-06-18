@@ -141,6 +141,11 @@ class FalVeoClient(_HttpClosingMixin):
             "resolution": self.settings.veo_fal_resolution,
             "duration": "8s",
         }
+        # 화면 자막(깨진 한글 텍스트) 억제 — fal Veo 3.1이 지원하는 negative_prompt로
+        # 보낸다(2026-06-18 스키마 확인). 설정이 비어 있으면 필드를 생략한다.
+        negative_prompt = (self.settings.veo_fal_negative_prompt or "").strip()
+        if negative_prompt:
+            body["negative_prompt"] = negative_prompt
         url = f"{_FAL_QUEUE_BASE}/{self._model}"
         # 일시 오류(429/5xx)는 backoff 재시도(폴링·결과조회와 동일). Veo 생성은 분당
         # 한도가 낮은 시점에 제출 429를 맞으면 전체 파이프라인이 죽을 수 있으므로 재시도한다.
