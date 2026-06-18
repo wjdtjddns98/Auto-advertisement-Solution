@@ -14,6 +14,7 @@ import pytest
 from nutti.config import Settings
 from nutti.integrations.publishing import (
     INSTAGRAM_POLL_TIMEOUT_SEC,
+    FalMediaUploader,
     InstagramClient,
     PublishError,
     PublishTimeoutError,
@@ -155,8 +156,10 @@ class FakeInstagramClient:
         self.permalink_calls: list[str] = []
         self.insights_calls: list[str] = []
 
-    def create_container(self, video: VideoAsset, meta: Metadata) -> str:
-        self.create_calls.append((video, meta))
+    def create_container(
+        self, video: VideoAsset, meta: Metadata, *, video_url: str | None = None
+    ) -> str:
+        self.create_calls.append((video, meta, video_url))
         if self.raise_on_create:
             raise PublishError("Instagram 컨테이너 생성 HTTP 400")
         return self._creation_id
@@ -1524,7 +1527,9 @@ def test_upload_instagram_closes_self_created_ig_client(monkeypatch):
     close_calls: list[str] = []
 
     class _TrackingIGClient:
-        def create_container(self, video: VideoAsset, meta: Metadata) -> str:
+        def create_container(
+            self, video: VideoAsset, meta: Metadata, *, video_url: str | None = None
+        ) -> str:
             return "container_track"
 
         def poll_container(self, creation_id: str) -> str:
@@ -1567,7 +1572,9 @@ def test_upload_instagram_does_not_close_injected_ig_client():
         def __init__(self):
             self.close_count = 0
 
-        def create_container(self, video: VideoAsset, meta: Metadata) -> str:
+        def create_container(
+            self, video: VideoAsset, meta: Metadata, *, video_url: str | None = None
+        ) -> str:
             return "container_inj"
 
         def poll_container(self, creation_id: str) -> str:
@@ -1606,7 +1613,9 @@ def test_instagram_poll_container_error_mid_loop():
     class _PollErrorAfterFirstClient:
         """첫 번째 poll은 IN_PROGRESS, 두 번째는 PublishError를 발생시킨다."""
 
-        def create_container(self, video: VideoAsset, meta: Metadata) -> str:
+        def create_container(
+            self, video: VideoAsset, meta: Metadata, *, video_url: str | None = None
+        ) -> str:
             return "container_err"
 
         def poll_container(self, creation_id: str) -> str:
@@ -1636,3 +1645,356 @@ def test_instagram_poll_container_error_mid_loop():
 
     # poll이 정확히 2회 호출(IN_PROGRESS + 예외) 후 루프 탈출
     assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Instagram 공개 URL 호스팅(fal-storage 업로드) — FalMediaUploader + 결정 로직
+# ---------------------------------------------------------------------------
+
+
+class FakeFalUploader:
+    """FalMediaUploader 대체 — upload 호출을 기록하고 결정적 공개 URL을 반환한다."""
+
+    def __init__(self, file_url: str = "https://v3.fal.media/files/vid_001.mp4"):
+        self._file_url = file_url
+        self.upload_calls: list[tuple] = []
+        self.closed = False
+
+    def upload(self, data: bytes, *, content_type: str, file_name: str) -> str:
+        self.upload_calls.append((data, content_type, file_name))
+        return self._file_url
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _fal_live_settings(**overrides) -> Settings:
+    base: dict = {"NUTTI_DRY_RUN": False, "FAL_KEY": "test-fal-key"}
+    base.update(overrides)
+    return Settings(**base)
+
+
+def _local_mp4(tmp_path, data: bytes = b"FAKE_MP4_BYTES") -> VideoAsset:
+    """실제 로컬 mp4 파일을 가진 VideoAsset(final_url=로컬 경로 — 파이프라인 기본)."""
+    p = tmp_path / "reel.mp4"
+    p.write_bytes(data)
+    return VideoAsset(script_id="abc123", video_path=str(p), final_url=str(p))
+
+
+def test_instagram_local_video_uploaded_to_fal_then_passed_as_url(tmp_path):
+    """로컬 mp4면 fal-storage에 업로드하고, 그 공개 URL을 create_container에 넘긴다."""
+    settings = _fal_live_settings(INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc")
+    data = b"REEL_VIDEO_BYTES"
+    video = _local_mp4(tmp_path, data)
+    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
+    fake_up = FakeFalUploader(file_url="https://v3.fal.media/files/hosted.mp4")
+    publisher = Publisher(settings, ig_client=fake_ig, fal_uploader=fake_up, sleep=_no_sleep)
+
+    publisher.upload_instagram(video, _meta())
+
+    # 업로드는 정확히 1회 — content_type=video/mp4, 파일명·바이트 전달
+    assert len(fake_up.upload_calls) == 1
+    up_data, up_ct, up_name = fake_up.upload_calls[0]
+    assert up_data == data
+    assert up_ct == "video/mp4"
+    assert up_name == "reel.mp4"
+    # create_container에 fal 공개 URL이 video_url로 주입됐는지 확인
+    assert len(fake_ig.create_calls) == 1
+    _, _, video_url_used = fake_ig.create_calls[0]
+    assert video_url_used == "https://v3.fal.media/files/hosted.mp4"
+    # 주입된 업로더는 Publisher가 close()하지 않는다(수명은 호출자 관리)
+    assert fake_up.closed is False
+
+
+def test_instagram_already_public_url_skips_upload(tmp_path):
+    """final_url이 이미 공개 http(s) URL이면 추가 업로드 없이 그대로 넘긴다."""
+    settings = _fal_live_settings(INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc")
+    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
+    fake_up = FakeFalUploader()
+    publisher = Publisher(settings, ig_client=fake_ig, fal_uploader=fake_up, sleep=_no_sleep)
+
+    # _video()의 final_url = "https://fake.local/final/abc123.mp4" (이미 https)
+    publisher.upload_instagram(_video(), _meta())
+
+    assert len(fake_up.upload_calls) == 0  # 업로드 생략
+    _, _, video_url_used = fake_ig.create_calls[0]
+    assert video_url_used == "https://fake.local/final/abc123.mp4"
+
+
+def test_instagram_missing_fal_key_raises_value_error(tmp_path):
+    """로컬 영상 + 업로더 미주입 + FAL_KEY 없음 → ValueError(빠른 실패)."""
+    # FAL_KEY 비움. ig_client는 주입해 ig 키 가드를 건너뛰고 호스팅 가드만 평가.
+    settings = _live_settings(
+        FAL_KEY="", INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc"
+    )
+    video = _local_mp4(tmp_path)
+    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
+    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
+
+    with pytest.raises(ValueError, match="FAL_KEY"):
+        publisher.upload_instagram(video, _meta())
+
+    # 호스팅 가드에서 막혀 컨테이너 생성까지 가지 않는다
+    assert len(fake_ig.create_calls) == 0
+
+
+def test_instagram_video_file_not_found_raises(tmp_path):
+    """로컬 경로가 실제 파일이 아니면 PublishError(파일명만 노출, 전체 경로 가림)."""
+    settings = _fal_live_settings(INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc")
+    missing = tmp_path / "secret_dir" / "nope.mp4"
+    video = VideoAsset(script_id="abc123", final_url=str(missing))
+    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
+    publisher = Publisher(settings, ig_client=fake_ig, fal_uploader=FakeFalUploader(), sleep=_no_sleep)
+
+    with pytest.raises(PublishError) as exc_info:
+        publisher.upload_instagram(video, _meta())
+
+    msg = str(exc_info.value)
+    assert "nope.mp4" in msg
+    assert "secret_dir" not in msg
+
+
+def test_instagram_no_video_source_raises(tmp_path):
+    """final_url·video_path 모두 비면 PublishError."""
+    settings = _fal_live_settings(INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc")
+    video = VideoAsset(script_id="abc123")  # 위치 없음
+    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
+    publisher = Publisher(settings, ig_client=fake_ig, fal_uploader=FakeFalUploader(), sleep=_no_sleep)
+
+    with pytest.raises(PublishError, match="영상 위치"):
+        publisher.upload_instagram(video, _meta())
+
+
+def test_instagram_self_created_uploader_is_closed(tmp_path, monkeypatch):
+    """업로더 미주입 시 Publisher가 내부 생성한 FalMediaUploader를 정확히 1회 close()한다."""
+    import nutti.integrations.publishing as _pub_mod
+
+    close_calls: list[str] = []
+
+    class _TrackingUploader:
+        def upload(self, data: bytes, *, content_type: str, file_name: str) -> str:
+            return "https://v3.fal.media/files/tracked.mp4"
+
+        def close(self) -> None:
+            close_calls.append("closed")
+
+    monkeypatch.setattr(_pub_mod, "FalMediaUploader", lambda settings: _TrackingUploader())
+
+    settings = _fal_live_settings(INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc")
+    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
+    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)  # 업로더 미주입
+
+    publisher.upload_instagram(_local_mp4(tmp_path), _meta())
+
+    assert len(close_calls) == 1
+
+
+# --- FalMediaUploader 내부 단위 테스트 (fake HTTP 주입) ---
+
+
+_INITIATE_OK = {
+    "file_url": "https://v3.fal.media/files/out.mp4",
+    "upload_url": "https://storage.fal.media/upload/out.mp4?sig=abc",
+}
+
+
+def test_fal_uploader_initiate_then_put_returns_file_url():
+    """initiate(인증) → presigned PUT(인증 미첨부) 순으로 업로드하고 file_url을 반환한다."""
+    settings = _fal_live_settings()
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, body=_INITIATE_OK),  # initiate POST
+            FakeHttpResponse(status_code=200),  # presigned PUT
+        ]
+    )
+    uploader = FalMediaUploader(settings, http=http)
+
+    file_url = uploader.upload(b"VIDEO", content_type="video/mp4", file_name="out.mp4")
+
+    assert file_url == "https://v3.fal.media/files/out.mp4"
+    # initiate: rest.alpha.fal.ai + Authorization 헤더 + content_type/file_name 바디
+    init_url, init_kwargs = http.post_calls[0]
+    assert "rest.alpha.fal.ai/storage/upload/initiate" in init_url
+    assert init_kwargs["headers"]["Authorization"] == "Key test-fal-key"
+    assert init_kwargs["json"] == {"content_type": "video/mp4", "file_name": "out.mp4"}
+    # PUT: presigned upload_url + Content-Type만, 자격증명(Authorization) 미첨부
+    put_url, put_kwargs = http.put_calls[0]
+    assert put_url == "https://storage.fal.media/upload/out.mp4?sig=abc"
+    assert put_kwargs["content"] == b"VIDEO"
+    assert put_kwargs["headers"]["Content-Type"] == "video/mp4"
+    assert "Authorization" not in put_kwargs["headers"]
+
+
+def test_fal_uploader_missing_url_raises_without_key_leak():
+    """initiate 응답에 URL이 없으면 PublishError(응답 키 목록 미노출)이고 PUT을 시도하지 않는다."""
+    settings = _fal_live_settings()
+    http = FakeHttpClient([FakeHttpResponse(status_code=200, body={"unexpected": 1})])
+    uploader = FalMediaUploader(settings, http=http)
+
+    with pytest.raises(PublishError) as exc_info:
+        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
+
+    assert "unexpected" not in str(exc_info.value)
+    assert len(http.put_calls) == 0
+
+
+def test_fal_uploader_initiate_http_error_propagates():
+    """initiate HTTP 4xx면 PublishError(상태 코드)를 발생시킨다."""
+    settings = _fal_live_settings()
+    http = FakeHttpClient([FakeHttpResponse(status_code=401, body={"error": "bad key"})])
+    uploader = FalMediaUploader(settings, http=http)
+
+    with pytest.raises(PublishError, match="401"):
+        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
+
+
+def test_fal_uploader_rejects_loopback_upload_url():
+    """upload_url이 loopback이면 PUT 전에 거부(SSRF 방어)."""
+    settings = _fal_live_settings()
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(
+                status_code=200,
+                body={
+                    "file_url": "https://v3.fal.media/files/out.mp4",
+                    "upload_url": "https://127.0.0.1/upload",
+                },
+            )
+        ]
+    )
+    uploader = FalMediaUploader(settings, http=http)
+
+    with pytest.raises(PublishError, match="loopback"):
+        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
+    assert len(http.put_calls) == 0
+
+
+def test_fal_uploader_rejects_non_https_upload_url():
+    """upload_url이 http(비-https)면 거부(SSRF 방어)."""
+    settings = _fal_live_settings()
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(
+                status_code=200,
+                body={
+                    "file_url": "https://v3.fal.media/files/out.mp4",
+                    "upload_url": "http://storage.fal.media/upload",
+                },
+            )
+        ]
+    )
+    uploader = FalMediaUploader(settings, http=http)
+
+    with pytest.raises(PublishError, match="scheme"):
+        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
+    assert len(http.put_calls) == 0
+
+
+def test_fal_uploader_rejects_internal_domain_upload_url():
+    """upload_url이 클라우드 내부 도메인(metadata.google.internal)이면 거부."""
+    settings = _fal_live_settings()
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(
+                status_code=200,
+                body={
+                    "file_url": "https://v3.fal.media/files/out.mp4",
+                    "upload_url": "https://metadata.google.internal/upload",
+                },
+            )
+        ]
+    )
+    uploader = FalMediaUploader(settings, http=http)
+
+    with pytest.raises(PublishError, match="내부망"):
+        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
+    assert len(http.put_calls) == 0
+
+
+def test_fal_uploader_rejects_non_fal_file_url():
+    """file_url이 비-fal 호스트면 거부(이후 Instagram에 넘기기 전 차단)."""
+    settings = _fal_live_settings()
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(
+                status_code=200,
+                body={
+                    "file_url": "https://evil.com/out.mp4",
+                    "upload_url": "https://storage.fal.media/upload?sig=x",
+                },
+            )
+        ]
+    )
+    uploader = FalMediaUploader(settings, http=http)
+
+    with pytest.raises(PublishError, match="호스트"):
+        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
+    assert len(http.put_calls) == 0
+
+
+def test_fal_uploader_initiate_transport_error_does_not_leak_key():
+    """initiate 전송 오류 시 FAL_KEY가 PublishError에 노출되지 않는다."""
+    secret = "SUPER_SECRET_FAL_KEY"
+    settings = _fal_live_settings(FAL_KEY=secret)
+    fake_request = httpx.Request(
+        "POST",
+        "https://rest.alpha.fal.ai/storage/upload/initiate",
+        headers={"Authorization": f"Key {secret}"},
+    )
+    uploader = FalMediaUploader(settings, http=FakeRaisingHttpClient(fake_request))
+
+    with pytest.raises(PublishError) as exc_info:
+        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
+
+    assert secret not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+
+
+def test_fal_uploader_put_transport_error_does_not_leak_presigned_url():
+    """presigned PUT 전송 오류 시 upload_url(서명 포함)이 PublishError에 노출되지 않는다.
+
+    initiate는 정상 응답하고 그 다음 PUT에서 TransportError가 발생하는 경로를 핀한다
+    (initiate만 커버하는 테스트로는 PUT 단계 from None 제거를 못 잡는다)."""
+    sig_secret = "PRESIGNED_SIGNATURE_SECRET"
+    presigned = f"https://storage.fal.media/upload/out.mp4?sig={sig_secret}"
+    settings = _fal_live_settings()
+    fake_request = httpx.Request("PUT", presigned)
+
+    class _PutRaisingClient:
+        def post(self, url, **kwargs):
+            return FakeHttpResponse(
+                status_code=200,
+                body={"file_url": "https://v3.fal.media/files/out.mp4", "upload_url": presigned},
+            )
+
+        def put(self, url, **kwargs):
+            raise httpx.TransportError("연결 오류", request=fake_request)
+
+    uploader = FalMediaUploader(settings, http=_PutRaisingClient())
+
+    with pytest.raises(PublishError) as exc_info:
+        uploader.upload(b"V", content_type="video/mp4", file_name="out.mp4")
+
+    assert sig_secret not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+
+
+def test_fal_uploader_rejects_cgnat_upload_url():
+    """upload_url이 CGNAT 대역(100.64.0.0/10)이면 거부(not is_global 강화 핀)."""
+    settings = _fal_live_settings()
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(
+                status_code=200,
+                body={
+                    "file_url": "https://v3.fal.media/files/out.mp4",
+                    "upload_url": "https://100.64.0.1/upload",
+                },
+            )
+        ]
+    )
+    uploader = FalMediaUploader(settings, http=http)
+
+    with pytest.raises(PublishError, match="비공개"):
+        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
+    assert len(http.put_calls) == 0
