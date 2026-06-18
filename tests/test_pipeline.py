@@ -49,15 +49,120 @@ def test_full_run_dry_run():
     assert run.current_stage == Stage.ANALYTICS
 
 
-def test_reels_uploads_both():
+def test_reels_youtube_auto_and_instagram_manual_handoff(monkeypatch):
+    """REELS: 유튜브만 자동 업로드, 인스타는 수동 핸드오프 호출(자동 업로드 폐기, 2026-06-18)."""
     orch = Orchestrator(
         _dry_settings(),
         telegram=AutoApproveGate(),
         discord=AutoApproveGate(),
     )
+    handoff_calls: list[str] = []
+    monkeypatch.setattr(
+        orch, "_handoff_for_manual_instagram", lambda run: handoff_calls.append(run.id)
+    )
+
     run = orch.run("강아지 수제간식", content_format=ContentFormat.REELS)
+
     platforms = {u.platform for u in run.uploads}
-    assert platforms == {"youtube", "instagram"}
+    assert platforms == {"youtube"}  # 인스타 자동 업로드 더 이상 안 함
+    assert len(handoff_calls) == 1  # REELS는 인스타 수동 핸드오프 1회
+
+
+def test_shorts_does_not_trigger_instagram_handoff(monkeypatch):
+    """SHORTS: 인스타 핸드오프를 호출하지 않는다(유튜브 전용)."""
+    orch = Orchestrator(
+        _dry_settings(),
+        telegram=AutoApproveGate(),
+        discord=AutoApproveGate(),
+    )
+    handoff_calls: list[str] = []
+    monkeypatch.setattr(
+        orch, "_handoff_for_manual_instagram", lambda run: handoff_calls.append(run.id)
+    )
+
+    orch.run("강아지 간식", content_format=ContentFormat.SHORTS)
+
+    assert handoff_calls == []
+
+
+class _FakeTelegramClient:
+    """TelegramClient 대체 — send_video/send_message 호출을 기록한다."""
+
+    def __init__(self):
+        self.video_calls: list[tuple] = []
+        self.message_calls: list[tuple] = []
+
+    def send_video(self, chat_id, video_path, caption="", reply_markup=None):
+        self.video_calls.append((chat_id, video_path, caption))
+        return 1
+
+    def send_message(self, chat_id, text):
+        self.message_calls.append((chat_id, text))
+        return 2
+
+
+def _live_handoff_settings() -> Settings:
+    """핸드오프가 실제 전송을 타도록 dry_run=False + 텔레그램 설정."""
+    return Settings(
+        NUTTI_DRY_RUN=False,
+        NUTTI_ENV="test",
+        TELEGRAM_BOT_TOKEN="bot_tok",
+        TELEGRAM_CHAT_ID="chat_123",
+    )
+
+
+def test_manual_handoff_sends_video_and_caption_to_telegram():
+    """라이브: 최종 영상 + 캡션(메타 설명)을 텔레그램으로 보낸다."""
+    fake_tg = _FakeTelegramClient()
+    orch = Orchestrator(_live_handoff_settings(), tg_client=fake_tg)
+    from nutti.models import Metadata, PipelineRun, VideoAsset
+
+    run = PipelineRun(topic="t")
+    run.video = VideoAsset(script_id="s1", video_path="data/media/final.mp4")
+    run.metadata = Metadata(title="제목", description="설명 본문\n\n#강아지 #간식", hashtags=["#강아지"])
+
+    orch._handoff_for_manual_instagram(run)
+
+    assert len(fake_tg.video_calls) == 1
+    chat_id, video_path, _caption = fake_tg.video_calls[0]
+    assert chat_id == "chat_123"
+    assert video_path == "data/media/final.mp4"
+    # 붙여넣을 캡션은 메타데이터 설명 그대로 별도 메시지로 전송
+    assert fake_tg.message_calls == [("chat_123", "설명 본문\n\n#강아지 #간식")]
+
+
+def test_manual_handoff_skipped_in_dry_run():
+    """dry_run이면 네트워크 없이 아무것도 전송하지 않는다(dry_run 계약)."""
+    fake_tg = _FakeTelegramClient()
+    orch = Orchestrator(_dry_settings(), tg_client=fake_tg)
+    from nutti.models import Metadata, PipelineRun, VideoAsset
+
+    run = PipelineRun(topic="t")
+    run.video = VideoAsset(script_id="s1", video_path="x.mp4")
+    run.metadata = Metadata(title="t", description="d", hashtags=[])
+
+    orch._handoff_for_manual_instagram(run)
+
+    assert fake_tg.video_calls == []
+    assert fake_tg.message_calls == []
+
+
+def test_manual_handoff_missing_chat_id_raises():
+    """토큰은 있으나 chat_id가 없으면 설정 오류로 명확히 실패한다."""
+    fake_tg = _FakeTelegramClient()
+    settings = Settings(
+        NUTTI_DRY_RUN=False, NUTTI_ENV="test", TELEGRAM_BOT_TOKEN="bot_tok", TELEGRAM_CHAT_ID=""
+    )
+    orch = Orchestrator(settings, tg_client=fake_tg)
+    from nutti.models import Metadata, PipelineRun, VideoAsset
+
+    run = PipelineRun(topic="t")
+    run.video = VideoAsset(script_id="s1", video_path="x.mp4")
+    run.metadata = Metadata(title="t", description="d", hashtags=[])
+
+    with pytest.raises(ValueError, match="TELEGRAM_CHAT_ID"):
+        orch._handoff_for_manual_instagram(run)
+    assert fake_tg.video_calls == []
 
 
 def test_analysis_feedback_loop(tmp_path):

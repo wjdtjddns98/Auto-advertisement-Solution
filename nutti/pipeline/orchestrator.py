@@ -9,6 +9,7 @@ from __future__ import annotations
 from nutti.config import Settings, get_settings
 from nutti.integrations.ai_text import AITextClient
 from nutti.integrations.publishing import Publisher
+from nutti.integrations.telegram import TelegramClient
 from nutti.integrations.video import VideoStudio
 from nutti.logging import get_logger
 from nutti.models import (
@@ -73,11 +74,14 @@ class Orchestrator:
         max_factcheck_retries: int = 1,
         state: PipelineState | None = None,
         ledger: CostLedger | None = None,
+        tg_client: TelegramClient | None = None,
     ):
         self.settings = settings or get_settings()
         self.ai = AITextClient(self.settings)
         self.studio = VideoStudio(self.settings)
         self.publisher = Publisher(self.settings)
+        # 인스타 수동 업로드 핸드오프용 텔레그램 클라이언트(테스트 시 fake 주입 가능).
+        self._tg_client = tg_client
         self.store = SheetStore(self.settings)
         # 실행 간 영속 상태(직전 피드백·최근 주제). 테스트 시 tmp 경로 주입 가능.
         self.state = state or PipelineState(self.settings.state_path)
@@ -171,11 +175,13 @@ class Orchestrator:
         run.metadata = self.ai.generate_metadata(run.script, self.settings.calculator_url)
         self._gate(self.discord, Stage.METADATA, "메타데이터 검수", run.metadata.title)
 
-        # 4단계: 업로드
+        # 4단계: 업로드 — 유튜브는 자동 업로드. 인스타는 수동 업로드로 전환(2026-06-18 PO 결정):
+        # 자동 게시(publisher.upload_instagram, 코드는 보존) 대신 최종 영상 + 캡션을 텔레그램으로
+        # 보내 사람이 직접 올린다. REELS 포맷일 때만 인스타용 핸드오프를 수행한다.
         run.current_stage = Stage.UPLOAD
         run.uploads.append(self.publisher.upload_youtube(run.video, run.metadata))
         if content_format == ContentFormat.REELS:
-            run.uploads.append(self.publisher.upload_instagram(run.video, run.metadata))
+            self._handoff_for_manual_instagram(run)
 
         # 비용 집계: 산출물(영상 길이·프레임·생성 텍스트) 기준으로 편당 제작 비용을 명세화.
         # 업로드까지 완주한 경우에만 도달한다 — 게이트 거절/팩트체크 실패 경로에서는
@@ -190,6 +196,45 @@ class Orchestrator:
         self.store.log_run(run)
         log.info("pipeline.done", run_id=run.id, uploads=len(run.uploads))
         return run
+
+    def _handoff_for_manual_instagram(self, run: PipelineRun) -> None:
+        """인스타 수동 업로드 핸드오프: 최종 영상 + 캡션을 텔레그램으로 보낸다.
+
+        인스타는 자동 게시 대신 사람이 직접 올린다(2026-06-18 PO 결정). 검수 끝난 최종
+        영상 파일과 붙여넣을 캡션(메타데이터 설명=계산기 링크·해시태그 포함)을 검수 채팅으로
+        보내 PO가 바로 받아 업로드하게 한다.
+
+        dry_run이거나 텔레그램 토큰이 없으면 네트워크 없이 로그만 남기고 반환한다
+        (dry_run 계약 유지). 토큰은 있으나 chat_id가 없으면 설정 오류로 명확히 실패한다.
+        """
+        if self.settings.dry_run or not self.settings.telegram_bot_token:
+            log.info(
+                "instagram.manual_handoff.skipped",
+                run_id=run.id,
+                dry_run=self.settings.dry_run,
+            )
+            return
+        if not self.settings.telegram_chat_id:
+            raise ValueError(
+                "TELEGRAM_CHAT_ID가 비어 있습니다 — 인스타 수동 업로드 핸드오프를 보낼 수 없습니다."
+            )
+        video_path = (run.video.video_path or run.video.final_url) if run.video else None
+        if not video_path:
+            log.warning("instagram.manual_handoff.no_video", run_id=run.id)
+            return
+        caption = run.metadata.description if run.metadata else ""
+        chat_id = self.settings.telegram_chat_id
+        client = self._tg_client or TelegramClient(self.settings.telegram_bot_token)
+        # 영상은 짧은 안내와 함께, 붙여넣을 캡션은 별도 텍스트로 보낸다(복사 편의 + 캡션 길이
+        # 제한 회피 — sendVideo caption은 1024자, sendMessage는 4096자).
+        client.send_video(
+            chat_id,
+            video_path,
+            caption="📲 인스타 수동 업로드용 영상 — 아래 캡션을 복사해 올려주세요.",
+        )
+        if caption:
+            client.send_message(chat_id, caption)
+        log.info("instagram.manual_handoff.sent", run_id=run.id)
 
     def _fact_check(self, run: PipelineRun, topic: str, feedback: str) -> None:
         """대본 팩트체크. 실패하면 issues를 피드백으로 재생성하고, 한도를 넘으면 거절한다.
