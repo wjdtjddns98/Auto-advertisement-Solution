@@ -165,6 +165,43 @@ def test_manual_handoff_missing_chat_id_raises():
     assert fake_tg.video_calls == []
 
 
+def test_manual_handoff_no_video_path_skips_quietly():
+    """영상 경로(video_path·final_url)가 모두 없으면 경고만 남기고 전송하지 않는다."""
+    fake_tg = _FakeTelegramClient()
+    orch = Orchestrator(_live_handoff_settings(), tg_client=fake_tg)
+    from nutti.models import Metadata, PipelineRun, VideoAsset
+
+    run = PipelineRun(topic="t")
+    run.video = VideoAsset(script_id="s1")  # video_path·final_url 모두 None
+    run.metadata = Metadata(title="t", description="d", hashtags=[])
+
+    orch._handoff_for_manual_instagram(run)  # 예외 없이 조용히 반환
+
+    assert fake_tg.video_calls == []
+    assert fake_tg.message_calls == []
+
+
+def test_run_completes_recording_when_handoff_fails(monkeypatch):
+    """REELS 핸드오프가 예외를 던져도 유튜브 사이클(원장·스토어·비용 기록)은 완주한다."""
+    orch = Orchestrator(
+        _dry_settings(),
+        telegram=AutoApproveGate(),
+        discord=AutoApproveGate(),
+    )
+
+    def _boom(_run):
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr(orch, "_handoff_for_manual_instagram", _boom)
+
+    run = orch.run("강아지 수제간식", content_format=ContentFormat.REELS)
+
+    # 핸드오프 실패에도 사이클은 완주: 유튜브 업로드 기록·비용 집계·analytics 단계 도달.
+    assert {u.platform for u in run.uploads} == {"youtube"}
+    assert run.cost is not None
+    assert run.current_stage == Stage.ANALYTICS
+
+
 def test_analysis_feedback_loop(tmp_path):
     state = _tmp_state(tmp_path)
     orch = Orchestrator(

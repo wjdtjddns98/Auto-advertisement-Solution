@@ -181,7 +181,13 @@ class Orchestrator:
         run.current_stage = Stage.UPLOAD
         run.uploads.append(self.publisher.upload_youtube(run.video, run.metadata))
         if content_format == ContentFormat.REELS:
-            self._handoff_for_manual_instagram(run)
+            # 인스타 핸드오프는 best-effort 부수효과 — 유튜브 업로드는 이미 성공했으므로,
+            # 텔레그램 전송 실패(설정 오류·전송 오류)가 아래 비용·원장·스토어 기록을 막지
+            # 않도록 예외를 삼키고 경고만 남긴다(유튜브 결과 기록 누락 방지).
+            try:
+                self._handoff_for_manual_instagram(run)
+            except Exception as exc:
+                log.warning("instagram.manual_handoff.failed", run_id=run.id, error=str(exc))
 
         # 비용 집계: 산출물(영상 길이·프레임·생성 텍스트) 기준으로 편당 제작 비용을 명세화.
         # 업로드까지 완주한 경우에만 도달한다 — 게이트 거절/팩트체크 실패 경로에서는
@@ -230,7 +236,7 @@ class Orchestrator:
         client.send_video(
             chat_id,
             video_path,
-            caption="📲 인스타 수동 업로드용 영상 — 아래 캡션을 복사해 올려주세요.",
+            caption="[인스타 수동 업로드용 영상] 아래 캡션을 복사해 올려주세요.",
         )
         if caption:
             client.send_message(chat_id, caption)
