@@ -378,7 +378,13 @@ class VeoPromptBuilder:
         "cheeky and energetic, with a warm soft timbre and a consistent speaking rhythm at "
         "a lively natural pace. Keep the identical timbre, pitch, accent, and speaking speed "
         "in every clip; do not change the voice, age, or switch to a different speaker for "
-        "emphasis or for the final call-to-action line."
+        "emphasis or for the final call-to-action line. "
+        # 발화 후 잉여 구간 BGM 채움 억제 — Veo가 대사가 끝난 뒤 남는 시간을 배경음악으로
+        # 채우면 무음 트림이 발화 끝을 못 잡아 끝부분 헛짓이 남는다(2026-06-29 PO 실측).
+        "This single spoken voice is the only audio: there is no background music, "
+        "instrumental, soundtrack, jingle, or sound effects at any point. After the puppy "
+        "finishes the last word, the audio simply stays quiet with natural room tone — do "
+        "not fill the remaining time with any music or sound."
     )
     _MIC = (
         "A handheld interview microphone is pointed at the puppy from off-screen; "

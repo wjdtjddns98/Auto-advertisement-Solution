@@ -192,6 +192,8 @@ def test_build_beat_audio_only_no_caption():
     # 강화된 금지 요소(사람·자막/글자) 유지.
     assert "no people" in p
     assert "no text" in p
+    # 발화 후 잉여 BGM 채움 억제(2026-06-29 PO) — 프롬프트 본문 이중 방어.
+    assert "no background music" in p
 
 
 # --- 섹션 2: VideoStudio._frame_prompt ---
@@ -639,3 +641,13 @@ def test_veo_fal_negative_prompt_default_suppresses_subtitles():
     neg = Settings(NUTTI_DRY_RUN=True).veo_fal_negative_prompt
     assert "subtitles" in neg
     assert "korean text overlay" in neg
+
+
+def test_veo_fal_negative_prompt_default_suppresses_background_music():
+    """발화 후 잉여 구간 BGM 채움 억제(2026-06-29 PO): 음악이 깔리면 무음 트림이 발화
+    끝을 못 잡아 끝부분 헛짓이 남으므로 negative_prompt에 음악 금지어를 핀한다."""
+    from nutti.config import Settings
+
+    neg = Settings(NUTTI_DRY_RUN=True).veo_fal_negative_prompt
+    assert "background music" in neg
+    assert "instrumental" in neg

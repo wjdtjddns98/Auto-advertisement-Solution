@@ -94,7 +94,12 @@ class Settings(BaseSettings):
             # 클립 끝 페이드아웃 억제 — 끝 프레임이 어두워지면 프레임 체이닝이 망가진다.
             "fade out, fade to black, fade in, dimming, darkening, vignette, "
             # 클립 끝 자세 변화(누움·이탈) 억제 — 비트 경계 점프의 주원인.
-            "lying down, walking out of frame, leaving the frame, camera movement, camera zoom"
+            "lying down, walking out of frame, leaving the frame, camera movement, camera zoom, "
+            # 배경음악(BGM) 억제 — Veo가 발화 후 남는 잉여 구간을 음악으로 채우면(2026-06-29
+            # PO 실측) 무음 트림(_trim_to_speech)이 발화 끝을 못 잡아 끝부분 헛짓(자세 무너짐·
+            # 화면전환)이 그대로 남는다. 음악을 빼 잉여를 무음으로 되돌려 트림이 잘라내게 한다.
+            "background music, music, instrumental, soundtrack, song, melody, jingle, "
+            "sound effects, musical score, humming, singing"
         ),
         alias="NUTTI_VEO_FAL_NEGATIVE_PROMPT",
     )

@@ -101,11 +101,11 @@ def test_script_system_prompt_bans_brand_in_last_beat():
 def test_script_system_prompt_pins_beat_char_range():
     """SCRIPT_SYSTEM_PROMPT가 비트당 길이 범위(8초 채움~50자 상한)를 명시한다(리버트 가드).
 
-    하한(40자·충분히 길게)은 비트 사이 빈 구간을 막고(2026-06-16 PO 피드백: 비트 간
-    공백), 상한(50자)은 대사가 8초 클립 안에 다 못 들어가 잘리는 것을 막는다
-    (대본 잘림 결함 예방). 둘 다 풀리면 회귀하므로 핀한다.
+    하한(44자·충분히 길게)은 발화 뒤 빈 시간(끝부분 헛돎)을 막고(2026-06-29 PO: 잉여
+    구간 BGM 채움→끝부분 이상행동), 상한(50자)은 대사가 8초 클립 안에 다 못 들어가
+    잘리는 것을 막는다(대본 잘림 결함 예방). 둘 다 풀리면 회귀하므로 핀한다.
     """
-    assert "40~48자" in SCRIPT_SYSTEM_PROMPT  # 8초 채움 하한(공백 방지)
+    assert "44~50자" in SCRIPT_SYSTEM_PROMPT  # 8초 채움 하한(끝부분 헛돎 방지)
     assert "충분히 길게" in SCRIPT_SYSTEM_PROMPT
     assert "50자를 넘기면" in SCRIPT_SYSTEM_PROMPT  # 상한(8초 클립 보호)
     assert "잘린다" in SCRIPT_SYSTEM_PROMPT
