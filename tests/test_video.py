@@ -110,9 +110,9 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     assert "stays in the exact same upright seated position" not in lively
     # 화면 이탈 방지·막판 안정화는 lively에도 유지(막판 이상행동 방어).
     assert "leaves the frame" in lively
-    # 끝 직전 1~2초 안정화(웅크림/고개숙임으로 무너지는 막판 이상행동 방지).
-    assert "final one to two seconds" in lively
-    assert "holds completely still" in lively
+    # 끝 2~3초 완전 정지(막판 헛짓/글리치 방지 — 2026-06-29 PO 강화).
+    assert "final two to three seconds" in lively
+    assert "completely frozen and motionless" in lively
     assert "no fade-out" in lively
     # 기본(static)은 기존 _MOTION_HOLD 유지(하위호환).
     assert "stays in the exact same upright seated position" in static
@@ -654,6 +654,31 @@ def test_veo_fal_negative_prompt_default_suppresses_subtitles():
     neg = Settings(NUTTI_DRY_RUN=True).veo_fal_negative_prompt
     assert "subtitles" in neg
     assert "korean text overlay" in neg
+
+
+def test_clip_tail_trim_sec_default_disabled():
+    """고정 끝 트림 기본값 0(비활성) — 대본별 대사 잘림을 피해 적응 무음 트림에 맡긴다
+    (2026-06-29 PO: 고정값은 8초 꽉 찬 대본의 대사를 자른다)."""
+    from nutti.config import Settings
+
+    assert Settings(NUTTI_DRY_RUN=True).veo_fal_clip_tail_trim_sec == 0.0
+
+
+def test_trim_tail_fixed_disabled_returns_original():
+    """trim_sec<=0이면 강제 트림을 건너뛰고 원본 경로를 그대로 돌려준다(트림 비활성)."""
+    from nutti.config import Settings
+
+    studio = VideoStudio(Settings(NUTTI_DRY_RUN=True))
+    assert studio._trim_tail_fixed("any/clip.mp4", 0.0) == "any/clip.mp4"
+
+
+def test_trim_tail_fixed_missing_file_falls_back(tmp_path):
+    """길이 측정 실패(존재하지 않는/깨진 클립)면 원본 경로로 안전 폴백한다."""
+    from nutti.config import Settings
+
+    studio = VideoStudio(Settings(NUTTI_DRY_RUN=True))
+    missing = str(tmp_path / "nope.mp4")
+    assert studio._trim_tail_fixed(missing, 1.0) == missing
 
 
 def test_veo_fal_negative_prompt_default_suppresses_background_music():

@@ -429,10 +429,13 @@ class VeoPromptBuilder:
         "and expressively as it talks — gentle head tilts, ear and body movements, "
         "blinking, and lively little gestures that bring energy to the shot. It never "
         "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
-        "leaves the frame. For the final one to two seconds it settles back into a calm, "
-        "upright, centered seated pose facing forward and holds completely still, so the "
-        "clip ends on a clean, fully-lit, sharp frame with the puppy sitting upright and "
-        "centered — no fade-out, no dimming, no blur at the end."
+        "leaves the frame. CRITICAL ending rule: for the final two to three seconds the "
+        "puppy must be completely frozen and motionless — sitting perfectly upright and "
+        "centered, facing straight forward, with absolutely no movement of the head, ears, "
+        "body, paws, mouth, or expression. No shifting, no turning, no ducking, no leaning, "
+        "no sudden motion, no extra gestures in this final hold. The clip must end on this "
+        "fully frozen, calm, clean, fully-lit, razor-sharp frame — no fade-out, no dimming, "
+        "no blur, no warping, no morphing, and no glitch at the end."
     )
     _NEGATIVE = (
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
@@ -682,6 +685,15 @@ class VideoStudio:
                     )
                 else:
                     clip_path = client.generate(current_frame, prompt, seed=video_seed)
+                # 끝 잉여 구간(글리치·이상동작 온상) 강제 제거: 8초→약7초(2026-06-29 PO).
+                # 트림 성공 시 원본 8초 클립은 즉시 삭제(잔존 방지). 이후 체이닝 끝프레임
+                # 추출·무음 트림은 모두 트림된 클립 기준 — 글리치 구간이 다음 단계에도 안 샌다.
+                tail = self.settings.veo_fal_clip_tail_trim_sec
+                if tail > 0:
+                    cut = self._trim_tail_fixed(clip_path, tail)
+                    if cut != clip_path:
+                        Path(clip_path).unlink(missing_ok=True)
+                        clip_path = cut
                 log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
                 clips.append(clip_path)
                 # 가드된 체이닝(기본 모드만): 다음 비트가 있으면 이 클립의 끝 안정 프레임을
@@ -745,6 +757,47 @@ class VideoStudio:
                         Path(t).unlink(missing_ok=True)
                     except OSError:
                         pass
+
+    def _trim_tail_fixed(self, clip: str, trim_sec: float) -> str:
+        """클립 끝에서 trim_sec초를 강제로 잘라낸 새 클립 경로를 반환한다(무음 무관).
+
+        veo_fal 비트 클립은 8초 고정인데, 끝 ~1초 잉여 구간에서 모델이 자세를 무너뜨리거나
+        순간 글리치/이상동작을 내는 경향이 있다(2026-06-29 PO). 발화·무음 여부와 무관하게
+        끝 trim_sec을 물리적으로 제거해 그 구간을 영상에서 배제한다(대사 끝이 약간 잘릴 수
+        있음 — PO 수용). trim_sec<=0, 길이 측정 실패, 과도 트림(남는 길이<2s), 재인코딩
+        실패 시 원본을 그대로 반환한다(파이프라인 안전 — 단위 테스트의 가짜 클립 포함).
+        """
+        if trim_sec <= 0:
+            return clip
+        import re
+        import subprocess
+
+        try:
+            import imageio_ffmpeg
+
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+            probe = subprocess.run([ff, "-hide_banner", "-i", clip], capture_output=True)
+            err = probe.stderr.decode("utf-8", "replace")
+            dm = re.search(r"Duration:\s*(\d+):(\d+):([0-9.]+)", err)
+            if dm is None:
+                return clip
+            dur = int(dm.group(1)) * 3600 + int(dm.group(2)) * 60 + float(dm.group(3))
+            keep = dur - trim_sec
+            if keep < 2.0:
+                return clip  # 과도 트림 방지(짧은 클립·측정 이상)
+            out = str(Path(self.settings.nutti_media_dir) / f"veo_fal_tail_{uuid4().hex[:8]}.mp4")
+            cut = subprocess.run(
+                [ff, "-y", "-hide_banner", "-i", clip, "-t", f"{keep:.3f}",
+                 "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+                 "-movflags", "+faststart", "-c:a", "aac", out],
+                capture_output=True,
+            )
+            if cut.returncode != 0 or not Path(out).exists():
+                return clip  # 트림 실패 — 원본 유지
+            return out
+        except Exception:
+            # best-effort — 어떤 실패도 원본 클립으로 폴백한다.
+            return clip
 
     # 프레임 체이닝 가드 임계 — mp4 추출 PNG는 보통 수백 KB~MB. 이 미만이면 검정/실패
     # 프레임 의심. image_kontext._MIN_FRAME_BYTES(51_200)와 같은 종류의 휴리스틱이되,
@@ -852,7 +905,10 @@ class VideoStudio:
                 open_to_eof = len(ends) < len(starts)  # 마지막 침묵이 EOF까지 안 닫힘
                 closed_near_eof = bool(ends) and ends[-1] >= dur - 0.1
                 if last > start_t and (open_to_eof or closed_near_eof):
-                    end_t = min(dur, last + 0.35)
+                    # 발화 끝 + 0.20초 여유까지만 남기고 그 뒤(무음+끝 글리치/이상동작)를
+                    # 자른다. 0.35→0.20으로 줄여 발화 직후 글리치 구간을 더 바짝 제거한다
+                    # (2026-06-29 PO: 끝 잉여 구간 글리치). 발화 끝음절은 보존되는 선.
+                    end_t = min(dur, last + 0.20)
             out_sec = end_t - start_t
             if out_sec < 0.8 or end_t <= start_t:
                 return clip, dur  # 과도 트림 방지(전구간 침묵·검출 이상) — 실측 길이 유지

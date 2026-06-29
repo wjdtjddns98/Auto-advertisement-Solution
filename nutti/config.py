@@ -99,7 +99,12 @@ class Settings(BaseSettings):
             # PO 실측) 무음 트림(_trim_to_speech)이 발화 끝을 못 잡아 끝부분 헛짓(자세 무너짐·
             # 화면전환)이 그대로 남는다. 음악을 빼 잉여를 무음으로 되돌려 트림이 잘라내게 한다.
             "background music, music, instrumental, soundtrack, song, melody, jingle, "
-            "sound effects, musical score, humming, singing"
+            "sound effects, musical score, humming, singing, "
+            # 막바지 헛짓/글리치 억제(2026-06-29 PO) — 끝 잉여 구간에서 자세가 급변하거나
+            # 프레임이 뭉개지는(모핑/워핑/글리치) 현상을 직접 억제. 프롬프트 본문의 "끝 2~3초
+            # 완전 정지"와 이중 방어.
+            "sudden movement, sudden pose change, jerky motion, twitching, spasm, "
+            "morphing, warping, distortion, deformed body, flickering, glitch, jitter"
         ),
         alias="NUTTI_VEO_FAL_NEGATIVE_PROMPT",
     )
@@ -127,6 +132,14 @@ class Settings(BaseSettings):
     # None(기본)이면 _produce_clips_veo_fal가 영상마다 seed 1개를 뽑아 그 영상의 모든 비트에
     # 재사용한다(영상 내 일관, 영상 간 다양성 유지). 정수면 항상 그 값(영상 간에도 고정).
     veo_fal_seed: int | None = Field(default=None, alias="NUTTI_VEO_FAL_SEED")
+    # 각 비트 클립 끝에서 무조건 잘라낼 초(2026-06-29 PO). 끝 잉여 구간 글리치 제거용
+    # 안전판이지만, 고정값이면 대본마다 발화 종료 시점이 달라 8초 꽉 찬 대본은 대사가
+    # 잘린다(PO 지적). 그래서 기본 0(비활성) — 발화 종료를 자동 감지하는 적응 무음 트림
+    # (_trim_to_speech)에 맡긴다. 적응 트림은 발화 끝 기준이라 대본 길이와 무관하게 대사를
+    # 보존하며 발화 후 글리치 구간만 자른다. 특정 운영에서 강제 상한이 필요하면 >0으로 켠다.
+    veo_fal_clip_tail_trim_sec: float = Field(
+        default=0.0, alias="NUTTI_VEO_FAL_CLIP_TAIL_TRIM_SEC"
+    )
 
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
