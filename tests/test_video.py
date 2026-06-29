@@ -75,10 +75,25 @@ def test_prompt_builder_falls_back_to_topic_when_body_empty():
 
 
 def test_prompt_builder_includes_camera_directives():
-    """고정 카메라 지시(locked-off tripod·무빙 없음)가 포함된다 — 흔들림/컷 전환 방지."""
+    """고정 카메라 지시(locked-off·무빙 없음)가 포함된다 — 흔들림/컷 전환 방지.
+
+    단 "tripod" 단어는 Veo가 화면에 삼각대로 렌더하므로(2026-06-29 실측) 제외한다.
+    """
     prompt = VeoPromptBuilder().build(_script())
     assert "locked-off" in prompt
     assert "no camera movement" in prompt
+    assert "tripod" not in prompt  # 화면에 삼각대 렌더 방지
+
+
+def test_prompt_builder_includes_outfit_continuity():
+    """의상·외형을 처음부터 끝까지 동일하게 유지하라는 연속성 지시가 포함된다.
+
+    2026-06-29 실측: 비트마다 의상이 점프(회색 후드 → 맨몸)해 경계가 튀었다 →
+    클립 간 의상·털·외형 고정 지시로 완화.
+    """
+    prompt = VeoPromptBuilder().build(_script())
+    assert "same outfit" in prompt
+    assert "clothing" in prompt
 
 
 def test_prompt_builder_excludes_forbidden_elements():
@@ -231,6 +246,85 @@ def test_stitch_multi_clip_invokes_ffmpeg_concat(tmp_path, monkeypatch):
     assert out.endswith(".mp4")
     assert "-filter_complex" in captured["cmd"]
     assert "concat=n=2" in " ".join(captured["cmd"])
+
+
+def test_stitch_applies_dissolve_when_durations_known(tmp_path, monkeypatch):
+    """크로스페이드>0 이고 모든 클립 길이를 알면 xfade/acrossfade 디졸브로 이어붙인다."""
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_VEO_FAL_CROSSFADE_SEC="0.25"
+    )
+    studio = VideoStudio(settings)
+    out = studio._stitch(["a.mp4", "b.mp4"], [3.0, 3.0])
+    assert out.endswith(".mp4")
+    joined = " ".join(captured["cmd"])
+    assert "xfade=transition=fade" in joined
+    assert "acrossfade=d=0.250" in joined
+    assert "concat=n=2" not in joined  # 디졸브 경로는 concat이 아님
+
+
+def test_stitch_falls_back_to_concat_when_duration_unknown(tmp_path, monkeypatch):
+    """길이를 모르는 클립(None)이 있으면 디졸브를 포기하고 concat으로 폴백한다."""
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_VEO_FAL_CROSSFADE_SEC="0.25"
+    )
+    studio = VideoStudio(settings)
+    out = studio._stitch(["a.mp4", "b.mp4"], [3.0, None])
+    assert out.endswith(".mp4")
+    assert "concat=n=2" in " ".join(captured["cmd"])  # 디졸브 불가 → concat
+
+
+def test_stitch_dissolve_ffmpeg_failure_falls_back_to_concat(tmp_path, monkeypatch):
+    """디졸브 ffmpeg이 실패하면 None 반환 후 concat으로 안전 폴백한다."""
+    import subprocess as _sp
+
+    calls: list[str] = []
+
+    def fake_run(cmd, **kw):
+        joined = " ".join(cmd)
+        calls.append(joined)
+
+        class _R:
+            returncode = 0
+
+        if "xfade" in joined:
+            raise _sp.CalledProcessError(1, cmd)  # 디졸브만 실패
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_VEO_FAL_CROSSFADE_SEC="0.25"
+    )
+    studio = VideoStudio(settings)
+    out = studio._stitch(["a.mp4", "b.mp4"], [3.0, 3.0])
+    assert out.endswith(".mp4")
+    assert any("xfade" in c for c in calls)  # 디졸브 시도함
+    assert any("concat=n=2" in c for c in calls)  # 그리고 concat 폴백함
 
 
 def test_stitch_ffmpeg_failure_raises_render_error(tmp_path, monkeypatch):
@@ -440,6 +534,7 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
         VeoPromptBuilder._SPEAKING_DIRECT,
         VeoPromptBuilder._CAMERA,
         VeoPromptBuilder._MOTION_HOLD,
+        VeoPromptBuilder._CONTINUITY,
         VeoPromptBuilder._NEGATIVE,
         video_module._MASCOT_APPEARANCE,
         video_module._CINEMATIC_LOOK,

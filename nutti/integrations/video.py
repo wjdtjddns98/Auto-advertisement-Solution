@@ -343,7 +343,8 @@ class VeoPromptBuilder:
       달라지는 문제 확인 → 상세 고정 묘사로 드리프트 완화).
     - 인터뷰 마이크를 화면 밖에서 들이대는 길거리 인터뷰 구도(참고: "오줌싸개 강아지의
       억울한 변명"·"조회수 두자리 강아지의 한마디" 류 쇼츠).
-    - 카메라는 고정(locked-off tripod)·무빙 없음 — 흔들림/컷 전환 방지.
+    - 카메라는 고정(locked-off)·무빙 없음 — 흔들림/컷 전환 방지("tripod" 단어는 화면에
+      삼각대로 렌더되므로 프롬프트에서 제외, 2026-06-29 실측).
     - 깨짐 주원인(추가 동물·사람·화면 내 텍스트)을 명시적으로 금지한다.
     - 포맷: photorealistic · 9:16 세로 · 각 비트는 8초 단일컷(여러 비트는 ffmpeg로 스티칭).
     """
@@ -383,10 +384,21 @@ class VeoPromptBuilder:
     )
     _SPEAKING_OFF = "speaking in Korean to an off-screen interviewer"
     _SPEAKING_DIRECT = "speaking in Korean directly to the camera"
-    _CAMERA = "Camera: locked-off tripod shot, no camera movement."
+    # "tripod" 단어를 넣으면 Veo가 화면에 삼각대를 렌더한다(2026-06-29 실측) — 단어를
+    # 빼고 "고정 카메라"는 fixed/static/no movement로만 지시한다.
+    _CAMERA = "Camera: locked-off static shot, fixed framing, no camera movement."
     # 비트 클립이 독립 생성돼 끝 자세가 제각각이면 다음 클립과 점프가 생긴다(PO 피드백
     # 2026-06-29). 자세를 처음부터 끝까지 고정하고, 끝을 페이드 없이 또렷한 프레임으로
     # 마무리하게 해 프레임 체이닝(끝 프레임→다음 시작 프레임)이 안정적으로 물리도록 한다.
+    # _CONTINUITY: 클립이 독립 생성돼 비트마다 의상·외형이 달라지면(실측 2026-06-29:
+    # 회색 후드 → 맨몸으로 점프) 경계에서 튄다. 의상·털·외형을 처음부터 끝까지 동일하게
+    # 못박아 비트 간 점프를 줄인다(같은 style.outfit이 모든 비트에 들어가도 veo가 바꾸는
+    # 경향에 대한 추가 방어).
+    _CONTINUITY = (
+        "Keep the exact same outfit and clothing on the puppy in every frame with no "
+        "changes — do not add, remove, or alter any clothing mid-shot. Keep the identical "
+        "fur color, markings, and overall appearance from the first frame to the last."
+    )
     _MOTION_HOLD = (
         "The puppy stays in the exact same upright seated position for the entire shot, "
         "sitting still and centered, holding the same pose from the first frame to the "
@@ -447,6 +459,7 @@ class VeoPromptBuilder:
             f"{self._VOICE} "
             f"{self._CAMERA} "
             f"{self._MOTION_HOLD} "
+            f"{self._CONTINUITY} "
             f"{_CINEMATIC_LOOK} "
             "Format: tall vertical portrait orientation, single continuous 8-second shot. "
             f"{self._NEGATIVE}"
@@ -629,17 +642,26 @@ class VideoStudio:
         # 비트 클립(8초 고정)의 앞뒤 침묵을 잘라 비트 사이 공백을 줄인다
         # (2026-06-16 PO 피드백: 비트 사이 공백이 너무 길다). 트림 실패분은 원본·8초로 폴백.
         trimmed: list[str] = []
+        durations: list[float | None] = []
         total = 0.0
         for clip in clips:
             path, sec = self._trim_to_speech(clip)
             trimmed.append(path)
+            durations.append(sec)
             total += sec if sec is not None else _CLIP_SEC
         # 트림으로 새로 만든 임시 파일(veo_fal_trim_*.mp4)은 스티칭 후 정리한다 — 원본
         # 비트 클립은 기존 정책대로 유지하고, 단일 비트라 _stitch가 그대로 돌려준 파일
         # (final)은 삭제 대상에서 제외한다(반환 파일 삭제 방지). 스티칭 실패 시에도 정리.
         final = None
         try:
-            final = self._stitch(trimmed)
+            final = self._stitch(trimmed, durations)
+            # total은 트림 클립 길이의 단순 합 = 디졸브 전 상한값이다. _stitch가 경계
+            # 디졸브를 적용하면 실제 산출물은 (비트수-1)*crossfade_sec 만큼 짧다(0.25초
+            # 기본이면 3비트당 0.5초). 여기서 산술 보정하지 않는 이유: 호출부는 _stitch가
+            # 디졸브를 실제 적용했는지(ffmpeg 성공 여부) 모른다 — 실패해 concat 폴백하면
+            # 보정값이 오히려 틀린다. duration_sec은 현재 metadata 전용(비즈니스 컷오프·
+            # 과금에 미사용)이라 이 오차는 무해. 정확한 길이가 필요해지면 산술이 아니라
+            # 최종 mp4를 ffprobe로 재측정해야 한다.
             return final, total
         finally:
             for orig, t in zip(clips, trimmed):
@@ -777,16 +799,92 @@ class VideoStudio:
             # 트림은 품질 개선용 best-effort — 어떤 실패도 원본 클립으로 폴백한다.
             return clip, None
 
-    def _stitch(self, clips: list[str]) -> str:
-        """여러 8초 클립을 ffmpeg로 이어붙여 하나의 MP4로 만든다(재인코딩 concat).
+    def _stitch(self, clips: list[str], durations: list[float | None] | None = None) -> str:
+        """여러 8초 클립을 ffmpeg로 이어붙여 하나의 MP4로 만든다.
 
-        클립이 1개면 스티칭 없이 그대로 반환한다. ffmpeg 바이너리는 imageio-ffmpeg가
-        번들한 것을 쓴다(시스템 설치 불요). 실패(ffmpeg 비정상 종료·미설치)는
-        VideoRenderError 계약으로 변환하며, 입력 경로가 박힐 수 있는 stderr 원문은
-        노출하지 않고 예외 타입명만 남긴다(redaction).
+        `settings.veo_fal_crossfade_sec`>0 이고 모든 클립 길이를 알면 비트 경계에 짧은
+        디졸브(xfade/acrossfade)를 줘 의상·구도 점프를 부드럽게 가린다(2026-06-29 PO
+        옵션 B — 근본 제거가 아닌 완화). 길이를 모르거나 디졸브 ffmpeg이 실패하면 단순
+        concat으로 안전 폴백한다. 클립 1개면 스티칭 없이 그대로 반환한다. ffmpeg 바이너리는
+        imageio-ffmpeg 번들을 쓴다(시스템 설치 불요). 실패(ffmpeg 비정상 종료·미설치)는
+        VideoRenderError 계약으로 변환하며, 입력 경로가 박힐 수 있는 stderr 원문은 노출하지
+        않고 예외 타입명만 남긴다(redaction).
         """
         if len(clips) == 1:
             return clips[0]
+        dissolve = float(getattr(self.settings, "veo_fal_crossfade_sec", 0.0) or 0.0)
+        if dissolve > 0 and durations is not None and len(durations) == len(clips):
+            faded = self._stitch_dissolve(clips, durations, dissolve)
+            if faded is not None:
+                return faded
+        return self._concat(clips)
+
+    def _stitch_dissolve(
+        self, clips: list[str], durations: list[float | None], dissolve: float
+    ) -> str | None:
+        """클립 경계에 짧은 디졸브(xfade+acrossfade)를 줘 이어붙인다(best-effort).
+
+        모든 클립 길이가 유효하고 디졸브보다 충분히 길 때만 offset 누적이 성립한다 —
+        하나라도 길이를 모르거나 너무 짧으면 None을 돌려 호출부가 concat으로 폴백한다.
+        디졸브 ffmpeg 실패(필터 비호환·타임아웃 등)도 None으로 안전 폴백. xfade는 입력
+        해상도/fps/SAR가 같아야 하므로 각 비디오를 fps/format/SAR로 정규화한 뒤 체이닝한다.
+        """
+        dur: list[float] = []
+        for d in durations:
+            # 디졸브보다 충분히 길어야 offset=길이-디졸브가 양수로 성립한다.
+            if d is None or d <= dissolve + 0.1:
+                return None
+            dur.append(float(d))
+        import subprocess
+
+        import imageio_ffmpeg
+
+        out_path = Path(self.settings.nutti_media_dir) / f"video_{uuid4().hex[:12]}.mp4"
+        inputs: list[str] = []
+        for clip in clips:
+            inputs += ["-i", clip]
+        n = len(clips)
+        parts: list[str] = [f"[{i}:v]format=yuv420p,fps=30,setsar=1[v{i}]" for i in range(n)]
+        # 비디오 xfade 체인: 클립 k 합류 시 offset = 직전 출력길이 - 디졸브.
+        vlabel = "v0"
+        cum = dur[0]
+        for k in range(1, n):
+            offset = cum - dissolve
+            out = f"vx{k}"
+            parts.append(
+                f"[{vlabel}][v{k}]xfade=transition=fade:"
+                f"duration={dissolve:.3f}:offset={offset:.3f}[{out}]"
+            )
+            vlabel = out
+            cum = cum + dur[k] - dissolve
+        # 오디오 acrossfade 체인: 경계에서 자동으로 끝-시작을 겹쳐 페이드(offset 불요).
+        alabel = "0:a"
+        for k in range(1, n):
+            out = f"ax{k}"
+            parts.append(f"[{alabel}][{k}:a]acrossfade=d={dissolve:.3f}[{out}]")
+            alabel = out
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            *inputs,
+            "-filter_complex",
+            ";".join(parts),
+            "-map",
+            f"[{vlabel}]",
+            "-map",
+            f"[{alabel}]",
+            str(out_path),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        except (OSError, subprocess.SubprocessError):
+            Path(out_path).unlink(missing_ok=True)
+            return None  # 디졸브 실패 — 호출부가 concat 폴백
+        log.info("video.stitched.dissolve", path=str(out_path), clips=n, dissolve=dissolve)
+        return str(out_path)
+
+    def _concat(self, clips: list[str]) -> str:
+        """여러 클립을 디졸브 없이 단순 재인코딩 concat으로 이어붙인다(폴백 경로)."""
         import subprocess
 
         import imageio_ffmpeg

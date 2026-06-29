@@ -98,6 +98,11 @@ class Settings(BaseSettings):
         ),
         alias="NUTTI_VEO_FAL_NEGATIVE_PROMPT",
     )
+    # 비트 클립을 이어붙일 때 경계에 줄 크로스페이드(디졸브) 길이(초). veo가 클립마다
+    # 확률적으로 의상·구도를 살짝 바꿔 비트 경계에서 점프가 보일 수 있는데, 짧은 디졸브로
+    # 그 순간을 부드럽게 가린다(근본 제거가 아닌 완화 — 2026-06-29 PO 옵션 B). 0이면
+    # 디졸브 없이 단순 concat. 너무 길면 대사가 겹쳐 잘리므로 0.2~0.4초 권장.
+    veo_fal_crossfade_sec: float = Field(default=0.25, alias="NUTTI_VEO_FAL_CROSSFADE_SEC")
 
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")

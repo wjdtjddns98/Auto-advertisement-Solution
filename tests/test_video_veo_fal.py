@@ -715,7 +715,7 @@ def test_videostudio_veo_fal_routes_to_veo_fal_path(monkeypatch):
     veo_fal = FakeFalVeoClient(video_path="data/fake/veo_fal.mp4")
     nano = FakeNanoBananaClient(frame_path="data/fake/frame.jpg")
 
-    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips: clips[0])
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
     settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
@@ -736,7 +736,7 @@ def test_videostudio_veo_fal_each_beat_uses_same_frame(monkeypatch):
     veo_fal = FakeFalVeoClient()
     nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
 
-    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips: clips[0])
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
     settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
@@ -759,7 +759,7 @@ def test_videostudio_veo_fal_chains_tail_frame_to_next_beat(monkeypatch):
     veo_fal = FakeFalVeoClient()
     nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
 
-    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips: clips[0])
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
     chained = iter(["data/fake/chain1.png", "data/fake/chain2.png"])
     monkeypatch.setattr(VideoStudio, "_chain_frame", lambda self, clip: next(chained))
 
@@ -812,7 +812,7 @@ def test_videostudio_veo_fal_duration_is_clip_sec_times_beats(monkeypatch):
     veo_fal = FakeFalVeoClient()
     nano = FakeNanoBananaClient()
 
-    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips: clips[0])
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
     settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
@@ -873,7 +873,7 @@ def test_videostudio_veo_fal_veo_fal_client_owned_is_closed(monkeypatch, tmp_pat
         return c
 
     monkeypatch.setattr(vvf_module, "FalVeoClient", _fake_cls)
-    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips: clips[0])
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
     settings = _veo_fal_settings(NUTTI_MEDIA_DIR=str(tmp_path))
     nano = FakeNanoBananaClient()
