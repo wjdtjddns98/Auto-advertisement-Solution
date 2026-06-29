@@ -196,6 +196,19 @@ def test_build_beat_audio_only_no_caption():
     assert "no background music" in p
 
 
+def test_build_beat_final_cta_adds_voice_anchor():
+    """final_cta=True(마지막 비트)면 CTA 음성 앵커가 붙고, 기본(False)이면 안 붙는다.
+
+    CTA 대사가 권유·느낌표 톤이라 Veo가 음성을 들뜨게 바꾸는 경향(2026-06-29 PO)을
+    마지막 비트에만 추가로 억제. 비-CTA 비트는 앵커가 없어 프롬프트가 불필요하게
+    길어지지 않는다.
+    """
+    builder = VeoPromptBuilder()
+    anchor = "This is the final line of the series"
+    assert anchor not in builder.build_beat("일반 비트", final_cta=False)
+    assert anchor in builder.build_beat("지금 확인해보세요", final_cta=True)
+
+
 # --- 섹션 2: VideoStudio._frame_prompt ---
 
 

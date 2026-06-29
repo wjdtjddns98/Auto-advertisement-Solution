@@ -377,8 +377,12 @@ class VeoPromptBuilder:
         "cute Little girl Korean voice, sounding about 6 years old, slightly high-pitched, "
         "cheeky and energetic, with a warm soft timbre and a consistent speaking rhythm at "
         "a lively natural pace. Keep the identical timbre, pitch, accent, and speaking speed "
-        "in every clip; do not change the voice, age, or switch to a different speaker for "
-        "emphasis or for the final call-to-action line. "
+        "in every clip. Keep this exact same voice even on excited, exclamatory, or "
+        "call-to-action lines: do not raise the pitch, do not get louder, do not turn into "
+        "an excited announcer or a promotional voice-over, and never switch to a different "
+        "speaker or a different age — every line, including the final call-to-action, must "
+        "sound like the exact same little girl speaking in the same calm, even tone as the "
+        "earlier lines. "
         # 발화 후 잉여 구간 BGM 채움 억제 — Veo가 대사가 끝난 뒤 남는 시간을 배경음악으로
         # 채우면 무음 트림이 발화 끝을 못 잡아 끝부분 헛짓이 남는다(2026-06-29 PO 실측).
         "This single spoken voice is the only audio: there is no background music, "
@@ -436,6 +440,15 @@ class VeoPromptBuilder:
         "people. Absolutely no text, subtitles, captions, letters, numbers, words, logos, "
         "brand names, watermarks, or UI overlays anywhere in the frame."
     )
+    # 마지막 비트(CTA) 전용 음성 앵커 — CTA 대사가 권유·느낌표 톤이라 Veo가 음성을 더
+    # 들뜨거나 아나운서처럼 바꾸는 경향이 강하다(2026-06-29 PO 실측). 마지막 비트
+    # 프롬프트에만 추가로 박아 앞 비트와 동일 화자·톤으로 못박는다(_VOICE와 이중 방어).
+    _CTA_VOICE_ANCHOR = (
+        "This is the final line of the series. Speak it in the exact same voice, pitch, "
+        "age, and calm even tone as the previous clips — the same little girl, not louder, "
+        "not more excited, not an announcer or promo voice. Do not change the speaker for "
+        "this call to action."
+    )
     # ========================= PO 수정 구역 끝 (영상 연출) =========================
 
     def build(
@@ -459,6 +472,7 @@ class VeoPromptBuilder:
         off_screen_interviewer: bool = True,
         style: EpisodeStyle | None = None,
         motion_release: bool = False,
+        final_cta: bool = False,
     ) -> str:
         """비트 대사 한 토막으로 8초 단일컷 Veo 프롬프트를 만든다.
 
@@ -473,6 +487,8 @@ class VeoPromptBuilder:
         `motion_release=True`(끝프레임 고정 모드 전용)면 정적인 _MOTION_HOLD 대신 자연스러운
         제스처를 허용하는 _MOTION_LIVELY를 써 생동감을 준다 — 끝 프레임이 모델로 고정되므로
         중간 모션을 풀어도 경계는 매끄럽다.
+        `final_cta=True`(마지막 비트 전용)면 _CTA_VOICE_ANCHOR를 덧붙여 CTA 대사에서
+        음성이 들뜨거나 화자가 바뀌는 경향을 추가로 억제한다(2026-06-29 PO).
         """
         dialogue = _sanitize_prompt_text(dialogue_text.strip() or "", _MAX_DIALOGUE_CHARS)
         speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
@@ -481,11 +497,12 @@ class VeoPromptBuilder:
             scene = f"The puppy wears {style.outfit}, {style.setting}. "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
         motion = self._MOTION_LIVELY if motion_release else self._MOTION_HOLD
+        cta = f"{self._CTA_VOICE_ANCHOR} " if final_cta else ""
         return (
             f"A photorealistic shot of {self._PERSONA}, {speaking}, "
             f"saying (as spoken audio only, no on-screen text): '{dialogue}'. "
             f"{scene}{mic}"
-            f"{self._VOICE} "
+            f"{self._VOICE} {cta}"
             f"{self._CAMERA} "
             f"{motion} "
             f"{self._CONTINUITY} "
@@ -652,7 +669,11 @@ class VideoStudio:
                 # lock 모드는 끝 프레임이 모델로 고정되므로 모션 제약을 풀어(_MOTION_LIVELY)
                 # 생동감을 준다(2026-06-29 PO). 기본 image-to-video 경로는 _MOTION_HOLD 유지.
                 prompt = builder.build_beat(
-                    beat, off_screen_interviewer=False, style=style, motion_release=lock
+                    beat,
+                    off_screen_interviewer=False,
+                    style=style,
+                    motion_release=lock,
+                    final_cta=(i == len(beats)),
                 )
                 if lock:
                     # 시작·끝 모두 마스코트 프레임으로 고정(끝프레임 고정 모드).
