@@ -28,6 +28,13 @@ from nutti.config import Settings
 from nutti.integrations.video import VideoStudio
 from nutti.models import Script
 
+# Windows 콘솔(cp949)에서 한글·em dash·≈ 등 비ASCII 문자가 UnicodeEncodeError로
+# 마지막 출력을 깨뜨리는 것을 막는다(영상 생성과 무관한 print 단계 실패 방지).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # 대본 규칙(코드 주석 기준): 4비트(훅·핵심·팁·CTA) + 훅으로 시작(밋밋한 인사 금지)
 # + 마지막 비트(CTA)에 브랜드명('Nutti'·'누띠') 언급 금지 + 비트당 약 40~48자(8초를 꽉 채워
 # 비트 사이 공백 방지, 50자 이내). 다양한 주제로 실전 품질을 확인한다.
