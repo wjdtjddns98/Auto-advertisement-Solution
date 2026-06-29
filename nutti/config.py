@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     # 대신 first-last-frame-to-video 모델을 써 각 비트 클립의 시작·끝 프레임을 동일한
     # 마스코트 프레임으로 고정한다 — 모든 클립이 같은 포즈로 시작·종료해 경계가 항상
     # 같은 프레임에서 만난다(체이닝 불요). False면 기존 image-to-video 경로(프레임 체이닝).
-    veo_fal_endframe_lock: bool = Field(default=False, alias="NUTTI_VEO_FAL_ENDFRAME_LOCK")
+    veo_fal_endframe_lock: bool = Field(default=True, alias="NUTTI_VEO_FAL_ENDFRAME_LOCK")
     # 끝프레임 고정 모드에서 쓰는 first-last-frame-to-video 모델 ID. image-to-video와
     # 단가 동일($0.05/초·720p). 입력 필드가 다르다(image_url 대신 first_frame_url +
     # last_frame_url). endframe_lock=True일 때만 사용.

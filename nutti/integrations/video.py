@@ -406,6 +406,22 @@ class VeoPromptBuilder:
         "ends on a clean, fully-lit, sharp frame with the puppy seated and centered — no "
         "fade-out, no dimming, no blur at the end."
     )
+    # 끝프레임 고정(lock) 모드 전용 모션 지시(2026-06-29 PO: "모션홀드 풀어 생동감").
+    # first-last-frame 모델이 시작·끝 프레임을 동일 마스코트 프레임으로 강제하므로, 중간에
+    # 자유롭게 움직여도 클립은 항상 같은 끝 포즈로 수렴한다 — 정적인 _MOTION_HOLD 대신
+    # 앉은 채 자연스러운 제스처를 허용해 생기를 준다. 단 화면 이탈·기립·눕기는 막아(막판
+    # 이상행동 방지) 끝을 차분한 앉은 자세로 마무리하게 하고, 끝 페이드는 금지한다
+    # (negative_prompt의 "lying down/walking out/camera movement" 억제와 이중 방어).
+    _MOTION_LIVELY = (
+        "The puppy stays seated and centered in frame the whole time but moves naturally "
+        "and expressively as it talks — gentle head tilts, ear and body movements, "
+        "blinking, and lively little gestures that bring energy to the shot. It never "
+        "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
+        "leaves the frame. For the final one to two seconds it settles back into a calm, "
+        "upright, centered seated pose facing forward and holds completely still, so the "
+        "clip ends on a clean, fully-lit, sharp frame with the puppy sitting upright and "
+        "centered — no fade-out, no dimming, no blur at the end."
+    )
     _NEGATIVE = (
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
         "costume, person in a costume, or plush toy. Strictly no additional animals, no "
@@ -434,6 +450,7 @@ class VeoPromptBuilder:
         *,
         off_screen_interviewer: bool = True,
         style: EpisodeStyle | None = None,
+        motion_release: bool = False,
     ) -> str:
         """비트 대사 한 토막으로 8초 단일컷 Veo 프롬프트를 만든다.
 
@@ -445,6 +462,9 @@ class VeoPromptBuilder:
         한글 자막을 임의 렌더하면 깨진 글자로 나오기 때문(settings.veo_fal_negative_prompt와 이중 방어).
         대사는 `_sanitize_prompt_text`로 정제한다 — 작은따옴표가 있으면 인용 구분자를
         탈출해 금지 지시(추가 동물·사람·텍스트 금지)를 덮어쓰는 주입이 가능하기 때문이다.
+        `motion_release=True`(끝프레임 고정 모드 전용)면 정적인 _MOTION_HOLD 대신 자연스러운
+        제스처를 허용하는 _MOTION_LIVELY를 써 생동감을 준다 — 끝 프레임이 모델로 고정되므로
+        중간 모션을 풀어도 경계는 매끄럽다.
         """
         dialogue = _sanitize_prompt_text(dialogue_text.strip() or "", _MAX_DIALOGUE_CHARS)
         speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
@@ -452,13 +472,14 @@ class VeoPromptBuilder:
         if style is not None:
             scene = f"The puppy wears {style.outfit}, {style.setting}. "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
+        motion = self._MOTION_LIVELY if motion_release else self._MOTION_HOLD
         return (
             f"A photorealistic shot of {self._PERSONA}, {speaking}, "
             f"saying (as spoken audio only, no on-screen text): '{dialogue}'. "
             f"{scene}{mic}"
             f"{self._VOICE} "
             f"{self._CAMERA} "
-            f"{self._MOTION_HOLD} "
+            f"{motion} "
             f"{self._CONTINUITY} "
             f"{_CINEMATIC_LOOK} "
             "Format: tall vertical portrait orientation, single continuous 8-second shot. "
@@ -611,7 +632,11 @@ class VideoStudio:
             for i, beat in enumerate(beats, start=1):
                 # 정면 1인 발화(off_screen_interviewer=False) — 인터뷰 마이크 연출 제거
                 # (2026-06-16 PO 피드백: 마이크 구도 아예 삭제).
-                prompt = builder.build_beat(beat, off_screen_interviewer=False, style=style)
+                # lock 모드는 끝 프레임이 모델로 고정되므로 모션 제약을 풀어(_MOTION_LIVELY)
+                # 생동감을 준다(2026-06-29 PO). 기본 image-to-video 경로는 _MOTION_HOLD 유지.
+                prompt = builder.build_beat(
+                    beat, off_screen_interviewer=False, style=style, motion_release=lock
+                )
                 if lock:
                     # 시작·끝 모두 마스코트 프레임으로 고정(끝프레임 고정 모드).
                     clip_path = client.generate(frame_path, prompt, last_frame_path=frame_path)

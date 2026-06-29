@@ -96,6 +96,29 @@ def test_prompt_builder_includes_outfit_continuity():
     assert "clothing" in prompt
 
 
+def test_prompt_builder_motion_release_uses_lively_motion():
+    """motion_release=True면 정적 _MOTION_HOLD 대신 생동감 _MOTION_LIVELY를 쓴다.
+
+    2026-06-29 PO: 끝프레임 고정(lock) 모드는 끝 프레임이 모델로 고정되므로 중간 모션을
+    풀어 생기를 준다. 단 화면 이탈은 금지하고 끝은 차분한 앉은 자세로 수렴한다.
+    """
+    builder = VeoPromptBuilder()
+    lively = builder.build_beat("안녕", motion_release=True)
+    static = builder.build_beat("안녕", motion_release=False)
+    # lively: 자연스러운 제스처 허용, 정적 고정 문구는 없음.
+    assert "moves naturally and expressively" in lively
+    assert "stays in the exact same upright seated position" not in lively
+    # 화면 이탈 방지·막판 안정화는 lively에도 유지(막판 이상행동 방어).
+    assert "leaves the frame" in lively
+    # 끝 직전 1~2초 안정화(웅크림/고개숙임으로 무너지는 막판 이상행동 방지).
+    assert "final one to two seconds" in lively
+    assert "holds completely still" in lively
+    assert "no fade-out" in lively
+    # 기본(static)은 기존 _MOTION_HOLD 유지(하위호환).
+    assert "stays in the exact same upright seated position" in static
+    assert "moves naturally and expressively" not in static
+
+
 def test_prompt_builder_excludes_forbidden_elements():
     """깨짐 주원인(추가 동물·사람·화면 내 텍스트) 금지 지시가 포함된다."""
     prompt = VeoPromptBuilder().build(_script())
@@ -582,6 +605,7 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
         VeoPromptBuilder._SPEAKING_DIRECT,
         VeoPromptBuilder._CAMERA,
         VeoPromptBuilder._MOTION_HOLD,
+        VeoPromptBuilder._MOTION_LIVELY,
         VeoPromptBuilder._CONTINUITY,
         VeoPromptBuilder._NEGATIVE,
         video_module._MASCOT_APPEARANCE,

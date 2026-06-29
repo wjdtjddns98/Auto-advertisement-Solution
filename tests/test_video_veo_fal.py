@@ -268,6 +268,7 @@ def test_fal_veo_client_status_result_use_app_id_not_full_model(tmp_path):
         tmp_path,
         fake,
         NUTTI_VEO_FAL_MODEL="fal-ai/veo3.1/lite/image-to-video",
+        NUTTI_VEO_FAL_ENDFRAME_LOCK="false",
     )
     client.generate(_frame_file(tmp_path), "prompt")
 
@@ -290,7 +291,7 @@ def test_fal_veo_client_submit_payload_contains_required_fields(tmp_path):
         get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
         download_response=_Resp(content=b"X"),
     )
-    client = _fal_veo_client(tmp_path, fake)
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="false")
     client.generate(_frame_file(tmp_path), "test prompt")
 
     assert len(fake.post_calls) == 1
@@ -349,13 +350,13 @@ def test_fal_veo_client_endframe_lock_distinct_last_frame(tmp_path):
     assert payload["first_frame_url"] != payload["last_frame_url"]
 
 
-def test_fal_veo_client_default_mode_has_no_frame_fields(tmp_path):
-    """endframe_lock 미설정(기본 False)이면 image_url만, first/last 필드는 없다(회귀 방어)."""
+def test_fal_veo_client_image_to_video_mode_has_no_frame_fields(tmp_path):
+    """endframe_lock=False(image-to-video 경로)면 image_url만, first/last 필드는 없다(회귀 방어)."""
     fake = FakeVeoFalHttp(
         get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
         download_response=_Resp(content=b"X"),
     )
-    client = _fal_veo_client(tmp_path, fake)
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="false")
     client.generate(_frame_file(tmp_path), "prompt")
 
     _, payload = fake.post_calls[0]
@@ -807,10 +808,21 @@ def test_videostudio_veo_fal_endframe_lock_fixes_frames_and_skips_chaining(monke
     studio.produce(_script(beats=["b1", "b2", "b3"]))
 
     assert len(veo_fal.calls) == 3
-    # 매 비트: 시작 프레임 = 끝 프레임 = 원본 마스코트 프레임.
-    for frame_path, _prompt, last_frame in veo_fal.calls:
+    # 매 비트: 시작 프레임 = 끝 프레임 = 원본 마스코트 프레임 + lock 모드는 모션 해제 프롬프트.
+    for frame_path, prompt, last_frame in veo_fal.calls:
         assert frame_path == "data/fake/shared_frame.jpg"
         assert last_frame == "data/fake/shared_frame.jpg"
+        # 끝 프레임이 고정되므로 모션을 풀어 생동감을 준다(_MOTION_LIVELY).
+        assert "moves naturally and expressively" in prompt
+
+
+def test_veo_fal_endframe_lock_default_is_true(tmp_path):
+    """끝프레임 고정이 기본 ON(2026-06-29 PO): 막판 이상행동/화면전환 근본 해결 경로가 기본값.
+
+    이 머신의 .env 누수는 conftest 격리가 막으므로, override 없는 설정의 코드 기본값을 본다.
+    """
+    settings = _veo_fal_settings(NUTTI_MEDIA_DIR=str(tmp_path))
+    assert settings.veo_fal_endframe_lock is True
 
 
 def test_videostudio_veo_fal_each_beat_uses_same_frame(monkeypatch):
@@ -824,7 +836,10 @@ def test_videostudio_veo_fal_each_beat_uses_same_frame(monkeypatch):
 
     monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
-    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
+    # 체이닝 폴백은 image-to-video 경로(lock=False) 전용 동작이라 명시적으로 끈다(기본 True).
+    settings = _veo_fal_settings(
+        NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_ENDFRAME_LOCK="false"
+    )
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
     script = _script(beats=["b1", "b2", "b3"])
     studio.produce(script)
@@ -849,7 +864,10 @@ def test_videostudio_veo_fal_chains_tail_frame_to_next_beat(monkeypatch):
     chained = iter(["data/fake/chain1.png", "data/fake/chain2.png"])
     monkeypatch.setattr(VideoStudio, "_chain_frame", lambda self, clip: next(chained))
 
-    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
+    # 체이닝은 image-to-video 경로(lock=False) 전용 동작이라 명시적으로 끈다(기본 True).
+    settings = _veo_fal_settings(
+        NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_ENDFRAME_LOCK="false"
+    )
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
     script = _script(beats=["b1", "b2", "b3"])
     studio.produce(script)
@@ -871,7 +889,7 @@ def test_produce_veo_fal_cleans_up_completed_clips_on_midloop_failure(tmp_path):
         def __init__(self):
             self.n = 0
 
-        def generate(self, frame_path, prompt):
+        def generate(self, frame_path, prompt, *, last_frame_path=None):
             self.n += 1
             if self.n == 1:
                 p = tmp_path / "veo_fal_leak1.mp4"
