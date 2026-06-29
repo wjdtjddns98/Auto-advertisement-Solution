@@ -98,6 +98,13 @@ def test_script_system_prompt_bans_brand_in_last_beat():
     assert "절대 언급하지 않는다" in SCRIPT_SYSTEM_PROMPT
 
 
+def test_script_system_prompt_cta_calm_tone():
+    """CTA 비트를 차분한 권유체로 쓰게 가이드한다(2026-06-29 PO: 마지막 비트 음성이
+    들뜨며 화자가 바뀌는 경향 완화 — 입력 대사 톤 균일화)."""
+    assert "차분한 권유체" in SCRIPT_SYSTEM_PROMPT
+    assert "느낌표를 쓰지 말 것" in SCRIPT_SYSTEM_PROMPT
+
+
 def test_script_system_prompt_pins_beat_char_range():
     """SCRIPT_SYSTEM_PROMPT가 비트당 길이 범위(8초 채움~50자 상한)를 명시한다(리버트 가드).
 
