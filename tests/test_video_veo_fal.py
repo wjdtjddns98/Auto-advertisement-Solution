@@ -194,11 +194,11 @@ class FakeFalVeoClient:
 
     def __init__(self, video_path: str = "data/fake/veo_fal.mp4"):
         self.video_path = video_path
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, str | None]] = []
         self.close_count = 0
 
-    def generate(self, frame_path: str, prompt: str) -> str:
-        self.calls.append((frame_path, prompt))
+    def generate(self, frame_path: str, prompt: str, *, last_frame_path: str | None = None) -> str:
+        self.calls.append((frame_path, prompt, last_frame_path))
         return self.video_path
 
     def close(self):
@@ -304,6 +304,64 @@ def test_fal_veo_client_submit_payload_contains_required_fields(tmp_path):
     assert "base64," in payload["image_url"]
     assert payload.get("generate_audio") is True
     assert payload.get("aspect_ratio") == "9:16"
+
+
+def test_fal_veo_client_endframe_lock_uses_flf_model_and_dual_frames(tmp_path):
+    """endframe_lock=True면 first-last-frame 모델 + first/last 프레임을 보낸다.
+
+    2026-06-29 PO: 시작·끝 프레임을 동일 마스코트 프레임으로 고정해 비트 경계 끊김을
+    근본 완화. 끝 프레임 미지정이면 시작 프레임과 동일해야 한다.
+    """
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        download_response=_Resp(content=b"X"),
+    )
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="true")
+    client.generate(_frame_file(tmp_path), "test prompt")
+
+    # 제출 URL은 first-last-frame 모델 경로여야 한다.
+    submit_url = fake.post_calls[0][0]
+    assert submit_url.endswith("/fal-ai/veo3.1/lite/first-last-frame-to-video")
+    # status/result는 여전히 앱 ID(앞 2세그먼트=fal-ai/veo3.1) 기반.
+    assert "/fal-ai/veo3.1/requests/" in fake.status_calls[0]
+
+    _, payload = fake.post_calls[0]
+    assert "image_url" not in payload  # image-to-video 필드는 없어야 함
+    assert payload["first_frame_url"].startswith("data:image/")
+    assert payload["last_frame_url"].startswith("data:image/")
+    # 끝 프레임 미지정 → 시작 프레임과 동일 프레임으로 고정.
+    assert payload["first_frame_url"] == payload["last_frame_url"]
+
+
+def test_fal_veo_client_endframe_lock_distinct_last_frame(tmp_path):
+    """last_frame_path를 명시하면 시작 프레임과 다른 끝 프레임 data URI를 보낸다."""
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        download_response=_Resp(content=b"X"),
+    )
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="true")
+    start = _frame_file(tmp_path)
+    end = tmp_path / "end_frame.png"
+    end.write_bytes(b"\x89PNG\r\n\x1a\n" + b"DIFFERENT-FRAME-BYTES")
+    client.generate(start, "prompt", last_frame_path=str(end))
+
+    _, payload = fake.post_calls[0]
+    assert payload["first_frame_url"] != payload["last_frame_url"]
+
+
+def test_fal_veo_client_default_mode_has_no_frame_fields(tmp_path):
+    """endframe_lock 미설정(기본 False)이면 image_url만, first/last 필드는 없다(회귀 방어)."""
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        download_response=_Resp(content=b"X"),
+    )
+    client = _fal_veo_client(tmp_path, fake)
+    client.generate(_frame_file(tmp_path), "prompt")
+
+    _, payload = fake.post_calls[0]
+    assert "image_url" in payload
+    assert "first_frame_url" not in payload
+    assert "last_frame_url" not in payload
 
 
 def test_fal_veo_client_submit_payload_includes_negative_prompt(tmp_path):
@@ -725,6 +783,34 @@ def test_videostudio_veo_fal_routes_to_veo_fal_path(monkeypatch):
     # FalVeoClient.generate가 호출됐어야 한다.
     assert len(veo_fal.calls) == 1
     assert asset.script_id == script.id
+
+
+def test_videostudio_veo_fal_endframe_lock_fixes_frames_and_skips_chaining(monkeypatch):
+    """lock 모드: 모든 비트가 같은 마스코트 프레임으로 시작·끝 고정하고 체이닝을 건너뛴다.
+
+    2026-06-29 PO 아이디어. 끝프레임 고정 모드에서는 _chain_frame을 호출하지 않고(끝 프레임을
+    frame_path로 직접 고정), 매 비트 generate가 시작·끝 모두 원본 마스코트 프레임을 받아야 한다.
+    """
+    veo_fal = FakeFalVeoClient()
+    nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
+
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
+    # lock 모드는 체이닝을 하지 않아야 한다 — _chain_frame이 불리면 명시적 실패.
+    def _no_chain(self, clip_path):
+        raise AssertionError("lock 모드에서 _chain_frame이 호출됨")
+    monkeypatch.setattr(VideoStudio, "_chain_frame", _no_chain)
+
+    settings = _veo_fal_settings(
+        NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_ENDFRAME_LOCK="true"
+    )
+    studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
+    studio.produce(_script(beats=["b1", "b2", "b3"]))
+
+    assert len(veo_fal.calls) == 3
+    # 매 비트: 시작 프레임 = 끝 프레임 = 원본 마스코트 프레임.
+    for frame_path, _prompt, last_frame in veo_fal.calls:
+        assert frame_path == "data/fake/shared_frame.jpg"
+        assert last_frame == "data/fake/shared_frame.jpg"
 
 
 def test_videostudio_veo_fal_each_beat_uses_same_frame(monkeypatch):

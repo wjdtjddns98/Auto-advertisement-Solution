@@ -599,21 +599,31 @@ class VideoStudio:
         clips: list[str] = []
         # 가드된 프레임 체이닝용 임시 프레임(정리 대상). 원본 frame_path는 제외.
         chain_frames: list[str] = []
-        # 각 비트의 시작 프레임. 1번 비트는 마스코트 Kontext 프레임에서 시작하고, 이후
-        # 비트는 직전 클립의 끝 안정 프레임으로 이어 붙여 비트 경계 점프를 줄인다.
+        # 끝프레임 고정 모드(2026-06-29 PO): 모든 비트가 같은 마스코트 프레임에서 시작·종료
+        # 하도록 first/last 프레임을 frame_path로 고정한다 — 클립이 같은 포즈로 시작·끝나
+        # 비트 경계가 항상 동일 프레임에서 만나 끊김이 없다. 체이닝(끝 프레임 추출)은 불요.
+        lock = bool(self.settings.veo_fal_endframe_lock)
+        # 각 비트의 시작 프레임. 기본 모드는 1번 비트가 마스코트 Kontext 프레임에서 시작하고
+        # 이후 비트는 직전 클립의 끝 안정 프레임으로 이어 붙인다(체이닝). lock 모드는 항상
+        # frame_path 고정.
         current_frame = frame_path
         try:
             for i, beat in enumerate(beats, start=1):
                 # 정면 1인 발화(off_screen_interviewer=False) — 인터뷰 마이크 연출 제거
                 # (2026-06-16 PO 피드백: 마이크 구도 아예 삭제).
                 prompt = builder.build_beat(beat, off_screen_interviewer=False, style=style)
-                clip_path = client.generate(current_frame, prompt)
+                if lock:
+                    # 시작·끝 모두 마스코트 프레임으로 고정(끝프레임 고정 모드).
+                    clip_path = client.generate(frame_path, prompt, last_frame_path=frame_path)
+                else:
+                    clip_path = client.generate(current_frame, prompt)
                 log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
                 clips.append(clip_path)
-                # 가드된 체이닝: 다음 비트가 있으면 이 클립의 끝 안정 프레임을 다음 시작
-                # 프레임으로 쓴다. 추출·품질 가드(검정/빈/가로) 실패 시 None → 원본 마스코트
-                # 프레임으로 안전 폴백(망가진 프레임이 다음 클립에 누적되지 않게 하는 핵심 가드).
-                if i < len(beats):
+                # 가드된 체이닝(기본 모드만): 다음 비트가 있으면 이 클립의 끝 안정 프레임을
+                # 다음 시작 프레임으로 쓴다. 추출·품질 가드(검정/빈/가로) 실패 시 None → 원본
+                # 마스코트 프레임으로 안전 폴백(망가진 프레임이 다음 클립에 누적되지 않게 하는
+                # 핵심 가드). lock 모드는 끝프레임을 frame_path로 고정하므로 체이닝하지 않는다.
+                if not lock and i < len(beats):
                     chained = self._chain_frame(clip_path)
                     if chained is not None:
                         chain_frames.append(chained)
@@ -789,7 +799,8 @@ class VideoStudio:
             out = str(Path(self.settings.nutti_media_dir) / f"veo_fal_trim_{uuid4().hex[:8]}.mp4")
             cut = subprocess.run(
                 [ff, "-y", "-hide_banner", "-ss", f"{start_t:.3f}", "-i", clip,
-                 "-t", f"{out_sec:.3f}", "-c:v", "libx264", "-c:a", "aac", out],
+                 "-t", f"{out_sec:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                 "-c:a", "aac", out],
                 capture_output=True,
             )
             if cut.returncode != 0 or not Path(out).exists():
@@ -873,6 +884,12 @@ class VideoStudio:
             f"[{vlabel}]",
             "-map",
             f"[{alabel}]",
+            # 출력 코덱/픽셀포맷 강제(2026-06-29): fal Veo 원본은 yuv444p(High 4:4:4)라
+            # -pix_fmt 미지정 시 출력도 yuv444p가 되어 Windows 기본 플레이어·브라우저가
+            # "지원되지 않는 인코딩"으로 거부한다. yuv420p+High 프로파일로 보편 호환 보장,
+            # +faststart로 웹 스트리밍 즉시 재생.
+            "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-movflags", "+faststart",
             str(out_path),
         ]
         try:
@@ -893,18 +910,26 @@ class VideoStudio:
         inputs: list[str] = []
         for clip in clips:
             inputs += ["-i", clip]
-        streams = "".join(f"[{i}:v][{i}:a]" for i in range(len(clips)))
-        filt = f"{streams}concat=n={len(clips)}:v=1:a=1[v][a]"
+        n = len(clips)
+        # concat 필터는 모든 입력의 픽셀포맷/SAR/fps가 같아야 한다 — fal 클립이 섞이면
+        # (yuv444p/yuv420p 혼재) 실패하므로 입력마다 yuv420p·30fps·SAR=1로 정규화한다.
+        parts: list[str] = [f"[{i}:v]format=yuv420p,fps=30,setsar=1[cv{i}]" for i in range(n)]
+        streams = "".join(f"[cv{i}][{i}:a]" for i in range(n))
+        parts.append(f"{streams}concat=n={n}:v=1:a=1[v][a]")
         cmd = [
             imageio_ffmpeg.get_ffmpeg_exe(),
             "-y",
             *inputs,
             "-filter_complex",
-            filt,
+            ";".join(parts),
             "-map",
             "[v]",
             "-map",
             "[a]",
+            # 출력 코덱/픽셀포맷 강제(2026-06-29): yuv444p 원본이 그대로 새어 Windows
+            # 기본 플레이어·브라우저가 거부하는 것을 막는다(_stitch_dissolve와 동일 처방).
+            "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-movflags", "+faststart",
             str(out_path),
         ]
         try:

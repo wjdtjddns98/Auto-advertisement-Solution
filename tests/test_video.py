@@ -244,8 +244,14 @@ def test_stitch_multi_clip_invokes_ffmpeg_concat(tmp_path, monkeypatch):
     studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
     out = studio._stitch(["a.mp4", "b.mp4"])
     assert out.endswith(".mp4")
-    assert "-filter_complex" in captured["cmd"]
-    assert "concat=n=2" in " ".join(captured["cmd"])
+    cmd = captured["cmd"]
+    assert "-filter_complex" in cmd
+    joined = " ".join(cmd)
+    assert "concat=n=2" in joined
+    # yuv444p(fal 원본)가 그대로 새어 Windows/브라우저가 거부하는 회귀 방지 —
+    # 출력은 항상 yuv420p로 강제돼야 한다(입력 정규화 + 출력 -pix_fmt 양쪽).
+    assert "-pix_fmt" in cmd and "yuv420p" in cmd
+    assert "format=yuv420p" in joined  # concat 입력 정규화
 
 
 def test_stitch_applies_dissolve_when_durations_known(tmp_path, monkeypatch):
@@ -269,10 +275,16 @@ def test_stitch_applies_dissolve_when_durations_known(tmp_path, monkeypatch):
     studio = VideoStudio(settings)
     out = studio._stitch(["a.mp4", "b.mp4"], [3.0, 3.0])
     assert out.endswith(".mp4")
-    joined = " ".join(captured["cmd"])
+    cmd = captured["cmd"]
+    joined = " ".join(cmd)
     assert "xfade=transition=fade" in joined
     assert "acrossfade=d=0.250" in joined
     assert "concat=n=2" not in joined  # 디졸브 경로는 concat이 아님
+    # 디졸브 출력도 보편 호환 yuv420p로 강제(yuv444p 누출 회귀 방지).
+    assert "-pix_fmt" in cmd and "yuv420p" in cmd
+    # 입력 정규화도 검증 — 이게 빠지면 yuv444p/420p 혼재 입력에서 xfade가 런타임
+    # 실패→concat 조용히 폴백해 디졸브가 무력화된다(concat 테스트와 대칭).
+    assert "format=yuv420p" in joined
 
 
 def test_stitch_falls_back_to_concat_when_duration_unknown(tmp_path, monkeypatch):
@@ -325,6 +337,42 @@ def test_stitch_dissolve_ffmpeg_failure_falls_back_to_concat(tmp_path, monkeypat
     assert out.endswith(".mp4")
     assert any("xfade" in c for c in calls)  # 디졸브 시도함
     assert any("concat=n=2" in c for c in calls)  # 그리고 concat 폴백함
+
+
+def test_trim_to_speech_reencode_forces_yuv420p(tmp_path, monkeypatch):
+    """앞뒤 침묵 트림 재인코딩이 보편 호환 yuv420p로 강제하는지 검증.
+
+    단일 비트 대본은 trim → `_stitch`(클립 1개면 즉시 반환) 경로를 타므로 concat/dissolve의
+    포맷 정규화가 개입하지 않는다 — 이 trim의 `-pix_fmt yuv420p`가 단일 비트 출력의
+    유일한 yuv444p 누출 방어막이다(2026-06-29 회귀 방지).
+    """
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        joined = " ".join(cmd)
+
+        class _R:
+            returncode = 0
+
+        if "silencedetect" in joined:
+            # probe: 앞 1초·뒤(7초~EOF) 침묵 → out_sec가 dur보다 0.5초+ 짧아 cut 발동.
+            _R.stderr = (
+                b"Duration: 00:00:08.00, start: 0.000000\n"
+                b"silence_start: 0.0\nsilence_end: 1.0\n"
+                b"silence_start: 7.0\n"
+            )
+            return _R()
+        captured["cut"] = cmd  # 재인코딩(cut) cmd 캡처
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    studio._trim_to_speech("clip.mp4")
+    assert "cut" in captured, "트림 재인코딩이 호출되지 않음(침묵 검출 경로 확인)"
+    assert "-c:v" in captured["cut"] and "libx264" in captured["cut"]
+    assert "-pix_fmt" in captured["cut"] and "yuv420p" in captured["cut"]
 
 
 def test_stitch_ffmpeg_failure_raises_render_error(tmp_path, monkeypatch):
