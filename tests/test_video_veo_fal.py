@@ -728,7 +728,11 @@ def test_videostudio_veo_fal_routes_to_veo_fal_path(monkeypatch):
 
 
 def test_videostudio_veo_fal_each_beat_uses_same_frame(monkeypatch):
-    """각 비트 클립 생성 시 같은 시작 프레임(frame_path)이 공유됨을 검증한다."""
+    """체이닝 폴백 경로: 끝 프레임 추출이 실패하면 모든 비트가 원본 마스코트 프레임을 공유한다.
+
+    FakeFalVeoClient가 디스크에 없는 클립 경로를 반환하므로 _chain_frame이 None을 돌려
+    (폴백) 모든 비트가 같은 frame_path로 generate된다. 체이닝 성공 경로는 아래 별도 테스트에서 검증.
+    """
     veo_fal = FakeFalVeoClient()
     nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
 
@@ -739,10 +743,38 @@ def test_videostudio_veo_fal_each_beat_uses_same_frame(monkeypatch):
     script = _script(beats=["b1", "b2", "b3"])
     studio.produce(script)
 
-    # 모든 비트 generate 호출에 같은 frame_path가 전달됐어야 한다.
+    # 폴백: 모든 비트 generate 호출에 같은 원본 frame_path가 전달됐어야 한다.
     assert len(veo_fal.calls) == 3
     frame_paths = [call[0] for call in veo_fal.calls]
     assert all(p == "data/fake/shared_frame.jpg" for p in frame_paths)
+
+
+def test_videostudio_veo_fal_chains_tail_frame_to_next_beat(monkeypatch):
+    """체이닝 성공 경로: 각 클립의 끝 안정 프레임이 다음 비트 시작 프레임으로 쓰인다.
+
+    _chain_frame이 실존 프레임(가드 통과)을 반환하면, 비트 1은 원본 마스코트 프레임에서
+    시작하지만 비트 2·3은 직전 클립에서 추출한 chained 프레임으로 generate돼야 한다
+    (비트 경계 자세 점프 완화의 핵심 동작). _chain_frame을 결정적으로 대체해 ffmpeg 없이 검증.
+    """
+    veo_fal = FakeFalVeoClient()
+    nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
+
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips: clips[0])
+    chained = iter(["data/fake/chain1.png", "data/fake/chain2.png"])
+    monkeypatch.setattr(VideoStudio, "_chain_frame", lambda self, clip: next(chained))
+
+    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
+    studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
+    script = _script(beats=["b1", "b2", "b3"])
+    studio.produce(script)
+
+    frame_paths = [call[0] for call in veo_fal.calls]
+    # 비트1=원본 마스코트, 비트2·3=직전 클립의 chained 프레임.
+    assert frame_paths == [
+        "data/fake/shared_frame.jpg",
+        "data/fake/chain1.png",
+        "data/fake/chain2.png",
+    ]
 
 
 def test_produce_veo_fal_cleans_up_completed_clips_on_midloop_failure(tmp_path):

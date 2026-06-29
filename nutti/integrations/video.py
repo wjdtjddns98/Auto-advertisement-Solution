@@ -384,6 +384,16 @@ class VeoPromptBuilder:
     _SPEAKING_OFF = "speaking in Korean to an off-screen interviewer"
     _SPEAKING_DIRECT = "speaking in Korean directly to the camera"
     _CAMERA = "Camera: locked-off tripod shot, no camera movement."
+    # 비트 클립이 독립 생성돼 끝 자세가 제각각이면 다음 클립과 점프가 생긴다(PO 피드백
+    # 2026-06-29). 자세를 처음부터 끝까지 고정하고, 끝을 페이드 없이 또렷한 프레임으로
+    # 마무리하게 해 프레임 체이닝(끝 프레임→다음 시작 프레임)이 안정적으로 물리도록 한다.
+    _MOTION_HOLD = (
+        "The puppy stays in the exact same upright seated position for the entire shot, "
+        "sitting still and centered, holding the same pose from the first frame to the "
+        "last frame; it does not lie down, stand up, walk, or leave the frame. The clip "
+        "ends on a clean, fully-lit, sharp frame with the puppy seated and centered — no "
+        "fade-out, no dimming, no blur at the end."
+    )
     _NEGATIVE = (
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
         "costume, person in a costume, or plush toy. Strictly no additional animals, no "
@@ -436,6 +446,7 @@ class VeoPromptBuilder:
             f"{scene}{mic}"
             f"{self._VOICE} "
             f"{self._CAMERA} "
+            f"{self._MOTION_HOLD} "
             f"{_CINEMATIC_LOOK} "
             "Format: tall vertical portrait orientation, single continuous 8-second shot. "
             f"{self._NEGATIVE}"
@@ -573,14 +584,30 @@ class VideoStudio:
         if client is None:
             client = owned = FalVeoClient(self.settings, sleep=self._sleep)
         clips: list[str] = []
+        # 가드된 프레임 체이닝용 임시 프레임(정리 대상). 원본 frame_path는 제외.
+        chain_frames: list[str] = []
+        # 각 비트의 시작 프레임. 1번 비트는 마스코트 Kontext 프레임에서 시작하고, 이후
+        # 비트는 직전 클립의 끝 안정 프레임으로 이어 붙여 비트 경계 점프를 줄인다.
+        current_frame = frame_path
         try:
             for i, beat in enumerate(beats, start=1):
                 # 정면 1인 발화(off_screen_interviewer=False) — 인터뷰 마이크 연출 제거
                 # (2026-06-16 PO 피드백: 마이크 구도 아예 삭제).
                 prompt = builder.build_beat(beat, off_screen_interviewer=False, style=style)
-                clip_path = client.generate(frame_path, prompt)
+                clip_path = client.generate(current_frame, prompt)
                 log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
                 clips.append(clip_path)
+                # 가드된 체이닝: 다음 비트가 있으면 이 클립의 끝 안정 프레임을 다음 시작
+                # 프레임으로 쓴다. 추출·품질 가드(검정/빈/가로) 실패 시 None → 원본 마스코트
+                # 프레임으로 안전 폴백(망가진 프레임이 다음 클립에 누적되지 않게 하는 핵심 가드).
+                if i < len(beats):
+                    chained = self._chain_frame(clip_path)
+                    if chained is not None:
+                        chain_frames.append(chained)
+                        current_frame = chained
+                    else:
+                        log.info("video.veo_fal.chain.fallback", beat=i)
+                        current_frame = frame_path
         except BaseException:
             # 중도 실패 시 이미 받은 비트 클립(각 수백 MB)이 media_dir에 영구 잔존하지
             # 않도록 정리한다(Kling 스티칭 경로의 누수 방어와 동일).
@@ -591,6 +618,12 @@ class VideoStudio:
                     pass
             raise
         finally:
+            # 체이닝 임시 프레임은 generate에 base64로 이미 들어갔으니 더 필요 없다 — 정리.
+            for cf in chain_frames:
+                try:
+                    Path(cf).unlink(missing_ok=True)
+                except OSError:
+                    pass
             if owned is not None:
                 _close_owned(owned)
         # 비트 클립(8초 고정)의 앞뒤 침묵을 잘라 비트 사이 공백을 줄인다
@@ -615,6 +648,72 @@ class VideoStudio:
                         Path(t).unlink(missing_ok=True)
                     except OSError:
                         pass
+
+    # 프레임 체이닝 가드 임계 — mp4 추출 PNG는 보통 수백 KB~MB. 이 미만이면 검정/실패
+    # 프레임 의심. image_kontext._MIN_FRAME_BYTES(51_200)와 같은 종류의 휴리스틱이되,
+    # ffmpeg 추출 PNG는 압축 특성이 달라 더 낮은 임계를 둔다(가로/검정만 거른다).
+    _MIN_CHAIN_FRAME_BYTES = 20_000
+
+    def _chain_frame(self, clip_path: str) -> str | None:
+        """클립 끝의 안정 프레임을 추출해 품질 가드를 통과하면 PNG 경로를 반환한다.
+
+        다음 비트 클립의 시작 프레임으로 쓰여 비트 경계 자세 점프를 줄인다(프레임 체이닝).
+        끝에서 약간 앞(~0.35s)을 뽑아 클립 마무리의 페이드·잔여 움직임을 피한다. 추출 실패나
+        검정/빈/가로 프레임 등 의심스러우면 None을 반환 — 호출부가 원본 마스코트 프레임으로
+        안전 폴백해 망가진 프레임이 다음 클립에 누적되지 않게 한다(best-effort 품질 개선).
+        """
+        try:
+            if not clip_path or not Path(clip_path).exists():
+                return None
+            import subprocess
+
+            import imageio_ffmpeg
+
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+            out = str(Path(self.settings.nutti_media_dir) / f"chain_{uuid4().hex[:8]}.png")
+            # 끝에서 0.35초 앞 프레임(발화 직후 안정 구간, 페이드 회피).
+            # timeout 필수 — 손상 MP4에서 ffmpeg이 멈추면 timeout 없이는 파이프라인 전체가
+            # 무기한 블록된다. 단일 프레임 추출은 1초 미만이 정상. TimeoutExpired는
+            # Exception 서브클래스라 아래 except가 잡아 None(원본 프레임 폴백)으로 처리한다.
+            res = subprocess.run(
+                [ff, "-y", "-hide_banner", "-sseof", "-0.35", "-i", clip_path,
+                 "-frames:v", "1", out],
+                capture_output=True,
+                timeout=15,
+            )
+            if res.returncode != 0 or not Path(out).exists():
+                return None
+            if self._reject_chain_frame(out):
+                try:
+                    Path(out).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
+            return out
+        except Exception:
+            # 체이닝은 best-effort — 어떤 실패도 None(원본 프레임 폴백)으로 안전 처리.
+            return None
+
+    def _reject_chain_frame(self, path: str) -> bool:
+        """체이닝 프레임이 퇴화(검정/빈/가로)면 True를 반환한다.
+
+        image_kontext._reject_reason과 같은 휴리스틱: 바이트가 너무 작으면 검정/실패 의심,
+        PNG 해상도가 세로(height>width)가 아니면 레퍼런스 미적용 placeholder로 보고 거부한다.
+        """
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            return True
+        if len(data) < self._MIN_CHAIN_FRAME_BYTES:
+            return True
+        from nutti.integrations.image_kontext import _png_dimensions
+
+        dims = _png_dimensions(data)
+        if dims is not None:
+            width, height = dims
+            if height <= width:  # 세로(9:16)가 아니면 거부
+                return True
+        return False
 
     def _trim_to_speech(self, clip: str) -> tuple[str, float | None]:
         """클립에서 발화 구간만 남기고 앞뒤 침묵을 잘라 (새 경로, 길이초)를 반환한다.

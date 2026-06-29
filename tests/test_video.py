@@ -439,6 +439,7 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
         VeoPromptBuilder._SPEAKING_OFF,
         VeoPromptBuilder._SPEAKING_DIRECT,
         VeoPromptBuilder._CAMERA,
+        VeoPromptBuilder._MOTION_HOLD,
         VeoPromptBuilder._NEGATIVE,
         video_module._MASCOT_APPEARANCE,
         video_module._CINEMATIC_LOOK,
