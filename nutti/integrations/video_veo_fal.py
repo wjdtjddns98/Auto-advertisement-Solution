@@ -126,13 +126,22 @@ class FalVeoClient(_HttpClosingMixin):
         self._http = httpx.Client(timeout=60.0)
         return self._http
 
-    def generate(self, frame_path: str, prompt: str, *, last_frame_path: str | None = None) -> str:
+    def generate(
+        self,
+        frame_path: str,
+        prompt: str,
+        *,
+        last_frame_path: str | None = None,
+        seed: int | None = None,
+    ) -> str:
         """시작 프레임 + 프롬프트로 8초 클립을 생성하고 로컬 저장 경로를 반환한다.
 
         끝프레임 고정 모드(endframe_lock)에서는 `last_frame_path`(끝 프레임)도 함께
         제출한다 — 미지정 시 시작 프레임과 동일 프레임으로 고정해 경계를 매끄럽게 한다.
+        `seed`를 주면 제출 페이로드에 실어 영상 내 비트 간 음색/비주얼 편차를 줄인다
+        (호출부가 한 영상의 모든 비트에 같은 seed를 넘긴다).
         """
-        request_id = self._submit(frame_path, prompt, last_frame_path=last_frame_path)
+        request_id = self._submit(frame_path, prompt, last_frame_path=last_frame_path, seed=seed)
         video_url = self._poll(request_id)
         return self._download(video_url)
 
@@ -144,7 +153,14 @@ class FalVeoClient(_HttpClosingMixin):
         mime = _guess_image_mime(frame_path)
         return f"data:{mime};base64,{base64.b64encode(frame_bytes).decode('ascii')}"
 
-    def _submit(self, frame_path: str, prompt: str, *, last_frame_path: str | None = None) -> str:
+    def _submit(
+        self,
+        frame_path: str,
+        prompt: str,
+        *,
+        last_frame_path: str | None = None,
+        seed: int | None = None,
+    ) -> str:
         """작업을 제출하고 검증된 request_id를 반환한다.
 
         모드별 입력 스키마:
@@ -179,6 +195,10 @@ class FalVeoClient(_HttpClosingMixin):
         negative_prompt = (self.settings.veo_fal_negative_prompt or "").strip()
         if negative_prompt:
             body["negative_prompt"] = negative_prompt
+        # 음색 일관성 보강 seed(영상 내 모든 비트 동일값). None이면 필드를 생략해 Veo가
+        # 매번 랜덤 생성한다(기존 동작). veo3.1 스키마의 optional seed 필드.
+        if seed is not None:
+            body["seed"] = int(seed)
         url = f"{_FAL_QUEUE_BASE}/{self._model}"
         # 일시 오류(429/5xx)는 backoff 재시도(폴링·결과조회와 동일). Veo 생성은 분당
         # 한도가 낮은 시점에 제출 429를 맞으면 전체 파이프라인이 죽을 수 있으므로 재시도한다.

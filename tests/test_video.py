@@ -536,7 +536,7 @@ def test_build_beat_always_includes_persona_and_fixed_voice():
         # 브랜드명 "Nutti"는 화면 자막으로 렌더돼 시각 프롬프트에서 제거함.
         assert "Nutti" not in prompt
         assert video_module._MASCOT_APPEARANCE in prompt  # 고정 외형은 항상 포함
-        assert "EXACTLY the same voice" in prompt
+        assert "EXACTLY the same single voice" in prompt
         assert "Korean voice" in prompt
 
 

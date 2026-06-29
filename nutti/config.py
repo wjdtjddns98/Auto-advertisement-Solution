@@ -116,6 +116,12 @@ class Settings(BaseSettings):
         default="fal-ai/veo3.1/lite/first-last-frame-to-video",
         alias="NUTTI_VEO_FAL_FLF_MODEL",
     )
+    # 영상 내 비트(n1~n4) 음색 일관성 보강용 seed(2026-06-29 PO). Veo는 voice/reference
+    # 파라미터가 없어 음색이 비트마다 드리프트하는데, 같은 seed + 같은 음색 프롬프트를 모든
+    # 비트에 주면 편차가 줄어든다(seed가 오디오를 완전 통제하진 않으나 부분 효과 — 무료 카드).
+    # None(기본)이면 _produce_clips_veo_fal가 영상마다 seed 1개를 뽑아 그 영상의 모든 비트에
+    # 재사용한다(영상 내 일관, 영상 간 다양성 유지). 정수면 항상 그 값(영상 간에도 고정).
+    veo_fal_seed: int | None = Field(default=None, alias="NUTTI_VEO_FAL_SEED")
 
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")

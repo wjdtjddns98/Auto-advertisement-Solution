@@ -372,10 +372,12 @@ class VeoPromptBuilder:
         "exaggerated or distorted faces"
     )
     _VOICE = (
-        "Voice (must be EXACTLY the same voice in every clip of this series): a bright, "
-        "cute Little girl Korean voice, slightly high-pitched, cheeky and energetic, "
-        "speaking at a lively natural pace. Keep the identical timbre, pitch, and accent "
-        "in every clip; do not change the voice or switch to a different speaker for "
+        "Voice (must be EXACTLY the same single voice in every clip of this series, like "
+        "one specific recognizable person with a fixed vocal fingerprint): a bright, "
+        "cute Little girl Korean voice, sounding about 6 years old, slightly high-pitched, "
+        "cheeky and energetic, with a warm soft timbre and a consistent speaking rhythm at "
+        "a lively natural pace. Keep the identical timbre, pitch, accent, and speaking speed "
+        "in every clip; do not change the voice, age, or switch to a different speaker for "
         "emphasis or for the final call-to-action line."
     )
     _MIC = (
@@ -624,6 +626,15 @@ class VideoStudio:
         # 하도록 first/last 프레임을 frame_path로 고정한다 — 클립이 같은 포즈로 시작·끝나
         # 비트 경계가 항상 동일 프레임에서 만나 끊김이 없다. 체이닝(끝 프레임 추출)은 불요.
         lock = bool(self.settings.veo_fal_endframe_lock)
+        # 영상 내 모든 비트(n1~n4)에 같은 seed를 줘 음색/비주얼 편차를 줄인다(2026-06-29 PO:
+        # 음색 일관성 보강). 설정값(veo_fal_seed)이 없으면 이 영상용 seed 1개를 뽑아 모든 비트에
+        # 재사용한다 — 영상 내 일관, 영상 간 다양성 유지. Veo가 seed로 오디오를 완전 통제하진
+        # 않지만, 같은 seed + 같은 음색 프롬프트(_VOICE)면 비트 간 목소리가 더 비슷해진다.
+        video_seed = self.settings.veo_fal_seed
+        if video_seed is None:
+            import random
+
+            video_seed = random.randint(0, 2**31 - 1)
         # 각 비트의 시작 프레임. 기본 모드는 1번 비트가 마스코트 Kontext 프레임에서 시작하고
         # 이후 비트는 직전 클립의 끝 안정 프레임으로 이어 붙인다(체이닝). lock 모드는 항상
         # frame_path 고정.
@@ -639,9 +650,11 @@ class VideoStudio:
                 )
                 if lock:
                     # 시작·끝 모두 마스코트 프레임으로 고정(끝프레임 고정 모드).
-                    clip_path = client.generate(frame_path, prompt, last_frame_path=frame_path)
+                    clip_path = client.generate(
+                        frame_path, prompt, last_frame_path=frame_path, seed=video_seed
+                    )
                 else:
-                    clip_path = client.generate(current_frame, prompt)
+                    clip_path = client.generate(current_frame, prompt, seed=video_seed)
                 log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
                 clips.append(clip_path)
                 # 가드된 체이닝(기본 모드만): 다음 비트가 있으면 이 클립의 끝 안정 프레임을

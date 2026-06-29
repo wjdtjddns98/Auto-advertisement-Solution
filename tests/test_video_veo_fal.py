@@ -195,10 +195,19 @@ class FakeFalVeoClient:
     def __init__(self, video_path: str = "data/fake/veo_fal.mp4"):
         self.video_path = video_path
         self.calls: list[tuple[str, str, str | None]] = []
+        self.seeds: list[int | None] = []
         self.close_count = 0
 
-    def generate(self, frame_path: str, prompt: str, *, last_frame_path: str | None = None) -> str:
+    def generate(
+        self,
+        frame_path: str,
+        prompt: str,
+        *,
+        last_frame_path: str | None = None,
+        seed: int | None = None,
+    ) -> str:
         self.calls.append((frame_path, prompt, last_frame_path))
+        self.seeds.append(seed)
         return self.video_path
 
     def close(self):
@@ -363,6 +372,30 @@ def test_fal_veo_client_image_to_video_mode_has_no_frame_fields(tmp_path):
     assert "image_url" in payload
     assert "first_frame_url" not in payload
     assert "last_frame_url" not in payload
+
+
+def test_fal_veo_client_seed_in_payload_when_given(tmp_path):
+    """seed를 주면 제출 페이로드에 실리고(int), 미지정이면 생략된다(음색 일관성 보강)."""
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        download_response=_Resp(content=b"X"),
+    )
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="false")
+    client.generate(_frame_file(tmp_path), "prompt", seed=4242)
+    _, payload = fake.post_calls[0]
+    assert payload["seed"] == 4242
+
+
+def test_fal_veo_client_no_seed_field_when_none(tmp_path):
+    """seed 미지정이면 페이로드에 seed 필드가 없다(기존 랜덤 동작 유지)."""
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        download_response=_Resp(content=b"X"),
+    )
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="false")
+    client.generate(_frame_file(tmp_path), "prompt")
+    _, payload = fake.post_calls[0]
+    assert "seed" not in payload
 
 
 def test_fal_veo_client_submit_payload_includes_negative_prompt(tmp_path):
@@ -816,6 +849,38 @@ def test_videostudio_veo_fal_endframe_lock_fixes_frames_and_skips_chaining(monke
         assert "moves naturally and expressively" in prompt
 
 
+def test_videostudio_veo_fal_same_seed_across_beats(monkeypatch):
+    """한 영상의 모든 비트가 같은 seed를 받는다(음색 일관성 보강, 2026-06-29 PO).
+
+    설정 seed가 없으면 영상마다 랜덤 seed 1개를 뽑아 모든 비트에 재사용한다 —
+    비트 간 동일성만 보장(영상 간 다양성은 별개).
+    """
+    veo_fal = FakeFalVeoClient()
+    nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
+
+    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
+    studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
+    studio.produce(_script(beats=["b1", "b2", "b3"]))
+
+    assert len(veo_fal.seeds) == 3
+    assert veo_fal.seeds[0] is not None
+    assert len(set(veo_fal.seeds)) == 1  # 세 비트 모두 동일 seed
+
+
+def test_videostudio_veo_fal_explicit_seed_from_settings(monkeypatch):
+    """settings.veo_fal_seed가 지정되면 그 값이 모든 비트에 그대로 쓰인다(영상 간에도 고정)."""
+    veo_fal = FakeFalVeoClient()
+    nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
+
+    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_SEED="777")
+    studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
+    studio.produce(_script(beats=["b1", "b2"]))
+
+    assert veo_fal.seeds == [777, 777]
+
+
 def test_veo_fal_endframe_lock_default_is_true(tmp_path):
     """끝프레임 고정이 기본 ON(2026-06-29 PO): 막판 이상행동/화면전환 근본 해결 경로가 기본값.
 
@@ -889,7 +954,7 @@ def test_produce_veo_fal_cleans_up_completed_clips_on_midloop_failure(tmp_path):
         def __init__(self):
             self.n = 0
 
-        def generate(self, frame_path, prompt, *, last_frame_path=None):
+        def generate(self, frame_path, prompt, *, last_frame_path=None, seed=None):
             self.n += 1
             if self.n == 1:
                 p = tmp_path / "veo_fal_leak1.mp4"
