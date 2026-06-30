@@ -42,7 +42,7 @@ def main() -> None:
         )
 
     # google-auth-oauthlib는 실행 시에만 import(런타임 의존 명확화).
-    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google_auth_oauthlib.flow import InstalledAppFlow, WSGITimeoutError
 
     # client_secret.json 파일 없이 .env 값으로 클라이언트 설정을 구성한다.
     # "installed"(Desktop) 타입으로 로컬 루프백 리다이렉트를 사용한다.
@@ -58,13 +58,18 @@ def main() -> None:
     flow = InstalledAppFlow.from_client_config(client_config, scopes=SCOPES)
 
     # access_type=offline + prompt=consent 를 강제해야 refresh_token이 매번 발급된다.
-    creds = flow.run_local_server(
-        port=0,
-        access_type="offline",
-        prompt="consent",
-        authorization_prompt_message="브라우저에서 권한을 허용하세요. 안 열리면 이 URL을 여세요:\n{url}",
-        success_message="인증 완료 — 이 창을 닫고 콘솔로 돌아가세요.",
-    )
+    # timeout_seconds: 브라우저를 닫거나 방치하면 무한 대기(좀비)하므로 5분 제한을 둔다.
+    try:
+        creds = flow.run_local_server(
+            port=0,
+            access_type="offline",
+            prompt="consent",
+            timeout_seconds=300,
+            authorization_prompt_message="브라우저에서 권한을 허용하세요. 안 열리면 이 URL을 여세요:\n{url}",
+            success_message="인증 완료 — 이 창을 닫고 콘솔로 돌아가세요.",
+        )
+    except WSGITimeoutError:
+        raise SystemExit("5분 내 인증이 완료되지 않았습니다 — 다시 실행하세요.") from None
 
     if not creds.refresh_token:
         raise SystemExit(
