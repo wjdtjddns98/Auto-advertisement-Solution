@@ -176,12 +176,14 @@ docker compose logs scheduler
 정상 기동 시 아래와 같은 로그가 출력된다:
 
 ```
-scheduler  | [scheduler] Starting ...
-scheduler  | [scheduler] Listening for new jobs
-scheduler  | [job-exec run-pipeline] Schedule: 0 0 * * *
+scheduler  | New job registered "run-pipeline" - "nutti run" - "0 0 0 * * *"
 ```
 
-`Schedule: 0 0 * * *`(UTC 00:00 = KST 09:00)가 보이면 스케줄 등록 완료.
+`0 0 0 * * *`(6필드: 초 분 시 → UTC 00:00:00 = KST 09:00)가 보이면 스케줄 등록 완료.
+
+> **⚠ 크론 형식 주의(2026-06-30 실측)**: Ofelia(robfig/cron)는 **6필드 "초 분 시 일 월 요일"**로
+> 해석한다. 5필드 "0 0 * * *"는 매일 09시가 아니라 엉뚱하게 동작한다(무인 검증에서 5필드
+> "50 1 * * *"가 01:50에 발동하지 않음을 확인). 스케줄은 반드시 6필드로 작성한다.
 
 ---
 
@@ -285,43 +287,37 @@ ANTHROPIC_API_KEY=sk-ant-api03-...
 
 ---
 
-### 옵션 B — claude CLI + ~/.claude 볼륨 마운트
+### 옵션 B — CLAUDE_CODE_OAUTH_TOKEN (Max 구독 헤드리스 토큰) ✅ 검증됨
 
-Claude Code CLI(`claude`)가 설치된 개발 머신의 인증 상태를 컨테이너에 재사용하는 방법이다.
-API 키 없이 Claude Max 구독으로 `claude -p`를 headless 실행하는 경우에 해당한다.
+API 키 없이 Claude Max 구독으로 대본을 생성하는 방법이다. 이미지에 claude CLI가 포함돼
+있고(Dockerfile에서 npm `@anthropic-ai/claude-code` 설치), `ANTHROPIC_API_KEY`가 비어 있으면
+`nutti`가 `claude -p`로 폴백한다. 그 인증을 **헤드리스 토큰** 하나로 해결한다.
 
-**동작 원리** (공식 문서 기반):
-- 로컬에서 `claude login` 후 생성된 `~/.claude/.credentials.json`(Linux) 또는
-  macOS Keychain 토큰을 컨테이너에 볼륨 마운트해 재사용한다.
-- `CLAUDE_CONFIG_DIR` 환경변수로 컨테이너 내 credentials 경로를 재지정할 수 있다.
-- `subprocess`로 `claude -p <프롬프트>` 를 호출 시 해당 디렉터리를 읽는다.
+**절차(2026-06-30 무인 1사이클 검증으로 동작 확인)**:
 
-**docker-compose.yml에서 볼륨 추가**:
+1. 개발 머신에서 한 번만 헤드리스 토큰을 발급한다(브라우저 OAuth 1회):
+   ```bash
+   claude setup-token        # 출력: sk-ant-oat01-...
+   ```
+2. `.env`에 토큰을 넣는다(ANTHROPIC_API_KEY는 비워둔다):
+   ```dotenv
+   ANTHROPIC_API_KEY=
+   CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+   ```
+3. 끝. `env_file: .env`가 컨테이너로 토큰을 전달하고, claude CLI가 이 환경변수로 인증한다.
+   추가 볼륨 마운트·credentials 파일 불필요.
 
-```yaml
-services:
-  nutti:
-    # ... 기존 설정 ...
-    volumes:
-      - ./data:/app/data
-      - ./secrets:/app/secrets:ro
-      - ~/.claude:/home/nutti/.claude:ro    # 추가: 호스트 인증 파일 마운트
-    environment:
-      CLAUDE_CONFIG_DIR: /home/nutti/.claude   # credentials 경로 명시
-      # ANTHROPIC_API_KEY는 비워두거나 제거
-```
+**중요 — 호스트 `~/.claude` 파일 마운트는 쓰지 말 것(2026-06-30 실측 실패)**:
+- 종전 안내(아래 폐기)였던 `~/.claude/.credentials.json`(`claudeAiOauth` OAuth 블록 포함)을
+  `CLAUDE_CONFIG_DIR`로 마운트하는 방식은 **Linux 컨테이너의 claude가 그 파일을 인증에
+  사용하지 못한다**(`Not logged in · Please run /login`). 특히 **Windows 호스트에서 만든
+  자격증명은 Linux claude가 못 읽는다**. 반드시 `CLAUDE_CODE_OAUTH_TOKEN` 방식을 쓴다.
 
-**제약 및 미확인 사항**:
-- OAuth 토큰 만료 후 자동 갱신 여부: **미확인** — 만료 시 VPS에서 `claude login`
-  재실행 후 credentials 파일을 갱신해야 할 가능성이 높다.
-- Windows 호스트 → Linux 컨테이너 bind mount 시 경로 변환 동작: **미확인**
-  (Dev Containers 레이어 의존).
-- macOS Keychain 사용 시 컨테이너에서 credentials 읽기 불가 — Linux VPS에서는
-  파일 기반이므로 정상 동작한다.
+**제약**:
+- `claude setup-token` 토큰도 무기한은 아니다 — 만료 시 재발급해 `.env`를 갱신한다.
 
-**결론**: VPS 장기 운영에는 **옵션 A(ANTHROPIC_API_KEY)**가 안정적이다.
-옵션 B는 API 키 없이 Claude Max 구독을 활용할 때 사용하되,
-토큰 만료 대비 재인증 절차를 운영 계획에 포함해야 한다.
+**결론**: API 키가 있으면 **옵션 A(ANTHROPIC_API_KEY)**가 가장 단순하다. Max 구독을 쓰면
+**옵션 B(CLAUDE_CODE_OAUTH_TOKEN)**가 검증된 길이며, 호스트 `~/.claude` 마운트는 쓰지 않는다.
 
 ---
 

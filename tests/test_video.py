@@ -394,7 +394,10 @@ def _synthetic_speech_pcm(sample_rate: int = 16000) -> bytes:
         for k in range(n):
             pcm.append(amp if k % 2 == 0 else -amp)
 
-    fill(sample_rate * 6, 8000)            # 0~6s 발화(약 -12 dBFS)
+    # 0~0.3s 소프트 첫 음절 온셋(약 -26 dBFS) — 구버전 앞-트림(첫 -24dB 윈도 기준)이
+    # 이 구간을 잘라 "첫 대사 깨짐"을 유발했다. start_t=0 고정이면 보존된다(회귀 핀).
+    fill(int(sample_rate * 0.3), 1600)
+    fill(int(sample_rate * 5.7), 8000)     # 0.3~6s 발화 본체(약 -12 dBFS)
     fill(sample_rate // 2, 50)             # 6~6.5s 깊은 딥(약 -56 dBFS = 발화 끝)
     fill(int(sample_rate * 1.5), 1500)     # 6.5~8s tail-fill(약 -27 dBFS = 발화 재개 아님)
     return pcm.tobytes()
@@ -438,6 +441,10 @@ def test_trim_to_speech_cuts_at_speech_end_and_forces_yuv420p(tmp_path, monkeypa
     # 발화 끝(~6초) + 여유에서 잘림 — 8초 클립을 6.x초로 트림(대사 보존, 끝 잉여 제거).
     ti = captured["cut"].index("-t")
     assert captured["cut"][ti + 1].startswith("6."), captured["cut"][ti + 1]
+    # 앞은 트림하지 않는다(start_t=0) — 소프트 첫 음절 온셋을 자르지 않아 "첫 대사 깨짐"을
+    # 막는다. 앞-트림을 되살리면 -ss가 0이 아니게 돼 이 단언이 실패한다(회귀 핀).
+    si = captured["cut"].index("-ss")
+    assert captured["cut"][si + 1] == "0.000", captured["cut"][si + 1]
     assert "-c:v" in captured["cut"] and "libx264" in captured["cut"]
     assert "-pix_fmt" in captured["cut"] and "yuv420p" in captured["cut"]
     # 폴백이 아니라 실제 트림된 새 파일이 반환돼야 한다(원본 경로 그대로면 회귀).
