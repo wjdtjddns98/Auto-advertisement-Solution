@@ -41,6 +41,25 @@ _MAX_DIALOGUE_CHARS = 500
 _MAX_TOPIC_CHARS = 200
 # 비트 1개(독립 클립)의 길이(초). veo_fal 경로는 비트마다 8초 클립을 만들어 스티칭한다.
 _CLIP_SEC = 8.0
+
+# 발화 끝 적응 트림(_trim_to_speech) 파라미터(2026-06-30 PO 실측 보정). Veo 8초 클립은
+# 발화가 ~6초에 끝나도 뒤를 음악/앰비언스로 채워 무음이 안 생긴다 — 종전 silencedetect(EOF
+# 무음) 방식이 발동 못 했다. 대신 RMS 엔벨로프를 떠 발화 본체 직후 "깊은 딥"(발화 끝)을 찾는다.
+_TRIM_SR = 16000  # 엔벨로프 분석용 모노 다운샘플레이트(디코드 비용↓, 음성 대역 충분)
+_TRIM_WIN = 0.25  # 엔벨로프 윈도 길이(초)
+_TRIM_SPEECH_MIN = -24.0  # 이 dBFS를 넘으면 발화로 간주(발화 본체 식별·시작점)
+_TRIM_ABS_CAP = -30.0  # 발화 끝 딥의 절대 바닥(이보다 조용해야 딥 후보)
+_TRIM_DROP = 13.0  # 직전 발화 대비 낙폭(dB) — 이만큼 떨어지면 발화가 멈춘 것
+# 딥 이후 이 dBFS를 넘는 구간이 있으면 발화 재개(=중간 멈춤)로 보고 그 딥을 기각한다.
+# _TRIM_SPEECH_MIN(-24)보다 4dB 엄격한 건 **의도된 갭**: PO 실측상 Veo의 발화 본체는
+# -12~-18 dBFS로 크고, 발화 후 잉여를 채우는 tail-fill은 -22~-31 dBFS다. 재개 기준을
+# 그 사이(-20)에 둬야 tail-fill(<-20)은 "재개 아님"으로 통과시켜 트림하고, 진짜 발화
+# 재개(-12~-18 > -20)는 "재개"로 잡아 중간 멈춤 딥을 기각한다. -24로 낮추면 tail-fill
+# (-22.8 실측치)이 재개로 오인돼 검증된 클립의 트림이 깨진다(절대 낮추지 말 것).
+_TRIM_RESUME = -20.0
+_TRIM_LOOKBACK = 4  # 직전 발화 레벨 참조 윈도 개수(=1초)
+_TRIM_MIN_SPEECH = 2.5  # 발화 시작 후 이 초 이전의 딥은 무시(훅 중 멈춤 오검출 방지)
+_TRIM_PAD = 0.15  # 발화 끝 뒤 남길 여유(초) — 끝음절 보존
 # 화면 자막(깨진 한글 텍스트) 억제용 negative_prompt는 이제 설정값
 # `Settings.veo_fal_negative_prompt`로 단일화되어 FalVeoClient._submit이 fal에 직접
 # 보낸다(2026-06-18). 프롬프트 본문의 "no on-screen text" 지시와 이중 방어를 이룬다.
@@ -866,62 +885,77 @@ class VideoStudio:
         return False
 
     def _trim_to_speech(self, clip: str) -> tuple[str, float | None]:
-        """클립에서 발화 구간만 남기고 앞뒤 침묵을 잘라 (새 경로, 길이초)를 반환한다.
+        """클립에서 발화 구간만 남기고 끝 잉여(글리치·tail-fill)를 잘라 (새 경로, 길이초)를 반환.
 
-        veo_fal 비트 클립은 8초 고정이라 짧은 대사 뒤에 긴 침묵이 남는다 — 그대로
-        이어붙이면 비트 사이 공백이 길어진다(PO 피드백). ffmpeg silencedetect로 앞/뒤
-        침묵 경계를 찾아 발화 구간 + 짧은 여유만 남긴다. 검출·트림 실패나 전구간 침묵 등
-        이상 시 (원본 경로, None)을 돌려준다 — 더미 경로·예외에도 파이프라인이 안전하게
-        진행되도록(단위 테스트의 가짜 클립 경로 포함).
+        veo_fal 비트 클립은 8초 고정인데 발화는 보통 6~7초에 끝난다. 그런데 Veo가 발화 후
+        남는 잉여를 음악/앰비언스로 채워(2026-06-30 PO 실측) 무음이 생기지 않는다 — 종전
+        silencedetect(EOF 무음) 방식은 이 채움 때문에 발동 못 했다. 대신 0.25초 RMS 엔벨로프를
+        떠 **발화 본체 직후 첫 깊은 딥**(직전 발화 대비 큰 낙폭 + 절대 바닥, 그리고 그 뒤로
+        발화가 재개되지 않음)을 발화 끝으로 잡는다. 딥은 발화 길이를 따라 이동하므로 대본이
+        길든 짧든 대사를 자르지 않고 끝 잉여(글리치 온상)만 제거한다.
+
+        디코드·검출 실패나 발화 미검출 등 이상 시 (원본 경로, 실측/None)을 돌려준다 — 더미
+        경로·예외에도 파이프라인이 안전하게 진행되도록(단위 테스트의 가짜 클립 경로 포함).
         """
-        import re
+        import array
+        import math
         import subprocess
 
         try:
             import imageio_ffmpeg
 
             ff = imageio_ffmpeg.get_ffmpeg_exe()
-            probe = subprocess.run(
-                [ff, "-hide_banner", "-i", clip, "-af",
-                 "silencedetect=noise=-30dB:d=0.4", "-f", "null", "-"],
+            # 엔벨로프 분석용으로 모노 16kHz PCM을 1패스 디코드(silencedetect 다중 호출보다 효율).
+            dec = subprocess.run(
+                [ff, "-hide_banner", "-i", clip, "-ac", "1", "-ar",
+                 str(_TRIM_SR), "-f", "s16le", "-"],
                 capture_output=True,
             )
-            err = probe.stderr.decode("utf-8", "replace")
-            dm = re.search(r"Duration:\s*(\d+):(\d+):([0-9.]+)", err)
-            if dm is None:
+            pcm = array.array("h")
+            pcm.frombytes(dec.stdout)
+            if len(pcm) < _TRIM_SR:  # 1초 미만(빈/실패 디코드·더미 경로) — 트림 불가
                 return clip, None
-            dur = int(dm.group(1)) * 3600 + int(dm.group(2)) * 60 + float(dm.group(3))
-            starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)", err)]
-            ends = [float(x) for x in re.findall(r"silence_end:\s*([0-9.]+)", err)]
-            # 앞 침묵: 0 근처에서 시작하는 첫 침묵의 끝이 발화 시작점.
-            start_t = 0.0
-            if starts and starts[0] <= 0.3 and ends:
-                start_t = max(0.0, ends[0] - 0.10)
-            # 뒤 침묵: 마지막 침묵이 EOF까지 이어지면(=닫히지 않거나 파일 끝 근처에서 닫힘)
-            # 그 시작이 발화 끝점. 중간에서 닫힌 침묵(발화 사이 짧은 멈춤)은 트림하지 않는다.
+            dur = len(pcm) / _TRIM_SR
+            win = int(_TRIM_SR * _TRIM_WIN)
+            # 윈도별 RMS를 dBFS로 변환한 엔벨로프.
+            env = [
+                10 * math.log10(
+                    sum(x * x for x in pcm[i:i + win]) / win / (32768.0**2) + 1e-12
+                )
+                for i in range(0, len(pcm) - win + 1, win)
+            ]
+            # 발화 시작 = 첫 발화 윈도(앞 룸톤/침묵 트림). 발화 자체가 없으면 폴백.
+            start_idx = next((j for j, v in enumerate(env) if v > _TRIM_SPEECH_MIN), None)
+            if start_idx is None:
+                return clip, dur
+            start_t = max(0.0, start_idx * _TRIM_WIN - 0.10)
+            # 발화 끝 = 발화 본체 직후 첫 깊은 딥(직전 1초 대비 _TRIM_DROP 이상 낙폭 + 절대 바닥)
+            # 이면서 그 뒤로 발화가 재개되지 않는(=중간 멈춤이 아닌) 지점. + 짧은 여유를 남긴다.
             end_t = dur
-            if starts:
-                last = starts[-1]
-                open_to_eof = len(ends) < len(starts)  # 마지막 침묵이 EOF까지 안 닫힘
-                closed_near_eof = bool(ends) and ends[-1] >= dur - 0.1
-                if last > start_t and (open_to_eof or closed_near_eof):
-                    # 발화 끝 + 0.20초 여유까지만 남기고 그 뒤(무음+끝 글리치/이상동작)를
-                    # 자른다. 0.35→0.20으로 줄여 발화 직후 글리치 구간을 더 바짝 제거한다
-                    # (2026-06-29 PO: 끝 잉여 구간 글리치). 발화 끝음절은 보존되는 선.
-                    end_t = min(dur, last + 0.20)
+            for j in range(len(env)):
+                t = j * _TRIM_WIN
+                if t < start_t + _TRIM_MIN_SPEECH:  # 발화 본체 최소 길이 확보 후 탐색
+                    continue
+                prev = env[max(0, j - _TRIM_LOOKBACK):j]
+                if not prev or max(prev) < _TRIM_SPEECH_MIN:
+                    continue
+                if env[j] <= _TRIM_ABS_CAP and env[j] <= max(prev) - _TRIM_DROP:
+                    after = env[j + 1:]
+                    if not after or max(after) <= _TRIM_RESUME:
+                        end_t = min(dur, t + _TRIM_PAD)
+                        break
             out_sec = end_t - start_t
             if out_sec < 0.8 or end_t <= start_t:
-                return clip, dur  # 과도 트림 방지(전구간 침묵·검출 이상) — 실측 길이 유지
-            # 실제로 잘라낼 무음이 0.5초 미만이면 재인코딩하지 않고 원본 유지 — Veo 클립은
-            # 룸톤이 끝까지 깔려 데드에어가 거의 없다(2026-06-16 실측). 의미 있는 무음이
-            # 있을 때만 트림해 무익한 재인코딩·중복 파일 생성을 막는다.
+                return clip, dur  # 과도 트림 방지(검출 이상) — 실측 길이 유지
+            # 실제로 잘라낼 구간이 0.5초 미만이면 재인코딩하지 않고 원본 유지 — 무익한
+            # 재인코딩·중복 파일 생성을 막는다(발화가 8초를 꽉 채운 긴 대본 등).
             if (dur - out_sec) < 0.5:
                 return clip, dur  # 트림 안 함 — 실측 길이 유지
             out = str(Path(self.settings.nutti_media_dir) / f"veo_fal_trim_{uuid4().hex[:8]}.mp4")
             cut = subprocess.run(
                 [ff, "-y", "-hide_banner", "-ss", f"{start_t:.3f}", "-i", clip,
-                 "-t", f"{out_sec:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                 "-c:a", "aac", out],
+                 "-t", f"{out_sec:.3f}", "-c:v", "libx264", "-profile:v", "high",
+                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-c:a", "aac", out],
                 capture_output=True,
             )
             if cut.returncode != 0 or not Path(out).exists():

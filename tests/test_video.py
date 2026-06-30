@@ -377,40 +377,104 @@ def test_stitch_dissolve_ffmpeg_failure_falls_back_to_concat(tmp_path, monkeypat
     assert any("concat=n=2" in c for c in calls)  # 그리고 concat 폴백함
 
 
-def test_trim_to_speech_reencode_forces_yuv420p(tmp_path, monkeypatch):
-    """앞뒤 침묵 트림 재인코딩이 보편 호환 yuv420p로 강제하는지 검증.
+def _synthetic_speech_pcm(sample_rate: int = 16000) -> bytes:
+    """발화(0~6s 큼) → 깊은 딥(6~6.5s, 발화 끝) → tail-fill(6.5~8s, 중간 레벨) 합성 PCM.
 
-    단일 비트 대본은 trim → `_stitch`(클립 1개면 즉시 반환) 경로를 타므로 concat/dissolve의
-    포맷 정규화가 개입하지 않는다 — 이 trim의 `-pix_fmt yuv420p`가 단일 비트 출력의
-    유일한 yuv444p 누출 방어막이다(2026-06-29 회귀 방지).
+    Veo 클립의 실측 구조(2026-06-30): 발화 후 잉여를 음악/앰비언스로 채워 끝이 무음이 아니다.
+    적응 트림이 '발화 끝 딥'에서 잘라야 하므로 그 구조를 모사한다(s16le mono).
+    """
+    import array
+
+    pcm = array.array("h")
+
+    def fill(n: int, amp: int) -> None:
+        for k in range(n):
+            pcm.append(amp if k % 2 == 0 else -amp)
+
+    fill(sample_rate * 6, 8000)            # 0~6s 발화(약 -12 dBFS)
+    fill(sample_rate // 2, 50)             # 6~6.5s 깊은 딥(약 -56 dBFS = 발화 끝)
+    fill(int(sample_rate * 1.5), 1500)     # 6.5~8s tail-fill(약 -27 dBFS = 발화 재개 아님)
+    return pcm.tobytes()
+
+
+def test_trim_to_speech_cuts_at_speech_end_and_forces_yuv420p(tmp_path, monkeypatch):
+    """적응 트림이 발화 끝 딥에서 자르고 재인코딩을 보편 호환 yuv420p로 강제하는지 검증.
+
+    Veo가 발화 후 잉여를 소리로 채워 무음이 안 생기므로(2026-06-30 PO 실측) 종전 EOF-무음
+    방식이 못 잡던 것을, RMS 엔벨로프의 '발화 본체 직후 깊은 딥' 검출로 대체했다. 합성 PCM
+    (발화 6s + 딥 + tail-fill)을 디코드 결과로 주입해 ①cut이 ~6초에서 발동 ②libx264/yuv420p
+    강제(단일 비트 출력의 유일한 yuv444p 누출 방어막, 2026-06-29 회귀 방지)를 함께 확인한다.
     """
     import subprocess as _sp
+    from pathlib import Path
 
     captured: dict = {}
+    raw = _synthetic_speech_pcm()
 
     def fake_run(cmd, **kw):
         joined = " ".join(cmd)
 
         class _R:
             returncode = 0
+            stderr = b""
+            stdout = b""
 
-        if "silencedetect" in joined:
-            # probe: 앞 1초·뒤(7초~EOF) 침묵 → out_sec가 dur보다 0.5초+ 짧아 cut 발동.
-            _R.stderr = (
-                b"Duration: 00:00:08.00, start: 0.000000\n"
-                b"silence_start: 0.0\nsilence_end: 1.0\n"
-                b"silence_start: 7.0\n"
-            )
+        if "s16le" in joined:  # 엔벨로프용 PCM 디코드 — 합성 발화 주입
+            _R.stdout = raw
             return _R()
-        captured["cut"] = cmd  # 재인코딩(cut) cmd 캡처
+        # 재인코딩(cut) 단계: 출력 파일을 실제로 생성해야 Path(out).exists() 통과 →
+        # _trim_to_speech가 트림된 새 경로를 반환하는 경로까지 검증된다(폴백 아님).
+        Path(cmd[-1]).touch()
+        captured["cut"] = cmd
         return _R()
 
     monkeypatch.setattr(_sp, "run", fake_run)
     studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
-    studio._trim_to_speech("clip.mp4")
-    assert "cut" in captured, "트림 재인코딩이 호출되지 않음(침묵 검출 경로 확인)"
+    path, sec = studio._trim_to_speech("clip.mp4")
+    assert "cut" in captured, "트림 재인코딩이 호출되지 않음(발화 끝 검출 경로 확인)"
+    # 발화 끝(~6초) + 여유에서 잘림 — 8초 클립을 6.x초로 트림(대사 보존, 끝 잉여 제거).
+    ti = captured["cut"].index("-t")
+    assert captured["cut"][ti + 1].startswith("6."), captured["cut"][ti + 1]
     assert "-c:v" in captured["cut"] and "libx264" in captured["cut"]
     assert "-pix_fmt" in captured["cut"] and "yuv420p" in captured["cut"]
+    # 폴백이 아니라 실제 트림된 새 파일이 반환돼야 한다(원본 경로 그대로면 회귀).
+    assert path != "clip.mp4", "트림된 새 파일 경로가 반환돼야 함"
+    assert sec == pytest.approx(6.15, abs=0.3), sec
+
+
+def test_trim_to_speech_full_speech_keeps_original(tmp_path, monkeypatch):
+    """발화가 8초를 꽉 채워 딥이 없으면 원본을 그대로 둔다 — 대사 잘림 방지 핀.
+
+    PO 최우선 우려: 대본이 길어 발화가 8초 내내 이어지면 끝을 잘라선 안 된다. 이 경우
+    엔벨로프에 깊은 딥이 없어 발화 끝 검출이 발동 안 하고, (dur-out_sec)<0.5 가드로
+    재인코딩 없이 원본 경로를 반환해야 한다(트림 cmd 호출 자체가 없어야 함).
+    """
+    import array
+    import subprocess as _sp
+
+    pcm = array.array("h")
+    for k in range(16000 * 8):  # 8초 내내 발화 레벨(약 -12 dBFS, 딥 없음)
+        pcm.append(8000 if k % 2 == 0 else -8000)
+    raw = pcm.tobytes()
+    cut_called = {"v": False}
+
+    def fake_run(cmd, **kw):
+        class _R:
+            returncode = 0
+            stderr = b""
+            stdout = b""
+
+        if "s16le" in " ".join(cmd):
+            _R.stdout = raw
+            return _R()
+        cut_called["v"] = True  # 재인코딩이 불리면 안 됨
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    path, _sec = studio._trim_to_speech("clip.mp4")
+    assert path == "clip.mp4", "딥 없음(발화 8초 꽉 참) → 원본 경로 유지(대사 보존)"
+    assert not cut_called["v"], "트림할 게 없는데 재인코딩이 호출됨(불필요한 컷)"
 
 
 def test_stitch_ffmpeg_failure_raises_render_error(tmp_path, monkeypatch):
