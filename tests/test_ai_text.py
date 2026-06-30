@@ -84,12 +84,13 @@ def test_script_system_prompt_specifies_four_beats():
 
 
 def test_script_system_prompt_pins_strong_hook():
-    """SCRIPT_SYSTEM_PROMPT가 훅 강화 지시를 담는다(2026-06-12 PO 피드백 — 리버트 가드).
+    """SCRIPT_SYSTEM_PROMPT가 강한 훅 지시를 담는다(2026-06-30 PO "너무 밋밋함" — 리버트 가드).
 
-    첫 1~2초 시청자 유지 + 밋밋한 도입 금지가 빠지면 실패한다.
+    첫 1초 스크롤 정지 + 밋밋한 도입 금지가 빠지면 실패한다.
     """
-    assert "첫 1~2초" in SCRIPT_SYSTEM_PROMPT
-    assert "호기심" in SCRIPT_SYSTEM_PROMPT
+    assert "첫 1초" in SCRIPT_SYSTEM_PROMPT
+    assert "스크롤" in SCRIPT_SYSTEM_PROMPT
+    assert "밋밋한" in SCRIPT_SYSTEM_PROMPT and "금지" in SCRIPT_SYSTEM_PROMPT
 
 
 def test_script_system_prompt_bans_brand_in_last_beat():

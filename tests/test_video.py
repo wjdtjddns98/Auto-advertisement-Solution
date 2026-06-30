@@ -110,10 +110,13 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     assert "stays in the exact same upright seated position" not in lively
     # 화면 이탈 방지·막판 안정화는 lively에도 유지(막판 이상행동 방어).
     assert "leaves the frame" in lively
-    # 끝 2~3초 완전 정지(막판 헛짓/글리치 방지 — 2026-06-29 PO 강화).
+    # 끝 2~3초는 '완전 정지'가 아니라 차분히 안정 + 미세 자연동작 유지(2026-06-30 PO):
+    # 하드 freeze를 명령하면 Veo가 프레임 고정 영상을 내놓는다(freezedetect 실측) →
+    # 적응 트림이 발화 뒤 꼬리를 잘라내므로 freeze 지시는 불필요·유해 → 완화.
     assert "final two to three seconds" in lively
-    assert "completely frozen and motionless" in lively
-    assert "no fade-out" in lively
+    assert "completely frozen and motionless" not in lively
+    assert "must NOT hard-freeze" in lively
+    assert "no fade-out" in lively and "no freeze" in lively
     # 기본(static)은 기존 _MOTION_HOLD 유지(하위호환).
     assert "stays in the exact same upright seated position" in static
     assert "moves naturally and expressively" not in static
