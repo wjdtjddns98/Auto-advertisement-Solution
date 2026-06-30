@@ -194,11 +194,20 @@ class FakeFalVeoClient:
 
     def __init__(self, video_path: str = "data/fake/veo_fal.mp4"):
         self.video_path = video_path
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, str | None]] = []
+        self.seeds: list[int | None] = []
         self.close_count = 0
 
-    def generate(self, frame_path: str, prompt: str) -> str:
-        self.calls.append((frame_path, prompt))
+    def generate(
+        self,
+        frame_path: str,
+        prompt: str,
+        *,
+        last_frame_path: str | None = None,
+        seed: int | None = None,
+    ) -> str:
+        self.calls.append((frame_path, prompt, last_frame_path))
+        self.seeds.append(seed)
         return self.video_path
 
     def close(self):
@@ -268,6 +277,7 @@ def test_fal_veo_client_status_result_use_app_id_not_full_model(tmp_path):
         tmp_path,
         fake,
         NUTTI_VEO_FAL_MODEL="fal-ai/veo3.1/lite/image-to-video",
+        NUTTI_VEO_FAL_ENDFRAME_LOCK="false",
     )
     client.generate(_frame_file(tmp_path), "prompt")
 
@@ -290,7 +300,7 @@ def test_fal_veo_client_submit_payload_contains_required_fields(tmp_path):
         get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
         download_response=_Resp(content=b"X"),
     )
-    client = _fal_veo_client(tmp_path, fake)
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="false")
     client.generate(_frame_file(tmp_path), "test prompt")
 
     assert len(fake.post_calls) == 1
@@ -304,6 +314,88 @@ def test_fal_veo_client_submit_payload_contains_required_fields(tmp_path):
     assert "base64," in payload["image_url"]
     assert payload.get("generate_audio") is True
     assert payload.get("aspect_ratio") == "9:16"
+
+
+def test_fal_veo_client_endframe_lock_uses_flf_model_and_dual_frames(tmp_path):
+    """endframe_lock=True면 first-last-frame 모델 + first/last 프레임을 보낸다.
+
+    2026-06-29 PO: 시작·끝 프레임을 동일 마스코트 프레임으로 고정해 비트 경계 끊김을
+    근본 완화. 끝 프레임 미지정이면 시작 프레임과 동일해야 한다.
+    """
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        download_response=_Resp(content=b"X"),
+    )
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="true")
+    client.generate(_frame_file(tmp_path), "test prompt")
+
+    # 제출 URL은 first-last-frame 모델 경로여야 한다.
+    submit_url = fake.post_calls[0][0]
+    assert submit_url.endswith("/fal-ai/veo3.1/lite/first-last-frame-to-video")
+    # status/result는 여전히 앱 ID(앞 2세그먼트=fal-ai/veo3.1) 기반.
+    assert "/fal-ai/veo3.1/requests/" in fake.status_calls[0]
+
+    _, payload = fake.post_calls[0]
+    assert "image_url" not in payload  # image-to-video 필드는 없어야 함
+    assert payload["first_frame_url"].startswith("data:image/")
+    assert payload["last_frame_url"].startswith("data:image/")
+    # 끝 프레임 미지정 → 시작 프레임과 동일 프레임으로 고정.
+    assert payload["first_frame_url"] == payload["last_frame_url"]
+
+
+def test_fal_veo_client_endframe_lock_distinct_last_frame(tmp_path):
+    """last_frame_path를 명시하면 시작 프레임과 다른 끝 프레임 data URI를 보낸다."""
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        download_response=_Resp(content=b"X"),
+    )
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="true")
+    start = _frame_file(tmp_path)
+    end = tmp_path / "end_frame.png"
+    end.write_bytes(b"\x89PNG\r\n\x1a\n" + b"DIFFERENT-FRAME-BYTES")
+    client.generate(start, "prompt", last_frame_path=str(end))
+
+    _, payload = fake.post_calls[0]
+    assert payload["first_frame_url"] != payload["last_frame_url"]
+
+
+def test_fal_veo_client_image_to_video_mode_has_no_frame_fields(tmp_path):
+    """endframe_lock=False(image-to-video 경로)면 image_url만, first/last 필드는 없다(회귀 방어)."""
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        download_response=_Resp(content=b"X"),
+    )
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="false")
+    client.generate(_frame_file(tmp_path), "prompt")
+
+    _, payload = fake.post_calls[0]
+    assert "image_url" in payload
+    assert "first_frame_url" not in payload
+    assert "last_frame_url" not in payload
+
+
+def test_fal_veo_client_seed_in_payload_when_given(tmp_path):
+    """seed를 주면 제출 페이로드에 실리고(int), 미지정이면 생략된다(음색 일관성 보강)."""
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        download_response=_Resp(content=b"X"),
+    )
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="false")
+    client.generate(_frame_file(tmp_path), "prompt", seed=4242)
+    _, payload = fake.post_calls[0]
+    assert payload["seed"] == 4242
+
+
+def test_fal_veo_client_no_seed_field_when_none(tmp_path):
+    """seed 미지정이면 페이로드에 seed 필드가 없다(기존 랜덤 동작 유지)."""
+    fake = FakeVeoFalHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        download_response=_Resp(content=b"X"),
+    )
+    client = _fal_veo_client(tmp_path, fake, NUTTI_VEO_FAL_ENDFRAME_LOCK="false")
+    client.generate(_frame_file(tmp_path), "prompt")
+    _, payload = fake.post_calls[0]
+    assert "seed" not in payload
 
 
 def test_fal_veo_client_submit_payload_includes_negative_prompt(tmp_path):
@@ -715,7 +807,7 @@ def test_videostudio_veo_fal_routes_to_veo_fal_path(monkeypatch):
     veo_fal = FakeFalVeoClient(video_path="data/fake/veo_fal.mp4")
     nano = FakeNanoBananaClient(frame_path="data/fake/frame.jpg")
 
-    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips: clips[0])
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
     settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
@@ -727,22 +819,131 @@ def test_videostudio_veo_fal_routes_to_veo_fal_path(monkeypatch):
     assert asset.script_id == script.id
 
 
-def test_videostudio_veo_fal_each_beat_uses_same_frame(monkeypatch):
-    """각 비트 클립 생성 시 같은 시작 프레임(frame_path)이 공유됨을 검증한다."""
+def test_videostudio_veo_fal_endframe_lock_fixes_frames_and_skips_chaining(monkeypatch):
+    """lock 모드: 모든 비트가 같은 마스코트 프레임으로 시작·끝 고정하고 체이닝을 건너뛴다.
+
+    2026-06-29 PO 아이디어. 끝프레임 고정 모드에서는 _chain_frame을 호출하지 않고(끝 프레임을
+    frame_path로 직접 고정), 매 비트 generate가 시작·끝 모두 원본 마스코트 프레임을 받아야 한다.
+    """
     veo_fal = FakeFalVeoClient()
     nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
 
-    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips: clips[0])
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
+    # lock 모드는 체이닝을 하지 않아야 한다 — _chain_frame이 불리면 명시적 실패.
+    def _no_chain(self, clip_path):
+        raise AssertionError("lock 모드에서 _chain_frame이 호출됨")
+    monkeypatch.setattr(VideoStudio, "_chain_frame", _no_chain)
+
+    settings = _veo_fal_settings(
+        NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_ENDFRAME_LOCK="true"
+    )
+    studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
+    studio.produce(_script(beats=["b1", "b2", "b3"]))
+
+    assert len(veo_fal.calls) == 3
+    # 매 비트: 시작 프레임 = 끝 프레임 = 원본 마스코트 프레임 + lock 모드는 모션 해제 프롬프트.
+    for frame_path, prompt, last_frame in veo_fal.calls:
+        assert frame_path == "data/fake/shared_frame.jpg"
+        assert last_frame == "data/fake/shared_frame.jpg"
+        # 끝 프레임이 고정되므로 모션을 풀어 생동감을 준다(_MOTION_LIVELY).
+        assert "moves naturally and expressively" in prompt
+
+
+def test_videostudio_veo_fal_same_seed_across_beats(monkeypatch):
+    """한 영상의 모든 비트가 같은 seed를 받는다(음색 일관성 보강, 2026-06-29 PO).
+
+    설정 seed가 없으면 영상마다 랜덤 seed 1개를 뽑아 모든 비트에 재사용한다 —
+    비트 간 동일성만 보장(영상 간 다양성은 별개).
+    """
+    veo_fal = FakeFalVeoClient()
+    nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
     settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
+    studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
+    studio.produce(_script(beats=["b1", "b2", "b3"]))
+
+    assert len(veo_fal.seeds) == 3
+    assert veo_fal.seeds[0] is not None
+    assert len(set(veo_fal.seeds)) == 1  # 세 비트 모두 동일 seed
+
+
+def test_videostudio_veo_fal_explicit_seed_from_settings(monkeypatch):
+    """settings.veo_fal_seed가 지정되면 그 값이 모든 비트에 그대로 쓰인다(영상 간에도 고정)."""
+    veo_fal = FakeFalVeoClient()
+    nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
+
+    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_SEED="777")
+    studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
+    studio.produce(_script(beats=["b1", "b2"]))
+
+    assert veo_fal.seeds == [777, 777]
+
+
+def test_veo_fal_endframe_lock_default_is_true(tmp_path):
+    """끝프레임 고정이 기본 ON(2026-06-29 PO): 막판 이상행동/화면전환 근본 해결 경로가 기본값.
+
+    이 머신의 .env 누수는 conftest 격리가 막으므로, override 없는 설정의 코드 기본값을 본다.
+    """
+    settings = _veo_fal_settings(NUTTI_MEDIA_DIR=str(tmp_path))
+    assert settings.veo_fal_endframe_lock is True
+
+
+def test_videostudio_veo_fal_each_beat_uses_same_frame(monkeypatch):
+    """체이닝 폴백 경로: 끝 프레임 추출이 실패하면 모든 비트가 원본 마스코트 프레임을 공유한다.
+
+    FakeFalVeoClient가 디스크에 없는 클립 경로를 반환하므로 _chain_frame이 None을 돌려
+    (폴백) 모든 비트가 같은 frame_path로 generate된다. 체이닝 성공 경로는 아래 별도 테스트에서 검증.
+    """
+    veo_fal = FakeFalVeoClient()
+    nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
+
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
+
+    # 체이닝 폴백은 image-to-video 경로(lock=False) 전용 동작이라 명시적으로 끈다(기본 True).
+    settings = _veo_fal_settings(
+        NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_ENDFRAME_LOCK="false"
+    )
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
     script = _script(beats=["b1", "b2", "b3"])
     studio.produce(script)
 
-    # 모든 비트 generate 호출에 같은 frame_path가 전달됐어야 한다.
+    # 폴백: 모든 비트 generate 호출에 같은 원본 frame_path가 전달됐어야 한다.
     assert len(veo_fal.calls) == 3
     frame_paths = [call[0] for call in veo_fal.calls]
     assert all(p == "data/fake/shared_frame.jpg" for p in frame_paths)
+
+
+def test_videostudio_veo_fal_chains_tail_frame_to_next_beat(monkeypatch):
+    """체이닝 성공 경로: 각 클립의 끝 안정 프레임이 다음 비트 시작 프레임으로 쓰인다.
+
+    _chain_frame이 실존 프레임(가드 통과)을 반환하면, 비트 1은 원본 마스코트 프레임에서
+    시작하지만 비트 2·3은 직전 클립에서 추출한 chained 프레임으로 generate돼야 한다
+    (비트 경계 자세 점프 완화의 핵심 동작). _chain_frame을 결정적으로 대체해 ffmpeg 없이 검증.
+    """
+    veo_fal = FakeFalVeoClient()
+    nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
+
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
+    chained = iter(["data/fake/chain1.png", "data/fake/chain2.png"])
+    monkeypatch.setattr(VideoStudio, "_chain_frame", lambda self, clip: next(chained))
+
+    # 체이닝은 image-to-video 경로(lock=False) 전용 동작이라 명시적으로 끈다(기본 True).
+    settings = _veo_fal_settings(
+        NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_ENDFRAME_LOCK="false"
+    )
+    studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
+    script = _script(beats=["b1", "b2", "b3"])
+    studio.produce(script)
+
+    frame_paths = [call[0] for call in veo_fal.calls]
+    # 비트1=원본 마스코트, 비트2·3=직전 클립의 chained 프레임.
+    assert frame_paths == [
+        "data/fake/shared_frame.jpg",
+        "data/fake/chain1.png",
+        "data/fake/chain2.png",
+    ]
 
 
 def test_produce_veo_fal_cleans_up_completed_clips_on_midloop_failure(tmp_path):
@@ -753,7 +954,7 @@ def test_produce_veo_fal_cleans_up_completed_clips_on_midloop_failure(tmp_path):
         def __init__(self):
             self.n = 0
 
-        def generate(self, frame_path, prompt):
+        def generate(self, frame_path, prompt, *, last_frame_path=None, seed=None):
             self.n += 1
             if self.n == 1:
                 p = tmp_path / "veo_fal_leak1.mp4"
@@ -780,7 +981,7 @@ def test_videostudio_veo_fal_duration_is_clip_sec_times_beats(monkeypatch):
     veo_fal = FakeFalVeoClient()
     nano = FakeNanoBananaClient()
 
-    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips: clips[0])
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
     settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
@@ -841,7 +1042,7 @@ def test_videostudio_veo_fal_veo_fal_client_owned_is_closed(monkeypatch, tmp_pat
         return c
 
     monkeypatch.setattr(vvf_module, "FalVeoClient", _fake_cls)
-    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips: clips[0])
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
     settings = _veo_fal_settings(NUTTI_MEDIA_DIR=str(tmp_path))
     nano = FakeNanoBananaClient()

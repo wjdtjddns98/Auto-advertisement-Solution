@@ -85,8 +85,19 @@ class FalVeoClient(_HttpClosingMixin):
         self.settings = settings
         self._http = http
         self._sleep = sleep if sleep is not None else time.sleep
-        # 설정값을 URL에 삽입하기 전에 형식 검증(주입 표면 제한).
-        self._model = _validate_model_id(settings.veo_fal_model, env_name="NUTTI_VEO_FAL_MODEL")
+        # 끝프레임 고정 모드(2026-06-29 PO): True면 first-last-frame-to-video 모델을 써
+        # 각 비트 클립의 시작·끝 프레임을 동일 마스코트 프레임으로 고정한다(비트 경계 끊김
+        # 근본 완화). 입력 필드가 다르므로(_submit 참조) 모드 플래그를 보관한다.
+        self._endframe_lock = bool(settings.veo_fal_endframe_lock)
+        # 설정값을 URL에 삽입하기 전에 형식 검증(주입 표면 제한). 모드에 맞는 모델을 고른다.
+        if self._endframe_lock:
+            self._model = _validate_model_id(
+                settings.veo_fal_flf_model, env_name="NUTTI_VEO_FAL_FLF_MODEL"
+            )
+        else:
+            self._model = _validate_model_id(
+                settings.veo_fal_model, env_name="NUTTI_VEO_FAL_MODEL"
+            )
         # fal 큐 status/result 조회는 앱 ID(앞 2세그먼트)만 사용한다.
         # "fal-ai/veo3.1/lite/image-to-video" → app_id = "fal-ai/veo3.1"
         # (KlingClient의 405 실측 사례와 동일 — 전체 모델 경로 GET은 405 발생).
@@ -115,37 +126,79 @@ class FalVeoClient(_HttpClosingMixin):
         self._http = httpx.Client(timeout=60.0)
         return self._http
 
-    def generate(self, frame_path: str, prompt: str) -> str:
-        """시작 프레임 + 프롬프트로 8초 클립을 생성하고 로컬 저장 경로를 반환한다."""
-        request_id = self._submit(frame_path, prompt)
+    def generate(
+        self,
+        frame_path: str,
+        prompt: str,
+        *,
+        last_frame_path: str | None = None,
+        seed: int | None = None,
+    ) -> str:
+        """시작 프레임 + 프롬프트로 8초 클립을 생성하고 로컬 저장 경로를 반환한다.
+
+        끝프레임 고정 모드(endframe_lock)에서는 `last_frame_path`(끝 프레임)도 함께
+        제출한다 — 미지정 시 시작 프레임과 동일 프레임으로 고정해 경계를 매끄럽게 한다.
+        `seed`를 주면 제출 페이로드에 실어 영상 내 비트 간 음색/비주얼 편차를 줄인다
+        (호출부가 한 영상의 모든 비트에 같은 seed를 넘긴다).
+        """
+        request_id = self._submit(frame_path, prompt, last_frame_path=last_frame_path, seed=seed)
         video_url = self._poll(request_id)
         return self._download(video_url)
 
-    def _submit(self, frame_path: str, prompt: str) -> str:
-        """image-to-video 작업을 제출하고 검증된 request_id를 반환한다.
-
-        시작 프레임은 KlingClient._submit과 동일하게 base64 data URI로 보낸다.
-        fal Veo 3.1 입력 스키마(2026-06-16 openapi 확인):
-          prompt, image_url, generate_audio, aspect_ratio, resolution, duration.
-        """
+    def _encode_data_uri(self, frame_path: str, label: str) -> str:
+        """프레임 파일을 base64 data URI로 인코딩한다(fal 입력 image/frame URL용)."""
         import base64
 
-        frame_bytes = _read_bytes(frame_path, "Veo(fal) 시작 프레임")
+        frame_bytes = _read_bytes(frame_path, label)
         mime = _guess_image_mime(frame_path)
-        data_uri = f"data:{mime};base64,{base64.b64encode(frame_bytes).decode('ascii')}"
+        return f"data:{mime};base64,{base64.b64encode(frame_bytes).decode('ascii')}"
+
+    def _submit(
+        self,
+        frame_path: str,
+        prompt: str,
+        *,
+        last_frame_path: str | None = None,
+        seed: int | None = None,
+    ) -> str:
+        """작업을 제출하고 검증된 request_id를 반환한다.
+
+        모드별 입력 스키마:
+        - 기본(image-to-video, 2026-06-16 openapi): prompt, image_url, generate_audio,
+          aspect_ratio, resolution, duration.
+        - 끝프레임 고정(first-last-frame-to-video, 2026-06-29 확인): image_url 대신
+          first_frame_url + last_frame_url. last_frame_path 미지정 시 시작 프레임과 동일
+          프레임으로 고정 — 모든 비트가 같은 포즈로 시작·종료해 비트 경계가 매끄럽다.
+        시작/끝 프레임은 KlingClient._submit과 동일하게 base64 data URI로 보낸다.
+        """
+        data_uri = self._encode_data_uri(frame_path, "Veo(fal) 시작 프레임")
         body = {
             "prompt": prompt,
-            "image_url": data_uri,
             "generate_audio": True,
             "aspect_ratio": "9:16",
             "resolution": self.settings.veo_fal_resolution,
             "duration": "8s",
         }
+        if self._endframe_lock:
+            # 끝 프레임 미지정이면 시작 프레임과 동일 프레임으로 고정(경계 매끄러움 핵심).
+            last_uri = (
+                self._encode_data_uri(last_frame_path, "Veo(fal) 끝 프레임")
+                if last_frame_path
+                else data_uri
+            )
+            body["first_frame_url"] = data_uri
+            body["last_frame_url"] = last_uri
+        else:
+            body["image_url"] = data_uri
         # 화면 자막(깨진 한글 텍스트) 억제 — fal Veo 3.1이 지원하는 negative_prompt로
         # 보낸다(2026-06-18 스키마 확인). 설정이 비어 있으면 필드를 생략한다.
         negative_prompt = (self.settings.veo_fal_negative_prompt or "").strip()
         if negative_prompt:
             body["negative_prompt"] = negative_prompt
+        # 음색 일관성 보강 seed(영상 내 모든 비트 동일값). None이면 필드를 생략해 Veo가
+        # 매번 랜덤 생성한다(기존 동작). veo3.1 스키마의 optional seed 필드.
+        if seed is not None:
+            body["seed"] = int(seed)
         url = f"{_FAL_QUEUE_BASE}/{self._model}"
         # 일시 오류(429/5xx)는 backoff 재시도(폴링·결과조회와 동일). Veo 생성은 분당
         # 한도가 낮은 시점에 제출 429를 맞으면 전체 파이프라인이 죽을 수 있으므로 재시도한다.

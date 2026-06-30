@@ -84,12 +84,13 @@ def test_script_system_prompt_specifies_four_beats():
 
 
 def test_script_system_prompt_pins_strong_hook():
-    """SCRIPT_SYSTEM_PROMPT가 훅 강화 지시를 담는다(2026-06-12 PO 피드백 — 리버트 가드).
+    """SCRIPT_SYSTEM_PROMPT가 강한 훅 지시를 담는다(2026-06-30 PO "너무 밋밋함" — 리버트 가드).
 
-    첫 1~2초 시청자 유지 + 밋밋한 도입 금지가 빠지면 실패한다.
+    첫 1초 스크롤 정지 + 밋밋한 도입 금지가 빠지면 실패한다.
     """
-    assert "첫 1~2초" in SCRIPT_SYSTEM_PROMPT
-    assert "호기심" in SCRIPT_SYSTEM_PROMPT
+    assert "첫 1초" in SCRIPT_SYSTEM_PROMPT
+    assert "스크롤" in SCRIPT_SYSTEM_PROMPT
+    assert "밋밋한" in SCRIPT_SYSTEM_PROMPT and "금지" in SCRIPT_SYSTEM_PROMPT
 
 
 def test_script_system_prompt_bans_brand_in_last_beat():
@@ -98,17 +99,22 @@ def test_script_system_prompt_bans_brand_in_last_beat():
     assert "절대 언급하지 않는다" in SCRIPT_SYSTEM_PROMPT
 
 
+def test_script_system_prompt_cta_calm_tone():
+    """CTA 비트를 차분한 권유체로 쓰게 가이드한다(2026-06-29 PO: 마지막 비트 음성이
+    들뜨며 화자가 바뀌는 경향 완화 — 입력 대사 톤 균일화)."""
+    assert "차분한 권유체" in SCRIPT_SYSTEM_PROMPT
+    assert "느낌표를 쓰지 말 것" in SCRIPT_SYSTEM_PROMPT
+
+
 def test_script_system_prompt_pins_beat_char_range():
     """SCRIPT_SYSTEM_PROMPT가 비트당 길이 범위(8초 채움~50자 상한)를 명시한다(리버트 가드).
 
-    하한(40자·충분히 길게)은 비트 사이 빈 구간을 막고(2026-06-16 PO 피드백: 비트 간
-    공백), 상한(50자)은 대사가 8초 클립 안에 다 못 들어가 잘리는 것을 막는다
-    (대본 잘림 결함 예방). 둘 다 풀리면 회귀하므로 핀한다.
+    하한(40자)은 비트 사이 빈 구간을 막고, 상한(46자)은 발화가 약 7초 안에 끝나 끝
+    글리치 구간을 적응 트림으로 잘라낼 여유를 남긴다(2026-06-29 PO: 8초 꽉 채우면
+    잘라낼 여유가 없어 글리치가 남고, 고정 트림은 대본별로 대사가 잘림). 회귀 방지 핀.
     """
-    assert "40~48자" in SCRIPT_SYSTEM_PROMPT  # 8초 채움 하한(공백 방지)
-    assert "충분히 길게" in SCRIPT_SYSTEM_PROMPT
-    assert "50자를 넘기면" in SCRIPT_SYSTEM_PROMPT  # 상한(8초 클립 보호)
-    assert "잘린다" in SCRIPT_SYSTEM_PROMPT
+    assert "40~46자" in SCRIPT_SYSTEM_PROMPT  # 발화 ~7초 종료(끝 여유 확보)
+    assert "46자를 넘겨" in SCRIPT_SYSTEM_PROMPT  # 상한(트림 여유 보호)
 
 
 def test_split_into_beats_strips_bullets_and_numbers():

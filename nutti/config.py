@@ -90,9 +90,55 @@ class Settings(BaseSettings):
     veo_fal_negative_prompt: str = Field(
         default=(
             "text, subtitles, captions, words, letters, writing, watermark, "
-            "on-screen text, caption bar, hardcoded subtitles, korean text overlay"
+            "on-screen text, caption bar, hardcoded subtitles, korean text overlay, "
+            # 클립 끝 페이드아웃 억제 — 끝 프레임이 어두워지면 프레임 체이닝이 망가진다.
+            "fade out, fade to black, fade in, dimming, darkening, vignette, "
+            # 클립 끝 자세 변화(누움·이탈) 억제 — 비트 경계 점프의 주원인.
+            "lying down, walking out of frame, leaving the frame, camera movement, camera zoom, "
+            # 배경음악(BGM) 억제 — Veo가 발화 후 남는 잉여 구간을 음악으로 채우면(2026-06-29
+            # PO 실측) 무음 트림(_trim_to_speech)이 발화 끝을 못 잡아 끝부분 헛짓(자세 무너짐·
+            # 화면전환)이 그대로 남는다. 음악을 빼 잉여를 무음으로 되돌려 트림이 잘라내게 한다.
+            "background music, music, instrumental, soundtrack, song, melody, jingle, "
+            "sound effects, musical score, humming, singing, "
+            # 막바지 헛짓/글리치 억제(2026-06-29 PO) — 끝 잉여 구간에서 자세가 급변하거나
+            # 프레임이 뭉개지는(모핑/워핑/글리치) 현상을 직접 억제. 프롬프트 본문의 "끝 2~3초
+            # 완전 정지"와 이중 방어.
+            "sudden movement, sudden pose change, jerky motion, twitching, spasm, "
+            "morphing, warping, distortion, deformed body, flickering, glitch, jitter"
         ),
         alias="NUTTI_VEO_FAL_NEGATIVE_PROMPT",
+    )
+    # 비트 클립을 이어붙일 때 경계에 줄 크로스페이드(디졸브) 길이(초). veo가 클립마다
+    # 확률적으로 의상·구도를 살짝 바꿔 비트 경계에서 점프가 보일 수 있는데, 짧은 디졸브로
+    # 그 순간을 부드럽게 가린다(근본 제거가 아닌 완화 — 2026-06-29 PO 옵션 B). 0이면
+    # 디졸브 없이 단순 concat. 너무 길면 대사가 겹쳐 잘리므로 0.2~0.4초 권장.
+    veo_fal_crossfade_sec: float = Field(default=0.25, alias="NUTTI_VEO_FAL_CROSSFADE_SEC")
+    # 비트 경계 끊김(클립이 8초 동안 포즈가 drift해 다음 클립과 안 이어짐)을 근본적으로
+    # 줄이기 위한 "끝프레임 고정" 모드(2026-06-29 PO 아이디어). True면 image-to-video
+    # 대신 first-last-frame-to-video 모델을 써 각 비트 클립의 시작·끝 프레임을 동일한
+    # 마스코트 프레임으로 고정한다 — 모든 클립이 같은 포즈로 시작·종료해 경계가 항상
+    # 같은 프레임에서 만난다(체이닝 불요). False면 기존 image-to-video 경로(프레임 체이닝).
+    veo_fal_endframe_lock: bool = Field(default=True, alias="NUTTI_VEO_FAL_ENDFRAME_LOCK")
+    # 끝프레임 고정 모드에서 쓰는 first-last-frame-to-video 모델 ID. image-to-video와
+    # 단가 동일($0.05/초·720p). 입력 필드가 다르다(image_url 대신 first_frame_url +
+    # last_frame_url). endframe_lock=True일 때만 사용.
+    veo_fal_flf_model: str = Field(
+        default="fal-ai/veo3.1/lite/first-last-frame-to-video",
+        alias="NUTTI_VEO_FAL_FLF_MODEL",
+    )
+    # 영상 내 비트(n1~n4) 음색 일관성 보강용 seed(2026-06-29 PO). Veo는 voice/reference
+    # 파라미터가 없어 음색이 비트마다 드리프트하는데, 같은 seed + 같은 음색 프롬프트를 모든
+    # 비트에 주면 편차가 줄어든다(seed가 오디오를 완전 통제하진 않으나 부분 효과 — 무료 카드).
+    # None(기본)이면 _produce_clips_veo_fal가 영상마다 seed 1개를 뽑아 그 영상의 모든 비트에
+    # 재사용한다(영상 내 일관, 영상 간 다양성 유지). 정수면 항상 그 값(영상 간에도 고정).
+    veo_fal_seed: int | None = Field(default=None, alias="NUTTI_VEO_FAL_SEED")
+    # 각 비트 클립 끝에서 무조건 잘라낼 초(2026-06-29 PO). 끝 잉여 구간 글리치 제거용
+    # 안전판이지만, 고정값이면 대본마다 발화 종료 시점이 달라 8초 꽉 찬 대본은 대사가
+    # 잘린다(PO 지적). 그래서 기본 0(비활성) — 발화 종료를 자동 감지하는 적응 무음 트림
+    # (_trim_to_speech)에 맡긴다. 적응 트림은 발화 끝 기준이라 대본 길이와 무관하게 대사를
+    # 보존하며 발화 후 글리치 구간만 자른다. 특정 운영에서 강제 상한이 필요하면 >0으로 켠다.
+    veo_fal_clip_tail_trim_sec: float = Field(
+        default=0.0, alias="NUTTI_VEO_FAL_CLIP_TAIL_TRIM_SEC"
     )
 
     # 저장소

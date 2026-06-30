@@ -41,6 +41,25 @@ _MAX_DIALOGUE_CHARS = 500
 _MAX_TOPIC_CHARS = 200
 # 비트 1개(독립 클립)의 길이(초). veo_fal 경로는 비트마다 8초 클립을 만들어 스티칭한다.
 _CLIP_SEC = 8.0
+
+# 발화 끝 적응 트림(_trim_to_speech) 파라미터(2026-06-30 PO 실측 보정). Veo 8초 클립은
+# 발화가 ~6초에 끝나도 뒤를 음악/앰비언스로 채워 무음이 안 생긴다 — 종전 silencedetect(EOF
+# 무음) 방식이 발동 못 했다. 대신 RMS 엔벨로프를 떠 발화 본체 직후 "깊은 딥"(발화 끝)을 찾는다.
+_TRIM_SR = 16000  # 엔벨로프 분석용 모노 다운샘플레이트(디코드 비용↓, 음성 대역 충분)
+_TRIM_WIN = 0.25  # 엔벨로프 윈도 길이(초)
+_TRIM_SPEECH_MIN = -24.0  # 이 dBFS를 넘으면 발화로 간주(발화 본체 식별·시작점)
+_TRIM_ABS_CAP = -30.0  # 발화 끝 딥의 절대 바닥(이보다 조용해야 딥 후보)
+_TRIM_DROP = 13.0  # 직전 발화 대비 낙폭(dB) — 이만큼 떨어지면 발화가 멈춘 것
+# 딥 이후 이 dBFS를 넘는 구간이 있으면 발화 재개(=중간 멈춤)로 보고 그 딥을 기각한다.
+# _TRIM_SPEECH_MIN(-24)보다 4dB 엄격한 건 **의도된 갭**: PO 실측상 Veo의 발화 본체는
+# -12~-18 dBFS로 크고, 발화 후 잉여를 채우는 tail-fill은 -22~-31 dBFS다. 재개 기준을
+# 그 사이(-20)에 둬야 tail-fill(<-20)은 "재개 아님"으로 통과시켜 트림하고, 진짜 발화
+# 재개(-12~-18 > -20)는 "재개"로 잡아 중간 멈춤 딥을 기각한다. -24로 낮추면 tail-fill
+# (-22.8 실측치)이 재개로 오인돼 검증된 클립의 트림이 깨진다(절대 낮추지 말 것).
+_TRIM_RESUME = -20.0
+_TRIM_LOOKBACK = 4  # 직전 발화 레벨 참조 윈도 개수(=1초)
+_TRIM_MIN_SPEECH = 2.5  # 발화 시작 후 이 초 이전의 딥은 무시(훅 중 멈춤 오검출 방지)
+_TRIM_PAD = 0.15  # 발화 끝 뒤 남길 여유(초) — 끝음절 보존
 # 화면 자막(깨진 한글 텍스트) 억제용 negative_prompt는 이제 설정값
 # `Settings.veo_fal_negative_prompt`로 단일화되어 FalVeoClient._submit이 fal에 직접
 # 보낸다(2026-06-18). 프롬프트 본문의 "no on-screen text" 지시와 이중 방어를 이룬다.
@@ -343,7 +362,8 @@ class VeoPromptBuilder:
       달라지는 문제 확인 → 상세 고정 묘사로 드리프트 완화).
     - 인터뷰 마이크를 화면 밖에서 들이대는 길거리 인터뷰 구도(참고: "오줌싸개 강아지의
       억울한 변명"·"조회수 두자리 강아지의 한마디" 류 쇼츠).
-    - 카메라는 고정(locked-off tripod)·무빙 없음 — 흔들림/컷 전환 방지.
+    - 카메라는 고정(locked-off)·무빙 없음 — 흔들림/컷 전환 방지("tripod" 단어는 화면에
+      삼각대로 렌더되므로 프롬프트에서 제외, 2026-06-29 실측).
     - 깨짐 주원인(추가 동물·사람·화면 내 텍스트)을 명시적으로 금지한다.
     - 포맷: photorealistic · 9:16 세로 · 각 비트는 8초 단일컷(여러 비트는 ffmpeg로 스티칭).
     """
@@ -371,11 +391,23 @@ class VeoPromptBuilder:
         "exaggerated or distorted faces"
     )
     _VOICE = (
-        "Voice (must be EXACTLY the same voice in every clip of this series): a bright, "
-        "cute Little girl Korean voice, slightly high-pitched, cheeky and energetic, "
-        "speaking at a lively natural pace. Keep the identical timbre, pitch, and accent "
-        "in every clip; do not change the voice or switch to a different speaker for "
-        "emphasis or for the final call-to-action line."
+        "Voice (must be EXACTLY the same single voice in every clip of this series, like "
+        "one specific recognizable person with a fixed vocal fingerprint): a bright, "
+        "cute Little girl Korean voice, sounding about 6 years old, slightly high-pitched, "
+        "cheeky and energetic, with a warm soft timbre and a consistent speaking rhythm at "
+        "a lively natural pace. Keep the identical timbre, pitch, accent, and speaking speed "
+        "in every clip. Keep this exact same voice even on excited, exclamatory, or "
+        "call-to-action lines: do not raise the pitch, do not get louder, do not turn into "
+        "an excited announcer or a promotional voice-over, and never switch to a different "
+        "speaker or a different age — every line, including the final call-to-action, must "
+        "sound like the exact same little girl speaking in the same calm, even tone as the "
+        "earlier lines. "
+        # 발화 후 잉여 구간 BGM 채움 억제 — Veo가 대사가 끝난 뒤 남는 시간을 배경음악으로
+        # 채우면 무음 트림이 발화 끝을 못 잡아 끝부분 헛짓이 남는다(2026-06-29 PO 실측).
+        "This single spoken voice is the only audio: there is no background music, "
+        "instrumental, soundtrack, jingle, or sound effects at any point. After the puppy "
+        "finishes the last word, the audio simply stays quiet with natural room tone — do "
+        "not fill the remaining time with any music or sound."
     )
     _MIC = (
         "A handheld interview microphone is pointed at the puppy from off-screen; "
@@ -383,12 +415,62 @@ class VeoPromptBuilder:
     )
     _SPEAKING_OFF = "speaking in Korean to an off-screen interviewer"
     _SPEAKING_DIRECT = "speaking in Korean directly to the camera"
-    _CAMERA = "Camera: locked-off tripod shot, no camera movement."
+    # "tripod" 단어를 넣으면 Veo가 화면에 삼각대를 렌더한다(2026-06-29 실측) — 단어를
+    # 빼고 "고정 카메라"는 fixed/static/no movement로만 지시한다.
+    _CAMERA = "Camera: locked-off static shot, fixed framing, no camera movement."
+    # 비트 클립이 독립 생성돼 끝 자세가 제각각이면 다음 클립과 점프가 생긴다(PO 피드백
+    # 2026-06-29). 자세를 처음부터 끝까지 고정하고, 끝을 페이드 없이 또렷한 프레임으로
+    # 마무리하게 해 프레임 체이닝(끝 프레임→다음 시작 프레임)이 안정적으로 물리도록 한다.
+    # _CONTINUITY: 클립이 독립 생성돼 비트마다 의상·외형이 달라지면(실측 2026-06-29:
+    # 회색 후드 → 맨몸으로 점프) 경계에서 튄다. 의상·털·외형을 처음부터 끝까지 동일하게
+    # 못박아 비트 간 점프를 줄인다(같은 style.outfit이 모든 비트에 들어가도 veo가 바꾸는
+    # 경향에 대한 추가 방어).
+    _CONTINUITY = (
+        "Keep the exact same outfit and clothing on the puppy in every frame with no "
+        "changes — do not add, remove, or alter any clothing mid-shot. Keep the identical "
+        "fur color, markings, and overall appearance from the first frame to the last."
+    )
+    _MOTION_HOLD = (
+        "The puppy stays in the exact same upright seated position for the entire shot, "
+        "sitting still and centered, holding the same pose from the first frame to the "
+        "last frame; it does not lie down, stand up, walk, or leave the frame. The clip "
+        "ends on a clean, fully-lit, sharp frame with the puppy seated and centered — no "
+        "fade-out, no dimming, no blur at the end."
+    )
+    # 끝프레임 고정(lock) 모드 전용 모션 지시(2026-06-29 PO: "모션홀드 풀어 생동감").
+    # first-last-frame 모델이 시작·끝 프레임을 동일 마스코트 프레임으로 강제하므로, 중간에
+    # 자유롭게 움직여도 클립은 항상 같은 끝 포즈로 수렴한다 — 정적인 _MOTION_HOLD 대신
+    # 앉은 채 자연스러운 제스처를 허용해 생기를 준다. 단 화면 이탈·기립·눕기는 막아(막판
+    # 이상행동 방지) 끝을 차분한 앉은 자세로 마무리하게 하고, 끝 페이드는 금지한다
+    # (negative_prompt의 "lying down/walking out/camera movement" 억제와 이중 방어).
+    _MOTION_LIVELY = (
+        "The puppy stays seated and centered in frame the whole time but moves naturally "
+        "and expressively as it talks — gentle head tilts, ear and body movements, "
+        "blinking, and lively little gestures that bring energy to the shot. It never "
+        "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
+        "leaves the frame. Ending rule: in the final two to three seconds the puppy gently "
+        "settles into a calm, steady, upright seated pose facing forward, winding down its "
+        "gestures while keeping only subtle natural life — soft breathing and an occasional "
+        "slow blink. No big gestures, no shifting, turning, ducking, or leaning at the end. "
+        "It must NOT hard-freeze into a perfectly static, lifeless frame; keep this faint "
+        "living motion all the way through. The clip ends on a calm, clean, fully-lit, "
+        "razor-sharp frame — no fade-out, no dimming, no blur, no warping, no morphing, no "
+        "freeze, and no glitch at the end."
+    )
     _NEGATIVE = (
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
         "costume, person in a costume, or plush toy. Strictly no additional animals, no "
         "people. Absolutely no text, subtitles, captions, letters, numbers, words, logos, "
         "brand names, watermarks, or UI overlays anywhere in the frame."
+    )
+    # 마지막 비트(CTA) 전용 음성 앵커 — CTA 대사가 권유·느낌표 톤이라 Veo가 음성을 더
+    # 들뜨거나 아나운서처럼 바꾸는 경향이 강하다(2026-06-29 PO 실측). 마지막 비트
+    # 프롬프트에만 추가로 박아 앞 비트와 동일 화자·톤으로 못박는다(_VOICE와 이중 방어).
+    _CTA_VOICE_ANCHOR = (
+        "This is the final line of the series. Speak it in the exact same voice, pitch, "
+        "age, and calm even tone as the previous clips — the same little girl, not louder, "
+        "not more excited, not an announcer or promo voice. Do not change the speaker for "
+        "this call to action."
     )
     # ========================= PO 수정 구역 끝 (영상 연출) =========================
 
@@ -412,6 +494,8 @@ class VeoPromptBuilder:
         *,
         off_screen_interviewer: bool = True,
         style: EpisodeStyle | None = None,
+        motion_release: bool = False,
+        final_cta: bool = False,
     ) -> str:
         """비트 대사 한 토막으로 8초 단일컷 Veo 프롬프트를 만든다.
 
@@ -423,6 +507,11 @@ class VeoPromptBuilder:
         한글 자막을 임의 렌더하면 깨진 글자로 나오기 때문(settings.veo_fal_negative_prompt와 이중 방어).
         대사는 `_sanitize_prompt_text`로 정제한다 — 작은따옴표가 있으면 인용 구분자를
         탈출해 금지 지시(추가 동물·사람·텍스트 금지)를 덮어쓰는 주입이 가능하기 때문이다.
+        `motion_release=True`(끝프레임 고정 모드 전용)면 정적인 _MOTION_HOLD 대신 자연스러운
+        제스처를 허용하는 _MOTION_LIVELY를 써 생동감을 준다 — 끝 프레임이 모델로 고정되므로
+        중간 모션을 풀어도 경계는 매끄럽다.
+        `final_cta=True`(마지막 비트 전용)면 _CTA_VOICE_ANCHOR를 덧붙여 CTA 대사에서
+        음성이 들뜨거나 화자가 바뀌는 경향을 추가로 억제한다(2026-06-29 PO).
         """
         dialogue = _sanitize_prompt_text(dialogue_text.strip() or "", _MAX_DIALOGUE_CHARS)
         speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
@@ -430,12 +519,16 @@ class VeoPromptBuilder:
         if style is not None:
             scene = f"The puppy wears {style.outfit}, {style.setting}. "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
+        motion = self._MOTION_LIVELY if motion_release else self._MOTION_HOLD
+        cta = f"{self._CTA_VOICE_ANCHOR} " if final_cta else ""
         return (
             f"A photorealistic shot of {self._PERSONA}, {speaking}, "
             f"saying (as spoken audio only, no on-screen text): '{dialogue}'. "
             f"{scene}{mic}"
-            f"{self._VOICE} "
+            f"{self._VOICE} {cta}"
             f"{self._CAMERA} "
+            f"{motion} "
+            f"{self._CONTINUITY} "
             f"{_CINEMATIC_LOOK} "
             "Format: tall vertical portrait orientation, single continuous 8-second shot. "
             f"{self._NEGATIVE}"
@@ -573,14 +666,68 @@ class VideoStudio:
         if client is None:
             client = owned = FalVeoClient(self.settings, sleep=self._sleep)
         clips: list[str] = []
+        # 가드된 프레임 체이닝용 임시 프레임(정리 대상). 원본 frame_path는 제외.
+        chain_frames: list[str] = []
+        # 끝프레임 고정 모드(2026-06-29 PO): 모든 비트가 같은 마스코트 프레임에서 시작·종료
+        # 하도록 first/last 프레임을 frame_path로 고정한다 — 클립이 같은 포즈로 시작·끝나
+        # 비트 경계가 항상 동일 프레임에서 만나 끊김이 없다. 체이닝(끝 프레임 추출)은 불요.
+        lock = bool(self.settings.veo_fal_endframe_lock)
+        # 영상 내 모든 비트(n1~n4)에 같은 seed를 줘 음색/비주얼 편차를 줄인다(2026-06-29 PO:
+        # 음색 일관성 보강). 설정값(veo_fal_seed)이 없으면 이 영상용 seed 1개를 뽑아 모든 비트에
+        # 재사용한다 — 영상 내 일관, 영상 간 다양성 유지. Veo가 seed로 오디오를 완전 통제하진
+        # 않지만, 같은 seed + 같은 음색 프롬프트(_VOICE)면 비트 간 목소리가 더 비슷해진다.
+        video_seed = self.settings.veo_fal_seed
+        if video_seed is None:
+            import random
+
+            video_seed = random.randint(0, 2**31 - 1)
+        # 각 비트의 시작 프레임. 기본 모드는 1번 비트가 마스코트 Kontext 프레임에서 시작하고
+        # 이후 비트는 직전 클립의 끝 안정 프레임으로 이어 붙인다(체이닝). lock 모드는 항상
+        # frame_path 고정.
+        current_frame = frame_path
         try:
             for i, beat in enumerate(beats, start=1):
                 # 정면 1인 발화(off_screen_interviewer=False) — 인터뷰 마이크 연출 제거
                 # (2026-06-16 PO 피드백: 마이크 구도 아예 삭제).
-                prompt = builder.build_beat(beat, off_screen_interviewer=False, style=style)
-                clip_path = client.generate(frame_path, prompt)
+                # lock 모드는 끝 프레임이 모델로 고정되므로 모션 제약을 풀어(_MOTION_LIVELY)
+                # 생동감을 준다(2026-06-29 PO). 기본 image-to-video 경로는 _MOTION_HOLD 유지.
+                prompt = builder.build_beat(
+                    beat,
+                    off_screen_interviewer=False,
+                    style=style,
+                    motion_release=lock,
+                    final_cta=(i == len(beats)),
+                )
+                if lock:
+                    # 시작·끝 모두 마스코트 프레임으로 고정(끝프레임 고정 모드).
+                    clip_path = client.generate(
+                        frame_path, prompt, last_frame_path=frame_path, seed=video_seed
+                    )
+                else:
+                    clip_path = client.generate(current_frame, prompt, seed=video_seed)
+                # 끝 잉여 구간(글리치·이상동작 온상) 강제 제거: 8초→약7초(2026-06-29 PO).
+                # 트림 성공 시 원본 8초 클립은 즉시 삭제(잔존 방지). 이후 체이닝 끝프레임
+                # 추출·무음 트림은 모두 트림된 클립 기준 — 글리치 구간이 다음 단계에도 안 샌다.
+                tail = self.settings.veo_fal_clip_tail_trim_sec
+                if tail > 0:
+                    cut = self._trim_tail_fixed(clip_path, tail)
+                    if cut != clip_path:
+                        Path(clip_path).unlink(missing_ok=True)
+                        clip_path = cut
                 log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
                 clips.append(clip_path)
+                # 가드된 체이닝(기본 모드만): 다음 비트가 있으면 이 클립의 끝 안정 프레임을
+                # 다음 시작 프레임으로 쓴다. 추출·품질 가드(검정/빈/가로) 실패 시 None → 원본
+                # 마스코트 프레임으로 안전 폴백(망가진 프레임이 다음 클립에 누적되지 않게 하는
+                # 핵심 가드). lock 모드는 끝프레임을 frame_path로 고정하므로 체이닝하지 않는다.
+                if not lock and i < len(beats):
+                    chained = self._chain_frame(clip_path)
+                    if chained is not None:
+                        chain_frames.append(chained)
+                        current_frame = chained
+                    else:
+                        log.info("video.veo_fal.chain.fallback", beat=i)
+                        current_frame = frame_path
         except BaseException:
             # 중도 실패 시 이미 받은 비트 클립(각 수백 MB)이 media_dir에 영구 잔존하지
             # 않도록 정리한다(Kling 스티칭 경로의 누수 방어와 동일).
@@ -591,22 +738,37 @@ class VideoStudio:
                     pass
             raise
         finally:
+            # 체이닝 임시 프레임은 generate에 base64로 이미 들어갔으니 더 필요 없다 — 정리.
+            for cf in chain_frames:
+                try:
+                    Path(cf).unlink(missing_ok=True)
+                except OSError:
+                    pass
             if owned is not None:
                 _close_owned(owned)
         # 비트 클립(8초 고정)의 앞뒤 침묵을 잘라 비트 사이 공백을 줄인다
         # (2026-06-16 PO 피드백: 비트 사이 공백이 너무 길다). 트림 실패분은 원본·8초로 폴백.
         trimmed: list[str] = []
+        durations: list[float | None] = []
         total = 0.0
         for clip in clips:
             path, sec = self._trim_to_speech(clip)
             trimmed.append(path)
+            durations.append(sec)
             total += sec if sec is not None else _CLIP_SEC
         # 트림으로 새로 만든 임시 파일(veo_fal_trim_*.mp4)은 스티칭 후 정리한다 — 원본
         # 비트 클립은 기존 정책대로 유지하고, 단일 비트라 _stitch가 그대로 돌려준 파일
         # (final)은 삭제 대상에서 제외한다(반환 파일 삭제 방지). 스티칭 실패 시에도 정리.
         final = None
         try:
-            final = self._stitch(trimmed)
+            final = self._stitch(trimmed, durations)
+            # total은 트림 클립 길이의 단순 합 = 디졸브 전 상한값이다. _stitch가 경계
+            # 디졸브를 적용하면 실제 산출물은 (비트수-1)*crossfade_sec 만큼 짧다(0.25초
+            # 기본이면 3비트당 0.5초). 여기서 산술 보정하지 않는 이유: 호출부는 _stitch가
+            # 디졸브를 실제 적용했는지(ffmpeg 성공 여부) 모른다 — 실패해 concat 폴백하면
+            # 보정값이 오히려 틀린다. duration_sec은 현재 metadata 전용(비즈니스 컷오프·
+            # 과금에 미사용)이라 이 오차는 무해. 정확한 길이가 필요해지면 산술이 아니라
+            # 최종 mp4를 ffprobe로 재측정해야 한다.
             return final, total
         finally:
             for orig, t in zip(clips, trimmed):
@@ -616,15 +778,17 @@ class VideoStudio:
                     except OSError:
                         pass
 
-    def _trim_to_speech(self, clip: str) -> tuple[str, float | None]:
-        """클립에서 발화 구간만 남기고 앞뒤 침묵을 잘라 (새 경로, 길이초)를 반환한다.
+    def _trim_tail_fixed(self, clip: str, trim_sec: float) -> str:
+        """클립 끝에서 trim_sec초를 강제로 잘라낸 새 클립 경로를 반환한다(무음 무관).
 
-        veo_fal 비트 클립은 8초 고정이라 짧은 대사 뒤에 긴 침묵이 남는다 — 그대로
-        이어붙이면 비트 사이 공백이 길어진다(PO 피드백). ffmpeg silencedetect로 앞/뒤
-        침묵 경계를 찾아 발화 구간 + 짧은 여유만 남긴다. 검출·트림 실패나 전구간 침묵 등
-        이상 시 (원본 경로, None)을 돌려준다 — 더미 경로·예외에도 파이프라인이 안전하게
-        진행되도록(단위 테스트의 가짜 클립 경로 포함).
+        veo_fal 비트 클립은 8초 고정인데, 끝 ~1초 잉여 구간에서 모델이 자세를 무너뜨리거나
+        순간 글리치/이상동작을 내는 경향이 있다(2026-06-29 PO). 발화·무음 여부와 무관하게
+        끝 trim_sec을 물리적으로 제거해 그 구간을 영상에서 배제한다(대사 끝이 약간 잘릴 수
+        있음 — PO 수용). trim_sec<=0, 길이 측정 실패, 과도 트림(남는 길이<2s), 재인코딩
+        실패 시 원본을 그대로 반환한다(파이프라인 안전 — 단위 테스트의 가짜 클립 포함).
         """
+        if trim_sec <= 0:
+            return clip
         import re
         import subprocess
 
@@ -632,43 +796,167 @@ class VideoStudio:
             import imageio_ffmpeg
 
             ff = imageio_ffmpeg.get_ffmpeg_exe()
-            probe = subprocess.run(
-                [ff, "-hide_banner", "-i", clip, "-af",
-                 "silencedetect=noise=-30dB:d=0.4", "-f", "null", "-"],
-                capture_output=True,
-            )
+            probe = subprocess.run([ff, "-hide_banner", "-i", clip], capture_output=True)
             err = probe.stderr.decode("utf-8", "replace")
             dm = re.search(r"Duration:\s*(\d+):(\d+):([0-9.]+)", err)
             if dm is None:
-                return clip, None
+                return clip
             dur = int(dm.group(1)) * 3600 + int(dm.group(2)) * 60 + float(dm.group(3))
-            starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)", err)]
-            ends = [float(x) for x in re.findall(r"silence_end:\s*([0-9.]+)", err)]
-            # 앞 침묵: 0 근처에서 시작하는 첫 침묵의 끝이 발화 시작점.
-            start_t = 0.0
-            if starts and starts[0] <= 0.3 and ends:
-                start_t = max(0.0, ends[0] - 0.10)
-            # 뒤 침묵: 마지막 침묵이 EOF까지 이어지면(=닫히지 않거나 파일 끝 근처에서 닫힘)
-            # 그 시작이 발화 끝점. 중간에서 닫힌 침묵(발화 사이 짧은 멈춤)은 트림하지 않는다.
+            keep = dur - trim_sec
+            if keep < 2.0:
+                return clip  # 과도 트림 방지(짧은 클립·측정 이상)
+            out = str(Path(self.settings.nutti_media_dir) / f"veo_fal_tail_{uuid4().hex[:8]}.mp4")
+            cut = subprocess.run(
+                [ff, "-y", "-hide_banner", "-i", clip, "-t", f"{keep:.3f}",
+                 "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+                 "-movflags", "+faststart", "-c:a", "aac", out],
+                capture_output=True,
+            )
+            if cut.returncode != 0 or not Path(out).exists():
+                return clip  # 트림 실패 — 원본 유지
+            return out
+        except Exception:
+            # best-effort — 어떤 실패도 원본 클립으로 폴백한다.
+            return clip
+
+    # 프레임 체이닝 가드 임계 — mp4 추출 PNG는 보통 수백 KB~MB. 이 미만이면 검정/실패
+    # 프레임 의심. image_kontext._MIN_FRAME_BYTES(51_200)와 같은 종류의 휴리스틱이되,
+    # ffmpeg 추출 PNG는 압축 특성이 달라 더 낮은 임계를 둔다(가로/검정만 거른다).
+    _MIN_CHAIN_FRAME_BYTES = 20_000
+
+    def _chain_frame(self, clip_path: str) -> str | None:
+        """클립 끝의 안정 프레임을 추출해 품질 가드를 통과하면 PNG 경로를 반환한다.
+
+        다음 비트 클립의 시작 프레임으로 쓰여 비트 경계 자세 점프를 줄인다(프레임 체이닝).
+        끝에서 약간 앞(~0.35s)을 뽑아 클립 마무리의 페이드·잔여 움직임을 피한다. 추출 실패나
+        검정/빈/가로 프레임 등 의심스러우면 None을 반환 — 호출부가 원본 마스코트 프레임으로
+        안전 폴백해 망가진 프레임이 다음 클립에 누적되지 않게 한다(best-effort 품질 개선).
+        """
+        try:
+            if not clip_path or not Path(clip_path).exists():
+                return None
+            import subprocess
+
+            import imageio_ffmpeg
+
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+            out = str(Path(self.settings.nutti_media_dir) / f"chain_{uuid4().hex[:8]}.png")
+            # 끝에서 0.35초 앞 프레임(발화 직후 안정 구간, 페이드 회피).
+            # timeout 필수 — 손상 MP4에서 ffmpeg이 멈추면 timeout 없이는 파이프라인 전체가
+            # 무기한 블록된다. 단일 프레임 추출은 1초 미만이 정상. TimeoutExpired는
+            # Exception 서브클래스라 아래 except가 잡아 None(원본 프레임 폴백)으로 처리한다.
+            res = subprocess.run(
+                [ff, "-y", "-hide_banner", "-sseof", "-0.35", "-i", clip_path,
+                 "-frames:v", "1", out],
+                capture_output=True,
+                timeout=15,
+            )
+            if res.returncode != 0 or not Path(out).exists():
+                return None
+            if self._reject_chain_frame(out):
+                try:
+                    Path(out).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
+            return out
+        except Exception:
+            # 체이닝은 best-effort — 어떤 실패도 None(원본 프레임 폴백)으로 안전 처리.
+            return None
+
+    def _reject_chain_frame(self, path: str) -> bool:
+        """체이닝 프레임이 퇴화(검정/빈/가로)면 True를 반환한다.
+
+        image_kontext._reject_reason과 같은 휴리스틱: 바이트가 너무 작으면 검정/실패 의심,
+        PNG 해상도가 세로(height>width)가 아니면 레퍼런스 미적용 placeholder로 보고 거부한다.
+        """
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            return True
+        if len(data) < self._MIN_CHAIN_FRAME_BYTES:
+            return True
+        from nutti.integrations.image_kontext import _png_dimensions
+
+        dims = _png_dimensions(data)
+        if dims is not None:
+            width, height = dims
+            if height <= width:  # 세로(9:16)가 아니면 거부
+                return True
+        return False
+
+    def _trim_to_speech(self, clip: str) -> tuple[str, float | None]:
+        """클립에서 발화 구간만 남기고 끝 잉여(글리치·tail-fill)를 잘라 (새 경로, 길이초)를 반환.
+
+        veo_fal 비트 클립은 8초 고정인데 발화는 보통 6~7초에 끝난다. 그런데 Veo가 발화 후
+        남는 잉여를 음악/앰비언스로 채워(2026-06-30 PO 실측) 무음이 생기지 않는다 — 종전
+        silencedetect(EOF 무음) 방식은 이 채움 때문에 발동 못 했다. 대신 0.25초 RMS 엔벨로프를
+        떠 **발화 본체 직후 첫 깊은 딥**(직전 발화 대비 큰 낙폭 + 절대 바닥, 그리고 그 뒤로
+        발화가 재개되지 않음)을 발화 끝으로 잡는다. 딥은 발화 길이를 따라 이동하므로 대본이
+        길든 짧든 대사를 자르지 않고 끝 잉여(글리치 온상)만 제거한다.
+
+        디코드·검출 실패나 발화 미검출 등 이상 시 (원본 경로, 실측/None)을 돌려준다 — 더미
+        경로·예외에도 파이프라인이 안전하게 진행되도록(단위 테스트의 가짜 클립 경로 포함).
+        """
+        import array
+        import math
+        import subprocess
+
+        try:
+            import imageio_ffmpeg
+
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+            # 엔벨로프 분석용으로 모노 16kHz PCM을 1패스 디코드(silencedetect 다중 호출보다 효율).
+            dec = subprocess.run(
+                [ff, "-hide_banner", "-i", clip, "-ac", "1", "-ar",
+                 str(_TRIM_SR), "-f", "s16le", "-"],
+                capture_output=True,
+            )
+            pcm = array.array("h")
+            pcm.frombytes(dec.stdout)
+            if len(pcm) < _TRIM_SR:  # 1초 미만(빈/실패 디코드·더미 경로) — 트림 불가
+                return clip, None
+            dur = len(pcm) / _TRIM_SR
+            win = int(_TRIM_SR * _TRIM_WIN)
+            # 윈도별 RMS를 dBFS로 변환한 엔벨로프.
+            env = [
+                10 * math.log10(
+                    sum(x * x for x in pcm[i:i + win]) / win / (32768.0**2) + 1e-12
+                )
+                for i in range(0, len(pcm) - win + 1, win)
+            ]
+            # 발화 시작 = 첫 발화 윈도(앞 룸톤/침묵 트림). 발화 자체가 없으면 폴백.
+            start_idx = next((j for j, v in enumerate(env) if v > _TRIM_SPEECH_MIN), None)
+            if start_idx is None:
+                return clip, dur
+            start_t = max(0.0, start_idx * _TRIM_WIN - 0.10)
+            # 발화 끝 = 발화 본체 직후 첫 깊은 딥(직전 1초 대비 _TRIM_DROP 이상 낙폭 + 절대 바닥)
+            # 이면서 그 뒤로 발화가 재개되지 않는(=중간 멈춤이 아닌) 지점. + 짧은 여유를 남긴다.
             end_t = dur
-            if starts:
-                last = starts[-1]
-                open_to_eof = len(ends) < len(starts)  # 마지막 침묵이 EOF까지 안 닫힘
-                closed_near_eof = bool(ends) and ends[-1] >= dur - 0.1
-                if last > start_t and (open_to_eof or closed_near_eof):
-                    end_t = min(dur, last + 0.35)
+            for j in range(len(env)):
+                t = j * _TRIM_WIN
+                if t < start_t + _TRIM_MIN_SPEECH:  # 발화 본체 최소 길이 확보 후 탐색
+                    continue
+                prev = env[max(0, j - _TRIM_LOOKBACK):j]
+                if not prev or max(prev) < _TRIM_SPEECH_MIN:
+                    continue
+                if env[j] <= _TRIM_ABS_CAP and env[j] <= max(prev) - _TRIM_DROP:
+                    after = env[j + 1:]
+                    if not after or max(after) <= _TRIM_RESUME:
+                        end_t = min(dur, t + _TRIM_PAD)
+                        break
             out_sec = end_t - start_t
             if out_sec < 0.8 or end_t <= start_t:
-                return clip, dur  # 과도 트림 방지(전구간 침묵·검출 이상) — 실측 길이 유지
-            # 실제로 잘라낼 무음이 0.5초 미만이면 재인코딩하지 않고 원본 유지 — Veo 클립은
-            # 룸톤이 끝까지 깔려 데드에어가 거의 없다(2026-06-16 실측). 의미 있는 무음이
-            # 있을 때만 트림해 무익한 재인코딩·중복 파일 생성을 막는다.
+                return clip, dur  # 과도 트림 방지(검출 이상) — 실측 길이 유지
+            # 실제로 잘라낼 구간이 0.5초 미만이면 재인코딩하지 않고 원본 유지 — 무익한
+            # 재인코딩·중복 파일 생성을 막는다(발화가 8초를 꽉 채운 긴 대본 등).
             if (dur - out_sec) < 0.5:
                 return clip, dur  # 트림 안 함 — 실측 길이 유지
             out = str(Path(self.settings.nutti_media_dir) / f"veo_fal_trim_{uuid4().hex[:8]}.mp4")
             cut = subprocess.run(
                 [ff, "-y", "-hide_banner", "-ss", f"{start_t:.3f}", "-i", clip,
-                 "-t", f"{out_sec:.3f}", "-c:v", "libx264", "-c:a", "aac", out],
+                 "-t", f"{out_sec:.3f}", "-c:v", "libx264", "-profile:v", "high",
+                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-c:a", "aac", out],
                 capture_output=True,
             )
             if cut.returncode != 0 or not Path(out).exists():
@@ -678,16 +966,42 @@ class VideoStudio:
             # 트림은 품질 개선용 best-effort — 어떤 실패도 원본 클립으로 폴백한다.
             return clip, None
 
-    def _stitch(self, clips: list[str]) -> str:
-        """여러 8초 클립을 ffmpeg로 이어붙여 하나의 MP4로 만든다(재인코딩 concat).
+    def _stitch(self, clips: list[str], durations: list[float | None] | None = None) -> str:
+        """여러 8초 클립을 ffmpeg로 이어붙여 하나의 MP4로 만든다.
 
-        클립이 1개면 스티칭 없이 그대로 반환한다. ffmpeg 바이너리는 imageio-ffmpeg가
-        번들한 것을 쓴다(시스템 설치 불요). 실패(ffmpeg 비정상 종료·미설치)는
-        VideoRenderError 계약으로 변환하며, 입력 경로가 박힐 수 있는 stderr 원문은
-        노출하지 않고 예외 타입명만 남긴다(redaction).
+        `settings.veo_fal_crossfade_sec`>0 이고 모든 클립 길이를 알면 비트 경계에 짧은
+        디졸브(xfade/acrossfade)를 줘 의상·구도 점프를 부드럽게 가린다(2026-06-29 PO
+        옵션 B — 근본 제거가 아닌 완화). 길이를 모르거나 디졸브 ffmpeg이 실패하면 단순
+        concat으로 안전 폴백한다. 클립 1개면 스티칭 없이 그대로 반환한다. ffmpeg 바이너리는
+        imageio-ffmpeg 번들을 쓴다(시스템 설치 불요). 실패(ffmpeg 비정상 종료·미설치)는
+        VideoRenderError 계약으로 변환하며, 입력 경로가 박힐 수 있는 stderr 원문은 노출하지
+        않고 예외 타입명만 남긴다(redaction).
         """
         if len(clips) == 1:
             return clips[0]
+        dissolve = float(getattr(self.settings, "veo_fal_crossfade_sec", 0.0) or 0.0)
+        if dissolve > 0 and durations is not None and len(durations) == len(clips):
+            faded = self._stitch_dissolve(clips, durations, dissolve)
+            if faded is not None:
+                return faded
+        return self._concat(clips)
+
+    def _stitch_dissolve(
+        self, clips: list[str], durations: list[float | None], dissolve: float
+    ) -> str | None:
+        """클립 경계에 짧은 디졸브(xfade+acrossfade)를 줘 이어붙인다(best-effort).
+
+        모든 클립 길이가 유효하고 디졸브보다 충분히 길 때만 offset 누적이 성립한다 —
+        하나라도 길이를 모르거나 너무 짧으면 None을 돌려 호출부가 concat으로 폴백한다.
+        디졸브 ffmpeg 실패(필터 비호환·타임아웃 등)도 None으로 안전 폴백. xfade는 입력
+        해상도/fps/SAR가 같아야 하므로 각 비디오를 fps/format/SAR로 정규화한 뒤 체이닝한다.
+        """
+        dur: list[float] = []
+        for d in durations:
+            # 디졸브보다 충분히 길어야 offset=길이-디졸브가 양수로 성립한다.
+            if d is None or d <= dissolve + 0.1:
+                return None
+            dur.append(float(d))
         import subprocess
 
         import imageio_ffmpeg
@@ -696,18 +1010,82 @@ class VideoStudio:
         inputs: list[str] = []
         for clip in clips:
             inputs += ["-i", clip]
-        streams = "".join(f"[{i}:v][{i}:a]" for i in range(len(clips)))
-        filt = f"{streams}concat=n={len(clips)}:v=1:a=1[v][a]"
+        n = len(clips)
+        parts: list[str] = [f"[{i}:v]format=yuv420p,fps=30,setsar=1[v{i}]" for i in range(n)]
+        # 비디오 xfade 체인: 클립 k 합류 시 offset = 직전 출력길이 - 디졸브.
+        vlabel = "v0"
+        cum = dur[0]
+        for k in range(1, n):
+            offset = cum - dissolve
+            out = f"vx{k}"
+            parts.append(
+                f"[{vlabel}][v{k}]xfade=transition=fade:"
+                f"duration={dissolve:.3f}:offset={offset:.3f}[{out}]"
+            )
+            vlabel = out
+            cum = cum + dur[k] - dissolve
+        # 오디오 acrossfade 체인: 경계에서 자동으로 끝-시작을 겹쳐 페이드(offset 불요).
+        alabel = "0:a"
+        for k in range(1, n):
+            out = f"ax{k}"
+            parts.append(f"[{alabel}][{k}:a]acrossfade=d={dissolve:.3f}[{out}]")
+            alabel = out
         cmd = [
             imageio_ffmpeg.get_ffmpeg_exe(),
             "-y",
             *inputs,
             "-filter_complex",
-            filt,
+            ";".join(parts),
+            "-map",
+            f"[{vlabel}]",
+            "-map",
+            f"[{alabel}]",
+            # 출력 코덱/픽셀포맷 강제(2026-06-29): fal Veo 원본은 yuv444p(High 4:4:4)라
+            # -pix_fmt 미지정 시 출력도 yuv444p가 되어 Windows 기본 플레이어·브라우저가
+            # "지원되지 않는 인코딩"으로 거부한다. yuv420p+High 프로파일로 보편 호환 보장,
+            # +faststart로 웹 스트리밍 즉시 재생.
+            "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-movflags", "+faststart",
+            str(out_path),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        except (OSError, subprocess.SubprocessError):
+            Path(out_path).unlink(missing_ok=True)
+            return None  # 디졸브 실패 — 호출부가 concat 폴백
+        log.info("video.stitched.dissolve", path=str(out_path), clips=n, dissolve=dissolve)
+        return str(out_path)
+
+    def _concat(self, clips: list[str]) -> str:
+        """여러 클립을 디졸브 없이 단순 재인코딩 concat으로 이어붙인다(폴백 경로)."""
+        import subprocess
+
+        import imageio_ffmpeg
+
+        out_path = Path(self.settings.nutti_media_dir) / f"video_{uuid4().hex[:12]}.mp4"
+        inputs: list[str] = []
+        for clip in clips:
+            inputs += ["-i", clip]
+        n = len(clips)
+        # concat 필터는 모든 입력의 픽셀포맷/SAR/fps가 같아야 한다 — fal 클립이 섞이면
+        # (yuv444p/yuv420p 혼재) 실패하므로 입력마다 yuv420p·30fps·SAR=1로 정규화한다.
+        parts: list[str] = [f"[{i}:v]format=yuv420p,fps=30,setsar=1[cv{i}]" for i in range(n)]
+        streams = "".join(f"[cv{i}][{i}:a]" for i in range(n))
+        parts.append(f"{streams}concat=n={n}:v=1:a=1[v][a]")
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            *inputs,
+            "-filter_complex",
+            ";".join(parts),
             "-map",
             "[v]",
             "-map",
             "[a]",
+            # 출력 코덱/픽셀포맷 강제(2026-06-29): yuv444p 원본이 그대로 새어 Windows
+            # 기본 플레이어·브라우저가 거부하는 것을 막는다(_stitch_dissolve와 동일 처방).
+            "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-movflags", "+faststart",
             str(out_path),
         ]
         try:
