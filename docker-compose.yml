@@ -7,7 +7,7 @@
 #   docker compose logs scheduler             # Ofelia 스케줄 등록 확인
 #
 # 스케줄러: Ofelia (mcuadros/ofelia) — label 방식 cron
-#   매일 09:00 KST = UTC 00:00 → schedule: "0 0 * * *" (5필드, 분·시·일·월·요일)
+#   매일 09:00 KST = UTC 00:00:00 → schedule: "0 0 0 * * *" (6필드 Ofelia robfig/cron: 초·분·시·일·월·요일)
 #   no-overlap: "true" → 이전 실행이 끝나지 않으면 다음 트리거를 스킵 (Ofelia 내장 원자 카운터)
 #
 # 볼륨 영속:

@@ -54,6 +54,19 @@ def test_dockerfile_entrypoint_nutti(dockerfile_text: str) -> None:
     assert 'ENTRYPOINT ["nutti"]' in dockerfile_text
 
 
+def test_dockerfile_claude_cli_installed(dockerfile_text: str) -> None:
+    """이미지에 claude CLI(claude -p 폴백용)가 설치돼야 한다(옵션 B, 2026-06-30).
+
+    실모드 대본 생성은 ANTHROPIC_API_KEY 없을 때 `claude -p`로 폴백하므로 이미지에 claude
+    CLI가 없으면 침묵 실패한다(무인 검증서 실측). 설치 라인이 통째로 제거되는 회귀를 잡는다.
+    """
+    non_comment = "\n".join(
+        line for line in dockerfile_text.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "@anthropic-ai/claude-code" in non_comment, "claude CLI 설치 라인 없음"
+    assert "claude --version" in non_comment, "claude CLI build-time 검증 없음"
+
+
 def test_dockerfile_cmd_config(dockerfile_text: str) -> None:
     """기본 CMD 가 config 서브커맨드여야 한다."""
     assert 'CMD ["config"]' in dockerfile_text
@@ -328,7 +341,7 @@ def test_compose_no_hardcoded_secrets(compose_text: str) -> None:
     URL·하이픈·점(.)이 포함된 토큰 형식도 탐지한다.
     """
     dangerous_pattern = re.compile(
-        r"(ANTHROPIC_API_KEY|TELEGRAM_BOT_TOKEN|GEMINI_API_KEY"
+        r"(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|TELEGRAM_BOT_TOKEN|GEMINI_API_KEY"
         r"|YOUTUBE_CLIENT_SECRET|YOUTUBE_REFRESH_TOKEN"
         r"|INSTAGRAM_ACCESS_TOKEN|DISCORD_WEBHOOK_URL)"
         r"\s*[:=]\s*['\"]?[A-Za-z0-9+/_.:-]{20,}",
