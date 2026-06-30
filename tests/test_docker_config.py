@@ -257,15 +257,16 @@ def test_compose_ofelia_enabled_label(compose_text: str) -> None:
 
 
 def test_compose_ofelia_schedule_utc_midnight(compose_text: str) -> None:
-    """스케줄이 UTC 00:00 (KST 09:00) 이어야 한다.
+    """스케줄이 UTC 00:00:00 (KST 09:00) 이어야 한다.
 
-    주석이 아닌 schedule 레이블 라인에 `0 0 * * *`(5필드 cron)가 키와 결합되어 있어야 한다.
-    주석에만 cron 이 남고 레이블 값이 바뀌는 회귀를 잡는다.
+    Ofelia(robfig/cron)는 6필드 "초 분 시 일 월 요일"로 해석한다 — 5필드 "0 0 * * *"는
+    매일 09시가 아니라 엉뚱하게 동작한다(2026-06-30 무인 검증 실측). 반드시 6필드
+    "0 0 0 * * *"가 schedule 레이블에 결합되어 있어야 한다(주석 아닌 라인).
     """
     non_comment = "\n".join(_non_comment_lines(compose_text))
     assert re.search(
-        r'ofelia\.job-exec\.run-pipeline\.schedule\s*:\s*"0 0 \* \* \*"', non_comment
-    ), 'schedule 레이블이 "0 0 * * *"(UTC 00:00 = KST 09:00)가 아님'
+        r'ofelia\.job-exec\.run-pipeline\.schedule\s*:\s*"0 0 0 \* \* \*"', non_comment
+    ), 'schedule 레이블이 6필드 "0 0 0 * * *"(UTC 00:00:00 = KST 09:00)가 아님'
 
 
 def test_compose_ofelia_no_overlap(compose_text: str) -> None:
@@ -459,6 +460,9 @@ def test_deploy_md_env_vars_match_config(deploy_md_text: str) -> None:
         "NUTTI_MEDIA_DIR",
         "NUTTI_MASCOT_IMAGE",
         "NUTTI_DRY_RUN",
+        # claude CLI(claude -p)가 직접 읽는 헤드리스 인증 토큰 — nutti Settings가 아니라
+        # 컨테이너 내 claude CLI가 소비한다(옵션 B, 2026-06-30).
+        "CLAUDE_CODE_OAUTH_TOKEN",
     }
 
     # dotenv 코드블록 파싱: ```dotenv ... ``` 블록 내 KEY= 패턴 추출

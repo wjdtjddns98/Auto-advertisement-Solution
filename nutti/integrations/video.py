@@ -925,11 +925,13 @@ class VideoStudio:
                 )
                 for i in range(0, len(pcm) - win + 1, win)
             ]
-            # 발화 시작 = 첫 발화 윈도(앞 룸톤/침묵 트림). 발화 자체가 없으면 폴백.
-            start_idx = next((j for j, v in enumerate(env) if v > _TRIM_SPEECH_MIN), None)
-            if start_idx is None:
+            # 앞은 트림하지 않는다(start_t=0). 발화 시작점을 -24dB 윈도로 잡으면 소프트한
+            # 첫 음절 온셋(2026-06-30 PO 실측 -25~-28dB)을 발화로 못 보고 잘라 "첫 대사가
+            # 살짝 깨지는" 현상이 생긴다(PO 피드백). 앞 ~0.4초는 짧은 룸톤/온셋이라 그대로
+            # 둬도 무해하고, 의미 있는 트림은 끝 글리치 구간(아래)뿐이다. 발화 자체가 없으면 폴백.
+            if not any(v > _TRIM_SPEECH_MIN for v in env):
                 return clip, dur
-            start_t = max(0.0, start_idx * _TRIM_WIN - 0.10)
+            start_t = 0.0
             # 발화 끝 = 발화 본체 직후 첫 깊은 딥(직전 1초 대비 _TRIM_DROP 이상 낙폭 + 절대 바닥)
             # 이면서 그 뒤로 발화가 재개되지 않는(=중간 멈춤이 아닌) 지점. + 짧은 여유를 남긴다.
             end_t = dur

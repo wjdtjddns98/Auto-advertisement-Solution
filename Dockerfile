@@ -6,12 +6,25 @@
 FROM python:3.12-slim
 
 # ── 시스템 패키지 ──────────────────────────────────────────────────────────────
-# cryptography / grpcio (google-auth 의존) 빌드에 필요한 C 라이브러리 설치
+# cryptography / grpcio (google-auth 의존) 빌드에 필요한 C 라이브러리 + claude CLI
+# 설치용 curl. 대본/팩트체크는 ANTHROPIC_API_KEY 없을 때 `claude -p`(Claude Code) 폴백을
+# 타므로(옵션 B: Max 구독 재사용), 이미지에 claude CLI를 포함한다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libssl-dev \
         libffi-dev \
+        curl \
     && rm -rf /var/lib/apt/lists/*
+
+# ── claude CLI (Claude Code) 설치 ─────────────────────────────────────────────
+# npm 글로벌 설치로 /usr/bin/claude(전 사용자 PATH)에 확실히 올린다. Node는 NodeSource
+# 20.x. 인증은 런타임에 CLAUDE_CONFIG_DIR로 마운트한 credentials를 사용(이미지에 토큰 미포함).
+# 끝에 `claude --version`으로 설치를 build-time 검증(실패 시 빌드 중단).
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && rm -rf /var/lib/apt/lists/* \
+    && claude --version
 
 # ── 환경변수 ──────────────────────────────────────────────────────────────────
 ENV PYTHONIOENCODING=utf-8 \

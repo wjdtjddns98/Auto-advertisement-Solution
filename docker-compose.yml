@@ -68,9 +68,11 @@ services:
     # 레이블 위치: 타깃 컨테이너(nutti)에 부착 — Ofelia가 스캔해서 cron 등록
     labels:
       ofelia.enabled: "true"
-      # 스케줄: 매일 UTC 00:00 = KST 09:00
-      # 형식: "분 시 일 월 요일" (5필드, robfig/cron v3 SecondOptional)
-      ofelia.job-exec.run-pipeline.schedule: "0 0 * * *"
+      # 스케줄: 매일 UTC 00:00:00 = KST 09:00
+      # ⚠ Ofelia(robfig/cron)는 6필드 "초 분 시 일 월 요일"로 해석한다 — 5필드 "0 0 * * *"는
+      # 매일 09시가 아니라 엉뚱하게(초=0·분=0·시=*=매시 정각) 동작한다(2026-06-30 무인 검증서
+      # 실측: 5필드 "50 1 * * *"는 01:50에 발동 안 함, 6필드는 정상 발동). 반드시 6필드로 쓴다.
+      ofelia.job-exec.run-pipeline.schedule: "0 0 0 * * *"
       # nutti run 명령 실행 — docker exec는 ENTRYPOINT를 거치지 않으므로 전체 명령어 지정 필수
       ofelia.job-exec.run-pipeline.command: "nutti run"
       # no-overlap: 이전 실행이 끝나지 않으면 새 트리거 스킵
