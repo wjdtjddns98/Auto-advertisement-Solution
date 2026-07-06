@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from typing import Optional
 
@@ -20,6 +21,16 @@ from nutti.models import ContentFormat
 from nutti.pipeline.cost import format_cost
 from nutti.pipeline.cost_ledger import CostLedger, format_summary, summarize_records
 from nutti.pipeline.orchestrator import GateRejected, Orchestrator
+
+# Windows 콘솔/리다이렉트(cp949)에서 분석 텍스트의 유니코드(— 등)가 UnicodeEncodeError로
+# 마지막 출력을 죽이는 것 방지(실측 2026-07-06: 업로드·상태저장 성공 후 최종 print에서
+# exit 1). 인코딩 불가 문자만 ?로 대체 — 콘솔 표시 전용, 데이터 경로와 무관.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(errors="replace")
+        except (OSError, ValueError):  # pragma: no cover - 특수 콘솔 방어
+            pass
 
 app = typer.Typer(help="Nutti 애견간식 콘텐츠 자동화 파이프라인")
 
