@@ -60,6 +60,22 @@ _TRIM_RESUME = -20.0
 _TRIM_LOOKBACK = 4  # 직전 발화 레벨 참조 윈도 개수(=1초)
 _TRIM_MIN_SPEECH = 2.5  # 발화 시작 후 이 초 이전의 딥은 무시(훅 중 멈춤 오검출 방지)
 _TRIM_PAD = 0.15  # 발화 끝 뒤 남길 여유(초) — 끝음절 보존
+
+# 스티칭 정규화 해상도(9:16 쇼츠). 모든 입력을 이 크기로 맞춰 xfade/concat의 크기 불일치
+# 실패를 방지하고, 교차 펀치인 크롭의 기준 좌표계가 된다.
+# ponytail: 720x1280 고정(fal Veo Lite 실측) — 모델 해상도를 올리면 이 상수도 함께 올릴 것.
+_STITCH_W = 720
+_STITCH_H = 1280
+
+# 자막 굽기용 한글 폰트 후보(앞에서부터 존재하는 첫 파일 사용). Windows 맑은고딕 →
+# Debian/Ubuntu Noto CJK(fonts-noto-cjk, Dockerfile에 포함) → 나눔고딕 순.
+_CAPTION_FONT_CANDIDATES = [
+    "C:/Windows/Fonts/malgunbd.ttf",
+    "C:/Windows/Fonts/malgun.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
+]
 # 화면 자막(깨진 한글 텍스트) 억제용 negative_prompt는 이제 설정값
 # `Settings.veo_fal_negative_prompt`로 단일화되어 FalVeoClient._submit이 fal에 직접
 # 보낸다(2026-06-18). 프롬프트 본문의 "no on-screen text" 지시와 이중 방어를 이룬다.
@@ -286,22 +302,24 @@ class EpisodeStyle(NamedTuple):
 # ======================= PO 수정 구역 (편별 연출 로테이션) =======================
 # 편마다 마스코트의 "옷"과 "장소·상황"이 바뀐다(2026-06-12 PO 지시 — 매번 다른 옷,
 # 다른 장소·상황에서 인터뷰하는 느낌). 항목을 추가/삭제하면 조합 수가 바뀐다
-# (현재 6×6=36 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
+# (현재 5×6=30 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
 # 대사 인용 구분자와 충돌해 주입 방어 검증이 깨진다(U+2019는 허용).
 _EPISODE_OUTFITS = [
     "a tiny yellow raincoat",
     "a cozy cream knitted sweater",
-    "a crisp little navy suit with a red bow tie",
     "a sporty grey hoodie",
     "a light blue denim jacket",
     "a fluffy red scarf with a matching beanie",
 ]
+# 전 항목 sitting 계열로 통일(2026-07-06 PO) — standing 시작 프레임이 뽑히면 클립 전체가
+# 이족보행 인형탈 느낌이 되고, 모션 지시(_MOTION_HOLD/_MOTION_LIVELY의 "stays seated")와
+# 모순돼 드리프트를 유발한다. 새 장소를 추가할 때도 sitting 자세로 쓸 것.
 _EPISODE_SETTINGS = [
-    "standing on a busy city sidewalk like a street interview",
+    "sitting on a busy city sidewalk like a street interview",
     "sitting on a cozy living room sofa under warm lamps",
     "sitting on a park bench on a sunny afternoon",
-    "standing at a bright modern kitchen counter",
-    "standing in front of a cute pet shop entrance",
+    "sitting on a bright modern kitchen floor",
+    "sitting in front of a cute pet shop entrance",
     "sitting at a tidy home office desk like a news anchor",
 ]
 # ===================== PO 수정 구역 끝 (편별 연출 로테이션) =====================
@@ -762,6 +780,15 @@ class VideoStudio:
         final = None
         try:
             final = self._stitch(trimmed, durations)
+            # 자막 굽기(2026-07-06 PO): 비트별 대사를 하단 한글 자막으로. best-effort —
+            # 실패/폰트 없음이면 무자막 원본 유지. 성공 시 자막 전 스티칭 산출물(중간물)은
+            # 삭제하되, 단일 비트처럼 _stitch가 입력을 그대로 돌려준 경우는 남긴다.
+            if self.settings.caption_burn:
+                captioned = self._burn_captions(final, beats, durations)
+                if captioned is not None:
+                    if final not in trimmed and final not in clips:
+                        Path(final).unlink(missing_ok=True)
+                    final = captioned
             # total은 트림 클립 길이의 단순 합 = 디졸브 전 상한값이다. _stitch가 경계
             # 디졸브를 적용하면 실제 산출물은 (비트수-1)*crossfade_sec 만큼 짧다(0.25초
             # 기본이면 3비트당 0.5초). 여기서 산술 보정하지 않는 이유: 호출부는 _stitch가
@@ -988,6 +1015,27 @@ class VideoStudio:
                 return faded
         return self._concat(clips)
 
+    def _input_norm(self, i: int) -> str:
+        """스티칭 입력 i의 정규화 필터 체인(픽셀포맷·fps·SAR·해상도 + 교차 펀치인).
+
+        모든 입력을 _STITCH_W×_STITCH_H로 통일해 xfade/concat 크기 불일치를 막는다.
+        punch_in_scale>1이면 짝수 비트(0·2… — 훅 포함)를 확대 후 원 해상도로 크롭해
+        컷마다 화면 크기가 교차되게 한다 — 동일 구도 점프컷을 의도된 편집으로 위장하고
+        시각 리듬을 만든다(2026-07-06 PO). 크롭 세로 기준은 상단 1/3(얼굴 보존).
+        """
+        # setsar=1은 체인 마지막에 — 펀치인 scale의 짝수 반올림이 미세 비율 오차(<0.1%,
+        # 비가시)를 만들어 SAR이 1:1이 아니게 기록되는 것을 방지한다(실측 2026-07-06).
+        base = f"[{i}:v]format=yuv420p,fps=30"
+        s = float(getattr(self.settings, "veo_fal_punch_in_scale", 0.0) or 0.0)
+        if s > 1.0 and i % 2 == 0:
+            w2 = int(_STITCH_W * s) // 2 * 2
+            h2 = int(_STITCH_H * s) // 2 * 2
+            return (
+                f"{base},scale={w2}:{h2},"
+                f"crop={_STITCH_W}:{_STITCH_H}:(iw-{_STITCH_W})/2:(ih-{_STITCH_H})/3,setsar=1"
+            )
+        return f"{base},scale={_STITCH_W}:{_STITCH_H},setsar=1"
+
     def _stitch_dissolve(
         self, clips: list[str], durations: list[float | None], dissolve: float
     ) -> str | None:
@@ -1013,7 +1061,7 @@ class VideoStudio:
         for clip in clips:
             inputs += ["-i", clip]
         n = len(clips)
-        parts: list[str] = [f"[{i}:v]format=yuv420p,fps=30,setsar=1[v{i}]" for i in range(n)]
+        parts: list[str] = [f"{self._input_norm(i)}[v{i}]" for i in range(n)]
         # 비디오 xfade 체인: 클립 k 합류 시 offset = 직전 출력길이 - 디졸브.
         vlabel = "v0"
         cum = dur[0]
@@ -1070,8 +1118,9 @@ class VideoStudio:
             inputs += ["-i", clip]
         n = len(clips)
         # concat 필터는 모든 입력의 픽셀포맷/SAR/fps가 같아야 한다 — fal 클립이 섞이면
-        # (yuv444p/yuv420p 혼재) 실패하므로 입력마다 yuv420p·30fps·SAR=1로 정규화한다.
-        parts: list[str] = [f"[{i}:v]format=yuv420p,fps=30,setsar=1[cv{i}]" for i in range(n)]
+        # (yuv444p/yuv420p 혼재) 실패하므로 입력마다 yuv420p·30fps·SAR=1로 정규화한다
+        # (교차 펀치인 포함 — 디졸브 폴백 경로에서도 화면 크기 교차가 유지되게).
+        parts: list[str] = [f"{self._input_norm(i)}[cv{i}]" for i in range(n)]
         streams = "".join(f"[cv{i}][{i}:a]" for i in range(n))
         parts.append(f"{streams}concat=n={n}:v=1:a=1[v][a]")
         cmd = [
@@ -1096,6 +1145,113 @@ class VideoStudio:
             raise VideoRenderError(f"영상 스티칭 실패: {type(exc).__name__}") from None
         log.info("video.stitched", path=str(out_path), clips=len(clips))
         return str(out_path)
+
+    @staticmethod
+    def _wrap_caption(text: str, width: int = 16) -> str:
+        """대사를 자막용으로 공백 기준 줄바꿈한다(drawtext는 자동 줄바꿈이 없다).
+
+        한 줄이 width자를 넘지 않게 단어 단위로 끊는다(단어 자체가 width보다 길면
+        그 단어는 한 줄로 그대로 둔다 — 한국어 대사에서 사실상 발생하지 않음).
+        """
+        lines: list[str] = []
+        cur = ""
+        for word in text.split():
+            cand = f"{cur} {word}".strip()
+            if cur and len(cand) > width:
+                lines.append(cur)
+                cur = word
+            else:
+                cur = cand
+        if cur:
+            lines.append(cur)
+        return "\n".join(lines)
+
+    def _find_caption_font(self) -> str | None:
+        """자막 폰트 경로를 찾는다: 설정값 우선, 없으면 OS 기본 후보 순회. 없으면 None."""
+        cands = [self.settings.caption_font] if self.settings.caption_font else []
+        for cand in cands + _CAPTION_FONT_CANDIDATES:
+            if cand and Path(cand).is_file():
+                return cand
+        return None
+
+    def _burn_captions(
+        self, video: str, beats: list[str], durations: list[float | None]
+    ) -> str | None:
+        """비트별 대사를 하단 한글 자막으로 굽는다(best-effort — 실패 시 None, 원본 유지).
+
+        자막 전환 시점은 디졸브 스티칭과 같은 누적식(경계 = 직전 출력길이 - 디졸브)의
+        디졸브 중앙이다. concat 폴백이었으면 최대 디졸브 길이(0.35초)만큼 어긋날 수 있으나
+        시각적으로 무해(비트 경계 = 발화 경계라 자막이 대사와 실질 동기).
+        drawtext 이스케이프 지뢰를 피하려고 대사는 textfile(UTF-8)로 전달한다. 폰트가
+        없거나 경로에 작은따옴표가 있으면 자막 없이 통과한다.
+        """
+        if not beats:
+            return None
+        font = self._find_caption_font()
+        if font is None:
+            log.warning("video.caption.no_font")
+            return None
+        # ffmpeg 필터 파서는 2단계다: 바깥(그래프) 파서가 따옴표를 소비한 뒤 drawtext의
+        # 옵션 파서가 ':'로 다시 쪼갠다 — 드라이브 콜론(C:)은 따옴표만으로 못 지키고
+        # 반드시 \: 로 이스케이프해야 한다(실측 2026-07-06: 미이스케이프 시 파스 실패).
+        font_ff = str(font).replace("\\", "/").replace(":", r"\:")
+        dur = [
+            (d if d is not None else _CLIP_SEC)
+            for d in (durations if len(durations or []) == len(beats) else [None] * len(beats))
+        ]
+        dissolve = float(getattr(self.settings, "veo_fal_crossfade_sec", 0.0) or 0.0)
+        starts = [0.0]
+        cum = dur[0]
+        for k in range(1, len(beats)):
+            starts.append(max(0.0, cum - dissolve / 2))
+            cum += dur[k] - dissolve
+        ends = starts[1:] + [cum + 1.0]  # 마지막 자막은 영상 끝까지(여유 1초)
+        import subprocess
+
+        import imageio_ffmpeg
+
+        media_dir = Path(self.settings.nutti_media_dir)
+        out_path = media_dir / f"video_{uuid4().hex[:12]}.mp4"
+        txt_files: list[Path] = []
+        try:
+            filters: list[str] = []
+            for k, beat in enumerate(beats):
+                tf = media_dir / f"caption_{uuid4().hex[:8]}.txt"
+                tf.write_text(self._wrap_caption(beat), encoding="utf-8")
+                txt_files.append(tf)
+                tf_ff = str(tf).replace("\\", "/").replace(":", r"\:")
+                if "'" in tf_ff or "'" in font_ff:
+                    log.warning("video.caption.path_quote")
+                    return None
+                filters.append(
+                    f"drawtext=fontfile='{font_ff}':textfile='{tf_ff}':"
+                    f"fontsize=40:fontcolor=white:borderw=5:bordercolor=black:"
+                    f"line_spacing=10:x=(w-text_w)/2:y=h*0.74:"
+                    f"enable='between(t,{starts[k]:.3f},{ends[k]:.3f})'"
+                )
+            cmd = [
+                imageio_ffmpeg.get_ffmpeg_exe(),
+                "-y",
+                "-i", video,
+                "-vf", ",".join(filters),
+                # 비디오만 재인코딩(자막 픽셀 합성), 오디오는 무손실 통과.
+                "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+                "-c:a", "copy", "-movflags", "+faststart",
+                str(out_path),
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+            log.info("video.captions.burned", path=str(out_path), beats=len(beats))
+            return str(out_path)
+        except (OSError, subprocess.SubprocessError):
+            Path(out_path).unlink(missing_ok=True)
+            log.warning("video.caption.failed")
+            return None
+        finally:
+            for tf in txt_files:
+                try:
+                    tf.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _generate_frame(self, script: Script, style: EpisodeStyle) -> str:
         """프레임 클라이언트(Kontext)로 시작 프레임을 생성한다(마스코트 레퍼런스 이미지 첨부).

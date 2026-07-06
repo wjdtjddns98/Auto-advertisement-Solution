@@ -380,6 +380,138 @@ def test_stitch_dissolve_ffmpeg_failure_falls_back_to_concat(tmp_path, monkeypat
     assert any("concat=n=2" in c for c in calls)  # 그리고 concat 폴백함
 
 
+def test_stitch_punch_in_alternates_shot_scale(tmp_path, monkeypatch):
+    """교차 펀치인: 짝수 비트(0·2)만 확대 크롭돼 컷마다 화면 크기가 교차된다."""
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_VEO_FAL_CROSSFADE_SEC="0.25"
+    )
+    studio = VideoStudio(settings)
+    studio._stitch(["a.mp4", "b.mp4", "c.mp4"], [3.0, 3.0, 3.0])
+    joined = " ".join(captured["cmd"])
+    # 기본 배율 1.12: scale=806:1432 후 720x1280 크롭(상단 1/3 기준) — 입력 0·2만.
+    assert joined.count("crop=720:1280") == 2
+    assert "scale=806:1432" in joined
+    # 비펀치 입력(1)도 공통 해상도로 정규화돼 xfade 크기 불일치가 없다.
+    assert "scale=720:1280" in joined
+
+
+def test_stitch_punch_in_disabled_when_scale_le_1(tmp_path, monkeypatch):
+    """punch_in_scale<=1이면 펀치인 없이 공통 해상도 정규화만 적용된다."""
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path),
+        NUTTI_VEO_FAL_CROSSFADE_SEC="0.25",
+        NUTTI_VEO_FAL_PUNCH_IN_SCALE="0",
+    )
+    studio = VideoStudio(settings)
+    studio._stitch(["a.mp4", "b.mp4"], [3.0, 3.0])
+    joined = " ".join(captured["cmd"])
+    assert "crop=" not in joined
+    assert "scale=720:1280" in joined
+
+
+def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):
+    """디졸브 불가(길이 미상) concat 폴백에서도 교차 펀치인이 유지된다."""
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    studio._stitch(["a.mp4", "b.mp4"])  # durations 없음 → concat 경로
+    joined = " ".join(captured["cmd"])
+    assert "concat=n=2" in joined
+    assert joined.count("crop=720:1280") == 1  # 입력 0만 펀치인
+
+
+# --- 자막 굽기(_burn_captions) ---
+
+
+def test_wrap_caption_wraps_at_width():
+    """자막 줄바꿈: width자 이내로 단어 단위 개행, 원문 단어는 보존된다."""
+    text = "강아지 간식은 체중에 맞춰 주는 게 제일 중요해요"
+    wrapped = VideoStudio._wrap_caption(text, width=12)
+    lines = wrapped.split("\n")
+    assert all(len(line) <= 12 for line in lines)
+    assert " ".join(wrapped.split()) == " ".join(text.split())  # 단어 손실 없음
+
+
+def test_burn_captions_builds_timed_drawtext(tmp_path, monkeypatch):
+    """자막 굽기: 비트별 drawtext + 디졸브 중앙 기준 전환 시점으로 필터를 만든다."""
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    font = tmp_path / "font.ttf"
+    font.write_bytes(b"fake-font")
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path),
+        NUTTI_VEO_FAL_CROSSFADE_SEC="0.25",
+        NUTTI_CAPTION_FONT=str(font),
+    )
+    studio = VideoStudio(settings)
+    out = studio._burn_captions("in.mp4", ["첫 비트 대사", "둘째 비트 대사"], [7.0, 7.0])
+    assert out is not None and out.endswith(".mp4")
+    joined = " ".join(captured["cmd"])
+    assert joined.count("drawtext=") == 2
+    # 전환 시점 = 첫 클립 길이 - 디졸브/2 = 7.0 - 0.125 = 6.875초.
+    assert "between(t,0.000,6.875)" in joined
+    assert "between(t,6.875," in joined
+    assert "textfile=" in joined  # 이스케이프 지뢰 회피 — 대사는 텍스트 파일로 전달
+    assert "-c:a copy" in joined  # 오디오 무손실 통과
+    # 임시 자막 텍스트 파일은 정리된다.
+    assert not list(tmp_path.glob("caption_*.txt"))
+
+
+def test_burn_captions_returns_none_without_font(tmp_path, monkeypatch):
+    """폰트를 못 찾으면 자막 없이 None을 돌려 원본 영상이 유지된다(best-effort)."""
+    monkeypatch.setattr(video_module, "_CAPTION_FONT_CANDIDATES", [])
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    assert studio._burn_captions("in.mp4", ["대사"], [7.0]) is None
+
+
 def _synthetic_speech_pcm(sample_rate: int = 16000) -> bytes:
     """발화(0~6s 큼) → 깊은 딥(6~6.5s, 발화 끝) → tail-fill(6.5~8s, 중간 레벨) 합성 PCM.
 

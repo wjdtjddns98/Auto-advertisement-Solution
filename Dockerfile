@@ -9,11 +9,13 @@ FROM python:3.12-slim
 # cryptography / grpcio (google-auth 의존) 빌드에 필요한 C 라이브러리 + claude CLI
 # 설치용 curl. 대본/팩트체크는 ANTHROPIC_API_KEY 없을 때 `claude -p`(Claude Code) 폴백을
 # 타므로(옵션 B: Max 구독 재사용), 이미지에 claude CLI를 포함한다.
+# fonts-noto-cjk: 자막 굽기(drawtext)용 한글 폰트 — 없으면 자막이 조용히 생략된다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libssl-dev \
         libffi-dev \
         curl \
+        fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # ── claude CLI (Claude Code) 설치 ─────────────────────────────────────────────
