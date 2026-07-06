@@ -52,6 +52,7 @@ _NUTTI_ENV_VARS: tuple[str, ...] = (
     "NUTTI_VEO_FAL_PUNCH_IN_SCALE",
     "NUTTI_CAPTION_BURN",
     "NUTTI_CAPTION_FONT",
+    "NUTTI_CAPTION_FONT_SIZE",
     "NUTTI_VEO_FAL_ENDFRAME_LOCK",
     "NUTTI_VEO_FAL_FLF_MODEL",
     "NUTTI_VEO_FAL_SEED",
@@ -126,6 +127,20 @@ def _isolate_cost_ledger(tmp_path, monkeypatch, _isolate_settings_env):
     tmp 원장을 쓴다. Settings(cost_ledger_path)는 이 env에서 읽힌다.
     """
     monkeypatch.setenv("NUTTI_COST_LEDGER_PATH", str(tmp_path / "cost_ledger.json"))
+
+
+@pytest.fixture(autouse=True)
+def _no_system_caption_fonts(monkeypatch):
+    """자막 굽기가 호스트 시스템 폰트를 주워 실제 ffmpeg를 띄우는 것을 차단한다.
+
+    맑은고딕이 있는 Windows 개발 머신에서는 caption_burn이 켜진 produce() 경로가
+    폰트 후보를 발견해 진짜 ffmpeg 서브프로세스를 실행한다(호스트 의존·비결정 —
+    리뷰 지적). 후보 목록을 비워 기본은 '폰트 없음 → 자막 생략'으로 고정하고,
+    자막을 실제로 검증하는 테스트만 NUTTI_CAPTION_FONT로 명시 폰트를 주입한다.
+    """
+    import nutti.integrations.video as _video
+
+    monkeypatch.setattr(_video, "_CAPTION_FONT_CANDIDATES", [])
 
 
 @pytest.fixture(autouse=True)

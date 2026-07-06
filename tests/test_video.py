@@ -488,11 +488,14 @@ def test_burn_captions_builds_timed_drawtext(tmp_path, monkeypatch):
     font.write_bytes(b"fake-font")
     settings = _live_settings_with_key(
         NUTTI_MEDIA_DIR=str(tmp_path),
-        NUTTI_VEO_FAL_CROSSFADE_SEC="0.25",
         NUTTI_CAPTION_FONT=str(font),
     )
     studio = VideoStudio(settings)
-    out = studio._burn_captions("in.mp4", ["첫 비트 대사", "둘째 비트 대사"], [7.0, 7.0])
+    # dissolve는 _stitch가 실제 적용한 값을 받는다(설정 재독 금지 — concat 폴백 시
+    # 경계마다 오차가 누적되는 리뷰 지적의 회귀 가드).
+    out = studio._burn_captions(
+        "in.mp4", ["첫 비트 대사", "둘째 비트 대사"], [7.0, 7.0], dissolve=0.25
+    )
     assert out is not None and out.endswith(".mp4")
     joined = " ".join(captured["cmd"])
     assert joined.count("drawtext=") == 2
@@ -510,6 +513,98 @@ def test_burn_captions_returns_none_without_font(tmp_path, monkeypatch):
     monkeypatch.setattr(video_module, "_CAPTION_FONT_CANDIDATES", [])
     studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
     assert studio._burn_captions("in.mp4", ["대사"], [7.0]) is None
+
+
+def _caption_lifecycle_studio(tmp_path, monkeypatch, *, caption_result, **settings_overrides):
+    """_produce_clips_veo_fal 자막 수명주기 테스트용 스튜디오/파일 셋업.
+
+    Veo 클라이언트·트림·스티칭을 전부 결정적 스텁으로 바꾸고, _burn_captions만
+    caption_result(성공 경로 or None)를 돌려주게 한다. 반환: (studio, stitched_path).
+    """
+    clip = tmp_path / "clip1.mp4"
+    clip.write_bytes(b"clip")
+    stitched = tmp_path / "stitched.mp4"
+    stitched.write_bytes(b"stitched")
+
+    class _FakeVeo:
+        def generate(self, frame_path, prompt, last_frame_path=None, seed=None):
+            return str(clip)
+
+        def close(self):
+            pass
+
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_BURN="true", **settings_overrides
+    )
+    studio = VideoStudio(settings, veo_fal_client=_FakeVeo())
+    monkeypatch.setattr(
+        VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0), raising=True
+    )
+    monkeypatch.setattr(
+        VideoStudio, "_stitch", lambda self, clips, durs: str(stitched), raising=True
+    )
+    monkeypatch.setattr(
+        VideoStudio,
+        "_burn_captions",
+        lambda self, video, beats, durs, dissolve=0.0: caption_result,
+        raising=True,
+    )
+    return studio, stitched
+
+
+def test_produce_clips_caption_success_replaces_and_cleans_intermediate(tmp_path, monkeypatch):
+    """자막 성공 시 자막본이 최종이 되고, 자막 전 스티칭 중간물은 삭제된다."""
+    captioned = tmp_path / "captioned.mp4"
+    captioned.write_bytes(b"cap")
+    studio, stitched = _caption_lifecycle_studio(
+        tmp_path, monkeypatch, caption_result=str(captioned)
+    )
+    final, _total = studio._produce_clips_veo_fal(
+        "frame.png", ["비트1", "비트2"], pick_episode_style("x")
+    )
+    assert final == str(captioned)
+    assert captioned.exists()
+    assert not stitched.exists()  # 중간물 정리
+
+
+def test_produce_clips_caption_failure_keeps_stitched(tmp_path, monkeypatch):
+    """자막 실패(None) 시 무자막 스티칭 산출물이 그대로 최종이 된다."""
+    studio, stitched = _caption_lifecycle_studio(tmp_path, monkeypatch, caption_result=None)
+    final, _total = studio._produce_clips_veo_fal(
+        "frame.png", ["비트1", "비트2"], pick_episode_style("x")
+    )
+    assert final == str(stitched)
+    assert stitched.exists()
+
+
+def test_produce_clips_caption_off_by_default_skips_burn(tmp_path, monkeypatch):
+    """caption_burn 기본값(False)이면 _burn_captions를 아예 호출하지 않는다(PO 판정)."""
+    calls: list[str] = []
+    clip = tmp_path / "clip1.mp4"
+    clip.write_bytes(b"clip")
+    stitched = tmp_path / "stitched.mp4"
+    stitched.write_bytes(b"stitched")
+
+    class _FakeVeo:
+        def generate(self, frame_path, prompt, last_frame_path=None, seed=None):
+            return str(clip)
+
+        def close(self):
+            pass
+
+    studio = VideoStudio(
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), veo_fal_client=_FakeVeo()
+    )
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durs: str(stitched))
+    monkeypatch.setattr(
+        VideoStudio,
+        "_burn_captions",
+        lambda self, *a, **kw: calls.append("burn"),
+    )
+    final, _total = studio._produce_clips_veo_fal("frame.png", ["비트1"], pick_episode_style("x"))
+    assert calls == []
+    assert final == str(stitched)
 
 
 def _synthetic_speech_pcm(sample_rate: int = 16000) -> bytes:

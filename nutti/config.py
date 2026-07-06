@@ -118,12 +118,16 @@ class Settings(BaseSettings):
     # 한다 — 같은 구도끼리 붙는 점프컷이 '의도된 편집'으로 읽힌다. 1.0 이하면 비활성.
     # 얼굴이 화면 상단에 있어 크롭 세로 기준은 상단 1/3. 권장 1.08~1.15.
     veo_fal_punch_in_scale: float = Field(default=1.12, alias="NUTTI_VEO_FAL_PUNCH_IN_SCALE")
-    # 비트별 대사를 하단 한글 자막으로 굽기(무음 시청·리텐션 대응, 2026-07-06 PO).
-    # Veo가 임의로 박는 깨진 자막은 negative_prompt로 계속 막고, 자막은 스티칭 후
-    # ffmpeg drawtext로 통제해 넣는다. 폰트를 못 찾으면 자막 없이 통과(best-effort).
-    caption_burn: bool = Field(default=True, alias="NUTTI_CAPTION_BURN")
+    # 비트별 대사를 하단 한글 자막으로 굽기(스티칭 후 ffmpeg drawtext, best-effort).
+    # 기본 False — 실전 시사에서 PO가 "자막 화면 표시 이상함" 판정(2026-07-06, run
+    # d10681d2ac84 반려). 스타일 개선 후 재시도할 때만 명시적으로 켤 것. 켜더라도
+    # Veo가 임의로 박는 깨진 자막은 negative_prompt로 계속 막는다(별개 방어).
+    caption_burn: bool = Field(default=False, alias="NUTTI_CAPTION_BURN")
     # 자막 폰트 파일 경로. 비우면 OS 기본 후보 탐색(Windows 맑은고딕 → Noto CJK → 나눔).
     caption_font: str = Field(default="", alias="NUTTI_CAPTION_FONT")
+    # 자막 글자 크기(px, 720px 폭 기준). 실전 시사에서 40은 "너무 크다"(2026-07-06 PO) —
+    # 쇼츠 관례상 화면 폭의 3~4% 수준이 무난. 테두리 두께는 크기에 비례해 자동 산출.
+    caption_font_size: int = Field(default=26, alias="NUTTI_CAPTION_FONT_SIZE")
     # 비트 경계 끊김(클립이 8초 동안 포즈가 drift해 다음 클립과 안 이어짐)을 근본적으로
     # 줄이기 위한 "끝프레임 고정" 모드(2026-06-29 PO 아이디어). True면 image-to-video
     # 대신 first-last-frame-to-video 모델을 써 각 비트 클립의 시작·끝 프레임을 동일한

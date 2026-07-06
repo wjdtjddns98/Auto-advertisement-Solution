@@ -784,10 +784,19 @@ class VideoStudio:
             # 실패/폰트 없음이면 무자막 원본 유지. 성공 시 자막 전 스티칭 산출물(중간물)은
             # 삭제하되, 단일 비트처럼 _stitch가 입력을 그대로 돌려준 경우는 남긴다.
             if self.settings.caption_burn:
-                captioned = self._burn_captions(final, beats, durations)
+                captioned = self._burn_captions(
+                    final, beats, durations,
+                    dissolve=getattr(self, "_last_stitch_dissolve", 0.0),
+                )
                 if captioned is not None:
                     if final not in trimmed and final not in clips:
-                        Path(final).unlink(missing_ok=True)
+                        try:
+                            # missing_ok는 '없음'만 삼킨다 — Windows에서 ffmpeg 핸들
+                            # 지연 해제로 PermissionError가 나면 성공한 자막 영상을
+                            # 버리게 되므로 OSError 전체를 방어한다(리뷰 지적).
+                            Path(final).unlink(missing_ok=True)
+                        except OSError:
+                            pass
                     final = captioned
             # total은 트림 클립 길이의 단순 합 = 디졸브 전 상한값이다. _stitch가 경계
             # 디졸브를 적용하면 실제 산출물은 (비트수-1)*crossfade_sec 만큼 짧다(0.25초
@@ -1006,12 +1015,17 @@ class VideoStudio:
         VideoRenderError 계약으로 변환하며, 입력 경로가 박힐 수 있는 stderr 원문은 노출하지
         않고 예외 타입명만 남긴다(redaction).
         """
+        # 실제 적용된 디졸브 길이를 기록한다 — 자막 타이밍(_burn_captions)이 concat
+        # 폴백(디졸브 0)과 디졸브 경로를 구분해야 경계 오차가 누적되지 않는다(리뷰 지적:
+        # 폴백인데 디졸브 가정 시 경계 k에서 k×디졸브만큼 자막이 앞서간다).
+        self._last_stitch_dissolve = 0.0
         if len(clips) == 1:
             return clips[0]
         dissolve = float(getattr(self.settings, "veo_fal_crossfade_sec", 0.0) or 0.0)
         if dissolve > 0 and durations is not None and len(durations) == len(clips):
             faded = self._stitch_dissolve(clips, durations, dissolve)
             if faded is not None:
+                self._last_stitch_dissolve = dissolve
                 return faded
         return self._concat(clips)
 
@@ -1175,13 +1189,17 @@ class VideoStudio:
         return None
 
     def _burn_captions(
-        self, video: str, beats: list[str], durations: list[float | None]
+        self,
+        video: str,
+        beats: list[str],
+        durations: list[float | None],
+        dissolve: float = 0.0,
     ) -> str | None:
         """비트별 대사를 하단 한글 자막으로 굽는다(best-effort — 실패 시 None, 원본 유지).
 
-        자막 전환 시점은 디졸브 스티칭과 같은 누적식(경계 = 직전 출력길이 - 디졸브)의
-        디졸브 중앙이다. concat 폴백이었으면 최대 디졸브 길이(0.35초)만큼 어긋날 수 있으나
-        시각적으로 무해(비트 경계 = 발화 경계라 자막이 대사와 실질 동기).
+        `dissolve`는 _stitch가 **실제 적용한** 디졸브 길이(concat 폴백이면 0)를 받는다 —
+        설정값을 다시 읽으면 폴백 시 경계 k마다 k×디졸브만큼 자막이 앞서가는 누적 오차가
+        생긴다. 자막 전환 시점은 디졸브 스티칭과 같은 누적식의 디졸브 중앙.
         drawtext 이스케이프 지뢰를 피하려고 대사는 textfile(UTF-8)로 전달한다. 폰트가
         없거나 경로에 작은따옴표가 있으면 자막 없이 통과한다.
         """
@@ -1199,7 +1217,6 @@ class VideoStudio:
             (d if d is not None else _CLIP_SEC)
             for d in (durations if len(durations or []) == len(beats) else [None] * len(beats))
         ]
-        dissolve = float(getattr(self.settings, "veo_fal_crossfade_sec", 0.0) or 0.0)
         starts = [0.0]
         cum = dur[0]
         for k in range(1, len(beats)):
@@ -1213,22 +1230,37 @@ class VideoStudio:
         media_dir = Path(self.settings.nutti_media_dir)
         out_path = media_dir / f"video_{uuid4().hex[:12]}.mp4"
         txt_files: list[Path] = []
+        size = int(self.settings.caption_font_size)
+        # 줄바꿈 폭은 글자 크기에 반비례(한글 글리프 폭 ≈ fontsize) — 화면 폭의 ~82%를
+        # 넘지 않게. 큰 글씨일수록 적은 글자에서 줄을 바꾼다.
+        wrap_width = max(8, int(_STITCH_W * 0.82 / size))
+        line_h = round(size * 1.35)  # 줄 높이(자간 포함)
         try:
             filters: list[str] = []
             for k, beat in enumerate(beats):
-                tf = media_dir / f"caption_{uuid4().hex[:8]}.txt"
-                tf.write_text(self._wrap_caption(beat), encoding="utf-8")
-                txt_files.append(tf)
-                tf_ff = str(tf).replace("\\", "/").replace(":", r"\:")
-                if "'" in tf_ff or "'" in font_ff:
-                    log.warning("video.caption.path_quote")
-                    return None
-                filters.append(
-                    f"drawtext=fontfile='{font_ff}':textfile='{tf_ff}':"
-                    f"fontsize=40:fontcolor=white:borderw=5:bordercolor=black:"
-                    f"line_spacing=10:x=(w-text_w)/2:y=h*0.74:"
-                    f"enable='between(t,{starts[k]:.3f},{ends[k]:.3f})'"
-                )
+                # drawtext는 여러 줄을 블록 좌측 정렬로만 그린다(줄별 중앙정렬 미지원,
+                # 실측 2026-07-06) — 줄마다 독립 drawtext를 써서 각 줄을 중앙정렬한다.
+                # 블록 하단을 h*0.86에 고정(위로 쌓기)해 줄 수가 늘어도 화면 밖으로
+                # 잘리지 않는다(실측: 40px 4줄이 하단 잘림).
+                lines = self._wrap_caption(beat, width=wrap_width).split("\n")
+                for j, line in enumerate(lines):
+                    tf = media_dir / f"caption_{uuid4().hex[:8]}.txt"
+                    # newline='\n' 필수 — Windows 텍스트 모드가 \n을 \r\n으로 바꾸면
+                    # drawtext가 CR을 빈 줄로 렌더해 줄 간격이 두 배로 벌어진다(실측).
+                    tf.write_text(line, encoding="utf-8", newline="\n")
+                    txt_files.append(tf)
+                    tf_ff = str(tf).replace("\\", "/").replace(":", r"\:")
+                    if "'" in tf_ff or "'" in font_ff:
+                        log.warning("video.caption.path_quote")
+                        return None
+                    y = f"h*0.86-{(len(lines) - j) * line_h}"
+                    filters.append(
+                        f"drawtext=fontfile='{font_ff}':textfile='{tf_ff}':"
+                        f"fontsize={size}:fontcolor=white:"
+                        f"borderw={max(2, round(size / 10))}:bordercolor=black:"
+                        f"x=(w-text_w)/2:y={y}:"
+                        f"enable='between(t,{starts[k]:.3f},{ends[k]:.3f})'"
+                    )
             cmd = [
                 imageio_ffmpeg.get_ffmpeg_exe(),
                 "-y",
@@ -1242,7 +1274,10 @@ class VideoStudio:
             subprocess.run(cmd, check=True, capture_output=True, timeout=300)
             log.info("video.captions.burned", path=str(out_path), beats=len(beats))
             return str(out_path)
-        except (OSError, subprocess.SubprocessError):
+        except Exception:
+            # 자막은 품질 개선용 best-effort — 어떤 실패도 무자막 원본으로 폴백한다
+            # (_trim_tail_fixed·_chain_frame과 동일 관례. 좁은 except면 예기치 못한
+            # 예외가 클립 생산 전체를 죽인다 — 리뷰 지적).
             Path(out_path).unlink(missing_ok=True)
             log.warning("video.caption.failed")
             return None
