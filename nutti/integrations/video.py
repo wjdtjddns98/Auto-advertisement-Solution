@@ -475,6 +475,26 @@ class VeoPromptBuilder:
         "razor-sharp frame — no fade-out, no dimming, no blur, no warping, no morphing, no "
         "freeze, and no glitch at the end."
     )
+    # 마지막 비트(CTA) 전용 모션 — 진정(wind-down) 강제 없이 귀여운 행동을 자유롭게
+    # 허용한다(2026-07-06 PO: "마지막 비트는 제한 걸지 말고 귀여운 행동 하게 냅둬").
+    # 마지막 비트는 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 불필요 — 화면 이탈·끝
+    # 페이드/글리치 같은 깨짐 방지 최소 가드만 남긴다.
+    _MOTION_FINAL_FREE = (
+        "The puppy stays seated and centered in frame but is free to be playful and "
+        "adorable as it talks — happy head tilts, little paw waves, excited ear wiggles, "
+        "a joyful tail wag, cute expressive reactions. Let its natural charm show; no "
+        "forced calm-down at the end. It never leaves the frame. The clip ends on a "
+        "clean, fully-lit, sharp frame — no fade-out, no dimming, no blur, no warping, "
+        "and no glitch at the end."
+    )
+    # 립싱크 강제 — 간헐적으로 입을 안 움직이며 내레이션처럼 나오는 클립 방지
+    # (2026-07-06 PO 실측). 모든 비트 프롬프트에 포함.
+    _LIPSYNC = (
+        "The puppy visibly speaks every word on camera: its mouth clearly opens and moves "
+        "in sync with the spoken Korean line from the first word to the last. The voice is "
+        "never detached narration or voice-over — it always comes from the puppy talking "
+        "on screen with matching mouth movements."
+    )
     _NEGATIVE = (
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
         "costume, person in a costume, or plush toy. Strictly no additional animals, no "
@@ -537,13 +557,21 @@ class VeoPromptBuilder:
         if style is not None:
             scene = f"The puppy wears {style.outfit}, {style.setting}. "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
-        motion = self._MOTION_LIVELY if motion_release else self._MOTION_HOLD
+        # 마지막 비트는 진정 강제 없이 귀여운 행동 자유(_MOTION_FINAL_FREE, 2026-07-06 PO) —
+        # 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 필요 없다. 중간 비트는 기존 로직 유지.
+        if motion_release and final_cta:
+            motion = self._MOTION_FINAL_FREE
+        elif motion_release:
+            motion = self._MOTION_LIVELY
+        else:
+            motion = self._MOTION_HOLD
         cta = f"{self._CTA_VOICE_ANCHOR} " if final_cta else ""
         return (
             f"A photorealistic shot of {self._PERSONA}, {speaking}, "
             f"saying (as spoken audio only, no on-screen text): '{dialogue}'. "
             f"{scene}{mic}"
             f"{self._VOICE} {cta}"
+            f"{self._LIPSYNC} "
             f"{self._CAMERA} "
             f"{motion} "
             f"{self._CONTINUITY} "

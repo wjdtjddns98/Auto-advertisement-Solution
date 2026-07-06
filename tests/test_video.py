@@ -922,6 +922,9 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
         VeoPromptBuilder._CAMERA,
         VeoPromptBuilder._MOTION_HOLD,
         VeoPromptBuilder._MOTION_LIVELY,
+        VeoPromptBuilder._MOTION_FINAL_FREE,
+        VeoPromptBuilder._LIPSYNC,
+        VeoPromptBuilder._CTA_VOICE_ANCHOR,
         VeoPromptBuilder._CONTINUITY,
         VeoPromptBuilder._NEGATIVE,
         video_module._MASCOT_APPEARANCE,
@@ -929,6 +932,36 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
     )
     for text in templates + tuple(video_module._EPISODE_OUTFITS + video_module._EPISODE_SETTINGS):
         assert "'" not in text
+
+
+def test_build_beat_final_cta_frees_motion():
+    """마지막 비트(final_cta+lock)는 진정 강제 없이 귀여운 행동 자유(2026-07-06 PO).
+
+    중간 비트는 기존 _MOTION_LIVELY(끝 진정)를 유지해 경계 수렴을 지키고,
+    마지막 비트만 _MOTION_FINAL_FREE로 풀되 화면 이탈·끝 페이드 금지는 남는다.
+    """
+    b = VeoPromptBuilder()
+    final = b.build_beat("대사", motion_release=True, final_cta=True)
+    mid = b.build_beat("대사", motion_release=True, final_cta=False)
+    assert "free to be playful" in final
+    assert "winding down its gestures" not in final  # 진정 강제 해제
+    assert "never leaves the frame" in final  # 최소 깨짐 가드는 유지
+    assert "no fade-out" in final
+    assert "winding down its gestures" in mid  # 중간 비트는 기존 유지
+
+
+def test_build_beat_always_demands_lipsync():
+    """모든 비트 프롬프트에 립싱크 강제 문구 포함(간헐 내레이션화 방지, 2026-07-06 PO)."""
+    b = VeoPromptBuilder()
+    for kwargs in (
+        {},
+        {"motion_release": True},
+        {"motion_release": True, "final_cta": True},
+        {"off_screen_interviewer": False},
+    ):
+        prompt = b.build_beat("대사", **kwargs)
+        assert "mouth clearly opens and moves in sync" in prompt
+        assert "never detached narration" in prompt
 
 
 def test_frame_prompt_includes_episode_style_and_no_microphone():
