@@ -413,7 +413,14 @@ class VeoPromptBuilder:
         "one specific recognizable person with a fixed vocal fingerprint): a bright, "
         "cute Little girl Korean voice, sounding about 6 years old, slightly high-pitched, "
         "cheeky and energetic, with a warm soft timbre and a consistent speaking rhythm at "
-        "a lively natural pace. Keep the identical timbre, pitch, accent, and speaking speed "
+        "a lively natural pace. "
+        # 발음 교정(2026-07-06 PO 실측: 쉬운 단어도 발음이 뭉개짐 — 아이 페르소나의
+        # 혀 짧은 딕션 재현이 유력 원인). 톤은 아이답게 유지하되 발음만 성인급 정확도로.
+        "Her Korean PRONUNCIATION however is flawlessly clear and precise: perfect "
+        "standard Korean diction, every syllable fully and accurately articulated, "
+        "never slurred, never mumbled, never babyish or lisping — like a professional "
+        "child voice actor whose enunciation is adult-level crisp and correct. "
+        "Keep the identical timbre, pitch, accent, and speaking speed "
         "in every clip. Keep this exact same voice even on excited, exclamatory, or "
         "call-to-action lines: do not raise the pitch, do not get louder, do not turn into "
         "an excited announcer or a promotional voice-over, and never switch to a different "
