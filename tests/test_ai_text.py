@@ -106,6 +106,16 @@ def test_script_system_prompt_cta_calm_tone():
     assert "느낌표를 쓰지 말 것" in SCRIPT_SYSTEM_PROMPT
 
 
+def test_script_system_prompt_pins_pronunciation_guidance():
+    """발음 리스크 지시 리버트 가드(2026-07-06 PO: '귀진드기'→'귀진득기' 오발음 실측).
+
+    AI 음성이 읽기 어려운 희귀 복합어를 일상어로 풀어 쓰라는 지시가 빠지면 실패한다.
+    """
+    assert "귀진드기" in SCRIPT_SYSTEM_PROMPT  # 실측 사례 예시가 지시문에 유지
+    assert "발음" in SCRIPT_SYSTEM_PROMPT
+    assert "일상어로 풀어 쓴다" in SCRIPT_SYSTEM_PROMPT
+
+
 def test_script_system_prompt_pins_beat_char_range():
     """SCRIPT_SYSTEM_PROMPT가 비트당 길이 범위(8초 채움~50자 상한)를 명시한다(리버트 가드).
 
