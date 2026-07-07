@@ -239,6 +239,89 @@ def _live_client(msg) -> AITextClient:
     return client
 
 
+def _valid_body() -> str:
+    """하드룰 4줄(각 40~46자) 전부 통과하는 대본 본문."""
+    line = "강아지 건강 상식을 수의사 기준으로 하나씩 차근차근 알려드릴게요 오늘도"  # 38..
+    lines = [
+        "강아지 간식 양 열에 아홉은 잘못 알고 있어요 지금 바로 확인해 보세요",
+        "체중 일 킬로그램당 적정 열량 기준이 있어요 간식은 하루 열량의 십 퍼센트",
+        "몸무게별 적정량은 고정이 아니라 활동량에 따라 조금씩 달라지니 살펴보세요",
+        "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인해 보세요",
+    ]
+    assert all(35 <= len(x) <= 48 for x in lines), [len(x) for x in lines]
+    del line
+    return "\n".join(lines)
+
+
+def test_validate_script_body_passes_clean_script():
+    """하드룰 전부 통과하는 대본은 위반 0건."""
+    from nutti.integrations.ai_text import validate_script_body
+
+    assert validate_script_body(_valid_body()) == []
+
+
+def test_validate_script_body_catches_each_rule():
+    """규칙별 검출: 비트 수·글자수·의성어·발음 리스크·브랜드명·마지막 느낌표."""
+    from nutti.integrations.ai_text import validate_script_body
+
+    base = _valid_body().splitlines()
+
+    def swapped(idx: int, line: str) -> str:
+        lines = base[:]
+        lines[idx] = line
+        return "\n".join(lines)
+
+    # (교체할 줄, 기대 위반 키워드) — 규칙별 1케이스씩.
+    cases = [
+        (0, "강아지가 콜록콜록 기침하면 열에 아홉은 놓치는 위험 신호가 있어요", "의성어"),
+        (1, "짧은 대사", "40~46자"),
+        (2, "귀진드기 감염은 초기에 잡아야 해요 가려움 신호를 놓치지 마세요 꼭", "발음"),
+        (3, "Nutti 계산기로 우리 아이 맞춤 급여량을 오늘 바로 확인해 보세요", "브랜드"),
+        (3, "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인하세요!", "느낌표"),
+    ]
+    assert any("4줄" in v for v in validate_script_body("\n".join(base[:3])))
+    for idx, line, keyword in cases:
+        violations = validate_script_body(swapped(idx, line))
+        assert any(keyword in v for v in violations), (keyword, violations)
+
+
+def test_generate_script_regenerates_on_hard_rule_violation(monkeypatch):
+    """하드룰 위반 대본 → 위반 사유를 붙여 자동 재생성, 통과본으로 확정."""
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)  # _client=None → 폴백(_llm_text) 경로
+    bodies = iter(["강아지가 콜록콜록 짧은 대사", _valid_body()])
+    prompts: list[str] = []
+
+    def fake_llm(full, **_kw):
+        prompts.append(full)
+        return next(bodies)
+
+    monkeypatch.setattr(client, "_llm_text", fake_llm)
+    script = client.generate_script("간식 적정량")
+    assert len(prompts) == 2  # 1회 위반 → 1회 재생성
+    assert "하드룰 위반" in prompts[1] and "의성어" in prompts[1]  # 위반 사유가 피드백으로
+    assert script.body == _valid_body()
+    assert len(script.beats) == 4
+
+
+def test_generate_script_gives_up_after_max_tries(monkeypatch):
+    """재시도 소진 시 마지막 결과로 진행(파이프라인 중단 금지 — 검수①이 안전망)."""
+    from nutti.integrations.ai_text import _SCRIPT_MAX_TRIES
+
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    calls = {"n": 0}
+
+    def fake_llm(full, **_kw):
+        calls["n"] += 1
+        return "항상 위반하는 짧은 대사"
+
+    monkeypatch.setattr(client, "_llm_text", fake_llm)
+    script = client.generate_script("간식 적정량")
+    assert calls["n"] == _SCRIPT_MAX_TRIES
+    assert script.body == "항상 위반하는 짧은 대사"  # 마지막 결과 유지, 예외 없음
+
+
 def test_fact_check_parse_failure_fails_safe():
     # record_fact_check tool_use가 없는 응답 → 보수적으로 passed=False.
     client = _live_client(_Msg([_Block("text", text="도구 호출 없음")]))
