@@ -157,6 +157,12 @@ class Settings(BaseSettings):
     veo_fal_clip_tail_trim_sec: float = Field(
         default=0.0, alias="NUTTI_VEO_FAL_CLIP_TAIL_TRIM_SEC"
     )
+    # 비트 경계 유사도 스티칭 판단 임계(2026-07-07 PO 지시). 고정 지점 트림 대신, 경계
+    # 근처 프레임 쌍의 평균절대차(MAD, 픽셀당 0~255)를 계산해 이 값 이하면 그 프레임 쌍에서
+    # 실제로 이어붙인다. 초과하면 기존 트림을 유지하되 해당 경계만 크로스페이드를 2배로
+    # 늘려 완화한다(_find_similarity_cuts/_produce_clips_veo_fal). 0 이하면 유사도 스티칭을
+    # 완전히 끄고 기존 고정 트림 경로만 쓴다.
+    stitch_sim_threshold: float = Field(default=18.0, alias="NUTTI_STITCH_SIM_THRESHOLD")
 
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")

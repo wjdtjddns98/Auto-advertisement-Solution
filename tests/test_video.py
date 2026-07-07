@@ -607,6 +607,205 @@ def test_produce_clips_caption_off_by_default_skips_burn(tmp_path, monkeypatch):
     assert final == str(stitched)
 
 
+# --- 경계 유사도 스티칭(_find_similarity_cuts / stitch_sim_threshold) ---
+
+
+def test_find_similarity_cuts_picks_minimum_mad_pair(tmp_path, monkeypatch):
+    """A·B 후보 프레임 전 쌍 중 평균절대차(MAD)가 최소인 쌍의 컷 지점을 고른다."""
+    import subprocess as _sp
+
+    frame_size = video_module._SIM_W * video_module._SIM_H
+    # A 후보(발화 끝 5.0 + 0.15 = 5.15부터 0.1초 간격): 값이 점점 작아져 마지막(10)이
+    # B의 첫 프레임(12)과 가장 가깝다(diff=2, 그 외 조합은 전부 이보다 크다).
+    a_values = [200, 150, 100, 50, 10]
+    b_values = [12, 90, 220]
+
+    def fake_run(cmd, **kw):
+        joined = " ".join(cmd)
+
+        class _R:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        if "rawvideo" not in joined:
+            _R.stderr = b"Duration: 00:00:08.00, start: 0.000000"
+            return _R()
+        if "a.mp4" in joined:
+            _R.stdout = b"".join(bytes([v]) * frame_size for v in a_values)
+        elif "b.mp4" in joined:
+            _R.stdout = b"".join(bytes([v]) * frame_size for v in b_values)
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    # speech_start_b=0.5 → b_window=0.35(>=0.2) → 3개 B 후보 전부 탐색(수렴 분기 아님).
+    result = studio._find_similarity_cuts("a.mp4", "b.mp4", 5.0, 0.5)
+    assert result is not None
+    cut_a, cut_b, diff = result
+    assert cut_a == pytest.approx(5.15 + 4 * 0.1)  # A 마지막 후보(값 10)
+    assert cut_b == pytest.approx(0.0)  # B 첫 후보(값 12)
+    assert diff == pytest.approx(2.0)
+
+
+def test_find_similarity_cuts_collapses_b_window_when_narrow(tmp_path, monkeypatch):
+    """speech_start_b가 작아 B 후보 구간이 0.2s 미만이면 B는 t=0 단일 후보로 수렴한다."""
+    import subprocess as _sp
+
+    frame_size = video_module._SIM_W * video_module._SIM_H
+    calls: list[str] = []
+
+    def fake_run(cmd, **kw):
+        joined = " ".join(cmd)
+        calls.append(joined)
+
+        class _R:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        if "rawvideo" not in joined:
+            _R.stderr = b"Duration: 00:00:08.00, start: 0.000000"
+            return _R()
+        if "a.mp4" in joined:
+            _R.stdout = bytes([99]) * frame_size
+        elif "b.mp4" in joined:
+            # 실제로는 한 번의 ffmpeg 호출로 여러 프레임이 나올 수 있어도, 수렴 분기는
+            # 첫 프레임만 취해야 한다.
+            _R.stdout = b"".join(bytes([v]) * frame_size for v in [5, 200, 210])
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    result = studio._find_similarity_cuts("a.mp4", "b.mp4", 5.0, 0.1)  # b_window=0 → 수렴
+    assert result is not None
+    _cut_a, cut_b, diff = result
+    assert cut_b == pytest.approx(0.0)
+    assert diff == pytest.approx(abs(99 - 5))  # B 두 번째·세 번째 후보(200·210)는 무시됨
+
+
+def _sim_stitch_studio(tmp_path, monkeypatch, **settings_overrides):
+    """_produce_clips_veo_fal 경계 유사도 통합 테스트용 스튜디오/파일 셋업.
+
+    비트마다 다른 클립 경로를 돌려주는 FakeVeo + 트림 스텁(발화 끝 7.0초 고정) +
+    _stitch 스텁(호출 인자를 기록)을 준비한다. 반환: (studio, stitched_path, clip_paths,
+    captured_stitch_args).
+    """
+    clip1 = tmp_path / "clip1.mp4"
+    clip1.write_bytes(b"clip1")
+    clip2 = tmp_path / "clip2.mp4"
+    clip2.write_bytes(b"clip2")
+    stitched = tmp_path / "stitched.mp4"
+    stitched.write_bytes(b"stitched")
+    clip_paths = [str(clip1), str(clip2)]
+
+    class _FakeVeo:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, frame_path, prompt, last_frame_path=None, seed=None):
+            path = clip_paths[self.calls]
+            self.calls += 1
+            return path
+
+        def close(self):
+            pass
+
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), **settings_overrides
+    )
+    studio = VideoStudio(settings, veo_fal_client=_FakeVeo())
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0), raising=True)
+
+    captured: dict = {}
+
+    def fake_stitch(self, clips, durs=None, **kw):
+        captured["clips"] = clips
+        captured["durs"] = durs
+        captured["kwargs"] = kw
+        return str(stitched)
+
+    monkeypatch.setattr(VideoStudio, "_stitch", fake_stitch, raising=True)
+    return studio, str(stitched), clip_paths, captured
+
+
+def test_produce_clips_similarity_mismatch_warns_and_doubles_dissolve(tmp_path, monkeypatch):
+    """best_diff가 임계 초과면 경고 로그를 남기고 그 경계만 크로스페이드를 2배로 늘린다.
+
+    컷 지점 자체는 기존 트림(_trim_to_speech 결과)을 그대로 유지해야 한다.
+    """
+    warnings: list[dict] = []
+    monkeypatch.setattr(
+        video_module.log,
+        "warning",
+        lambda event, **kw: warnings.append({"event": event, **kw}),
+    )
+    studio, stitched, clip_paths, captured = _sim_stitch_studio(
+        tmp_path, monkeypatch, NUTTI_VEO_FAL_CROSSFADE_SEC="0.3"
+    )
+    monkeypatch.setattr(
+        VideoStudio,
+        "_find_similarity_cuts",
+        lambda self, a, b, se, ss: (5.5, 0.0, 25.0),  # 25.0 > 기본 임계 18.0
+        raising=True,
+    )
+    final, _total = studio._produce_clips_veo_fal(
+        "frame.png", ["비트1", "비트2"], pick_episode_style("x")
+    )
+    assert final == stitched
+    assert warnings and warnings[0]["event"] == "stitch.boundary_mismatch"
+    assert warnings[0]["diff"] == 25.0
+    assert captured["kwargs"].get("boundary_dissolves") == [0.6]  # 0.3 * 2
+    assert captured["clips"] == clip_paths  # 컷 지점은 기존 트림 그대로
+
+
+def test_produce_clips_similarity_failure_falls_back_to_existing_trim(tmp_path, monkeypatch):
+    """유사도 탐색 실패(None)면 기존 트림 경로/디졸브로 조용히 폴백한다(경고 없음)."""
+    warnings: list[dict] = []
+    monkeypatch.setattr(
+        video_module.log,
+        "warning",
+        lambda event, **kw: warnings.append({"event": event, **kw}),
+    )
+    studio, stitched, clip_paths, captured = _sim_stitch_studio(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        VideoStudio, "_find_similarity_cuts", lambda self, a, b, se, ss: None, raising=True
+    )
+    final, _total = studio._produce_clips_veo_fal(
+        "frame.png", ["비트1", "비트2"], pick_episode_style("x")
+    )
+    assert final == stitched
+    assert warnings == []
+    assert "boundary_dissolves" not in captured["kwargs"]
+    assert captured["clips"] == clip_paths
+    assert captured["durs"] == [7.0, 7.0]
+
+
+def test_produce_clips_similarity_disabled_skips_search(tmp_path, monkeypatch):
+    """stitch_sim_threshold<=0이면 유사도 탐색 자체를 호출하지 않는다(완전 미개입)."""
+
+    def boom(self, a, b, se, ss):
+        raise AssertionError("threshold<=0인데 유사도 탐색이 호출됨")
+
+    studio, stitched, clip_paths, captured = _sim_stitch_studio(
+        tmp_path, monkeypatch, NUTTI_STITCH_SIM_THRESHOLD="0"
+    )
+    monkeypatch.setattr(VideoStudio, "_find_similarity_cuts", boom, raising=True)
+    final, _total = studio._produce_clips_veo_fal(
+        "frame.png", ["비트1", "비트2"], pick_episode_style("x")
+    )
+    assert final == stitched
+    assert "boundary_dissolves" not in captured["kwargs"]
+    assert captured["clips"] == clip_paths
+
+
+def test_stitch_sim_threshold_default():
+    """유사도 스티칭 임계 기본값은 18.0(MAD, 픽셀당 0~255 기준)이다."""
+    from nutti.config import Settings
+
+    assert Settings(NUTTI_DRY_RUN=True).stitch_sim_threshold == 18.0
+
+
 def _synthetic_speech_pcm(sample_rate: int = 16000) -> bytes:
     """발화(0~6s 큼) → 깊은 딥(6~6.5s, 발화 끝) → tail-fill(6.5~8s, 중간 레벨) 합성 PCM.
 

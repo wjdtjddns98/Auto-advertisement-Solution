@@ -61,6 +61,14 @@ _TRIM_LOOKBACK = 4  # 직전 발화 레벨 참조 윈도 개수(=1초)
 _TRIM_MIN_SPEECH = 2.5  # 발화 시작 후 이 초 이전의 딥은 무시(훅 중 멈춤 오검출 방지)
 _TRIM_PAD = 0.15  # 발화 끝 뒤 남길 여유(초) — 끝음절 보존
 
+# 경계 유사도 스티칭(_find_similarity_cuts) 파라미터(2026-07-07 PO 지시). 고정 지점
+# 트림 대신 경계 근처 프레임의 이미지 유사도로 자연스러운 컷 지점을 찾는다.
+_SIM_FRAME_STEP = 0.1  # 후보 프레임 간격(초)
+_SIM_GAP = 0.15  # 발화 끝/시작에서 탐색을 띄우는 여유(초) — 입모양 겹침 회피
+_SIM_A_WINDOW = 1.5  # A(왼쪽 클립) 후보 구간 최대 폭(초, speech_end_a 기준)
+_SIM_MIN_B_WINDOW = 0.2  # 이 미만이면 B 후보를 t=0 고정 단일 프레임으로 수렴
+_SIM_W, _SIM_H = 64, 114  # 유사도 비교용 저해상도 그레이스케일 프레임 크기(9:16 축소)
+
 # 스티칭 정규화 해상도(9:16 쇼츠). 모든 입력을 이 크기로 맞춰 xfade/concat의 크기 불일치
 # 실패를 방지하고, 교차 펀치인 크롭의 기준 좌표계가 된다.
 # ponytail: 720x1280 고정(fal Veo Lite 실측) — 모델 해상도를 올리면 이 상수도 함께 올릴 것.
@@ -130,6 +138,14 @@ def _close_owned(client) -> None:
     close = getattr(client, "close", None)
     if callable(close):
         close()
+
+
+def _frame_mad(a: bytes, b: bytes) -> float:
+    """두 그레이스케일 raw 프레임의 평균절대차(MAD, 픽셀당 0~255)를 계산한다.
+
+    `_find_similarity_cuts`가 경계 후보 프레임 쌍 중 가장 비슷한 쌍을 고르는 데 쓴다.
+    """
+    return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
 
 
 class _HttpClosingMixin:
@@ -843,22 +859,91 @@ class VideoStudio:
             trimmed.append(path)
             durations.append(sec)
             total += sec if sec is not None else _CLIP_SEC
-        # 트림으로 새로 만든 임시 파일(veo_fal_trim_*.mp4)은 스티칭 후 정리한다 — 원본
-        # 비트 클립은 기존 정책대로 유지하고, 단일 비트라 _stitch가 그대로 돌려준 파일
-        # (final)은 삭제 대상에서 제외한다(반환 파일 삭제 방지). 스티칭 실패 시에도 정리.
+
+        # 경계 유사도 스티칭(2026-07-07 PO): 고정 지점 트림 대신 경계 근처 프레임 쌍의
+        # 이미지 유사도로 가장 자연스러운 컷 지점을 찾는다. A(왼쪽 클립)는 tail-trim만
+        # 된 원본 clips[i]에서 발화 끝(durations[i]) 이후를 탐색한다 — 이미 발화 끝으로
+        # 잘린 trimmed[i]는 탐색할 여유가 거의 없다. B(오른쪽 클립)의 발화 시작은 별도로
+        # 검출하지 않는다 — 현재 트림은 앞을 자르지 않으므로(_trim_to_speech의 start_t=0
+        # 정책) B는 항상 t=0 근방에서 시작하고, endframe_lock 모드에서는 그 t=0 프레임이
+        # 모든 클립이 공유하는 마스코트 고정 프레임이라 A의 수렴 프레임과 자연히 유사하다.
+        # speech_start_b=0.0을 넘겨 B 후보를 t=0 단일 프레임으로 수렴시킨다(스펙의
+        # "0.2s 미만 → 0.0 고정" 분기).
+        n_clips = len(clips)
+        head_start = [0.0] * n_clips
+        tail_end: list[float | None] = list(durations)
+        tail_from_sim = [False] * n_clips
+        head_from_sim = [False] * n_clips
+        dissolve_base = float(getattr(self.settings, "veo_fal_crossfade_sec", 0.0) or 0.0)
+        boundary_dissolves = [dissolve_base] * max(0, n_clips - 1)
+        any_mismatch = False
+        threshold = float(getattr(self.settings, "stitch_sim_threshold", 0.0) or 0.0)
+        if threshold > 0:
+            for i in range(n_clips - 1):
+                speech_end_a = durations[i]
+                if speech_end_a is None:
+                    continue  # 발화 끝 미상 — 유사도 탐색 불가, 기존 트림 유지
+                try:
+                    result = self._find_similarity_cuts(
+                        clips[i], clips[i + 1], speech_end_a, 0.0
+                    )
+                except Exception:
+                    result = None
+                if result is None:
+                    continue  # ffmpeg 실패·프레임 부족 등 — best-effort 폴백(기존 트림 유지)
+                cut_a, cut_b, diff = result
+                if diff <= threshold:
+                    tail_end[i] = cut_a
+                    tail_from_sim[i] = True
+                    head_start[i + 1] = cut_b
+                    head_from_sim[i + 1] = True
+                else:
+                    log.warning("stitch.boundary_mismatch", diff=diff, pair=(i, i + 1))
+                    boundary_dissolves[i] = dissolve_base * 2
+                    any_mismatch = True
+
+        # 유사도 컷이 결정된 클립만 clips[k](원본)에서 [head_start, tail_end)로 다시
+        # 잘라낸다 — trimmed[k]는 그대로 두고 새 파일로 교체해 미개입 클립은 기존
+        # _trim_to_speech 산출물을 그대로 재사용한다(threshold<=0이면 아예 무개입).
+        final_trimmed = list(trimmed)
+        final_durations: list[float | None] = list(durations)
+        sim_cut_files: list[str] = []
+        for k in range(n_clips):
+            if not (tail_from_sim[k] or head_from_sim[k]):
+                continue
+            if durations[k] is None:
+                continue  # 발화 끝 미상 클립은 병합 컷을 보류하고 기존 트림 유지
+            end_k = tail_end[k] if tail_from_sim[k] else durations[k]
+            start_k = head_start[k] if head_from_sim[k] else 0.0
+            cut_path = self._cut_clip_range(clips[k], start_k, end_k)
+            if cut_path is None:
+                continue  # 컷 실패 — 기존 트림 유지(best-effort)
+            final_trimmed[k] = cut_path
+            final_durations[k] = end_k - start_k
+            sim_cut_files.append(cut_path)
+
+        # 트림으로 새로 만든 임시 파일(veo_fal_trim_*.mp4/veo_fal_simcut_*.mp4)은 스티칭
+        # 후 정리한다 — 원본 비트 클립은 기존 정책대로 유지하고, 단일 비트라 _stitch가
+        # 그대로 돌려준 파일(final)은 삭제 대상에서 제외한다(반환 파일 삭제 방지).
+        # 스티칭 실패 시에도 정리.
         final = None
         try:
-            final = self._stitch(trimmed, durations)
+            if any_mismatch:
+                final = self._stitch(
+                    final_trimmed, final_durations, boundary_dissolves=boundary_dissolves
+                )
+            else:
+                final = self._stitch(final_trimmed, final_durations)
             # 자막 굽기(2026-07-06 PO): 비트별 대사를 하단 한글 자막으로. best-effort —
             # 실패/폰트 없음이면 무자막 원본 유지. 성공 시 자막 전 스티칭 산출물(중간물)은
             # 삭제하되, 단일 비트처럼 _stitch가 입력을 그대로 돌려준 경우는 남긴다.
             if self.settings.caption_burn:
                 captioned = self._burn_captions(
-                    final, beats, durations,
+                    final, beats, final_durations,
                     dissolve=getattr(self, "_last_stitch_dissolve", 0.0),
                 )
                 if captioned is not None:
-                    if final not in trimmed and final not in clips:
+                    if final not in final_trimmed and final not in clips:
                         try:
                             # missing_ok는 '없음'만 삼킨다 — Windows에서 ffmpeg 핸들
                             # 지연 해제로 PermissionError가 나면 성공한 자막 영상을
@@ -878,6 +963,12 @@ class VideoStudio:
         finally:
             for orig, t in zip(clips, trimmed):
                 if t != orig and t != final:
+                    try:
+                        Path(t).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            for t in sim_cut_files:
+                if t != final:
                     try:
                         Path(t).unlink(missing_ok=True)
                     except OSError:
@@ -1073,7 +1164,133 @@ class VideoStudio:
             # 트림은 품질 개선용 best-effort — 어떤 실패도 원본 클립으로 폴백한다.
             return clip, None
 
-    def _stitch(self, clips: list[str], durations: list[float | None] | None = None) -> str:
+    def _probe_duration_sec(self, clip: str) -> float | None:
+        """ffmpeg -i의 stderr에서 `Duration:` 라인을 파싱해 초 단위 길이를 반환한다.
+
+        `_trim_tail_fixed`의 동일 파싱 로직과 같은 정규식을 쓰되, 유사도 스티칭 전용
+        경로(best-effort — 실패 시 None)로 별도 둔다.
+        """
+        import re
+        import subprocess
+
+        import imageio_ffmpeg
+
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        probe = subprocess.run([ff, "-hide_banner", "-i", clip], capture_output=True)
+        err = (probe.stderr or b"").decode("utf-8", "replace")
+        dm = re.search(r"Duration:\s*(\d+):(\d+):([0-9.]+)", err)
+        if dm is None:
+            return None
+        return int(dm.group(1)) * 3600 + int(dm.group(2)) * 60 + float(dm.group(3))
+
+    def _extract_gray_frames(self, clip: str, start: float, duration: float) -> list[bytes]:
+        """clip의 [start, start+duration) 구간에서 `_SIM_FRAME_STEP` 간격 저해상도
+        그레이스케일 프레임을 한 번의 ffmpeg 호출로 뽑아 raw 바이트 리스트로 반환한다.
+
+        프레임마다 subprocess를 띄우지 않고, `fps` 필터로 구간 전체를 한 번에 뽑은 뒤
+        파이썬에서 프레임 크기(`_SIM_W`×`_SIM_H`)로 잘라 나눈다. 실패 시 빈 리스트.
+        """
+        import subprocess
+
+        import imageio_ffmpeg
+
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        fps = 1.0 / _SIM_FRAME_STEP
+        cmd = [
+            ff, "-hide_banner", "-ss", f"{start:.3f}", "-i", clip,
+            "-t", f"{max(duration, _SIM_FRAME_STEP / 2):.3f}",
+            "-vf", f"fps={fps:.3f},scale={_SIM_W}:{_SIM_H},format=gray",
+            "-f", "rawvideo", "-",
+        ]
+        res = subprocess.run(cmd, capture_output=True)
+        raw = res.stdout or b""
+        frame_size = _SIM_W * _SIM_H
+        if len(raw) < frame_size:
+            return []
+        n = len(raw) // frame_size
+        return [raw[k * frame_size:(k + 1) * frame_size] for k in range(n)]
+
+    def _find_similarity_cuts(
+        self, clip_a: str, clip_b: str, speech_end_a: float, speech_start_b: float
+    ) -> tuple[float, float, float] | None:
+        """경계 A(꼬리)·B(머리) 후보 구간에서 가장 유사한 프레임 쌍의 컷 지점을 찾는다.
+
+        끝프레임 고정(endframe_lock) 모드는 모든 클립이 같은 마스코트 프레임으로 수렴
+        하므로, A의 발화 끝 직후 구간과 B의 발화 시작 직전 구간에는 실제로 유사한 프레임
+        쌍이 존재한다. `_SIM_FRAME_STEP` 간격 그레이스케일 프레임의 전 쌍 평균절대차(MAD,
+        0~255)를 계산해 최솟값 쌍을 고른다. 반환은 (A 컷 시각초, B 컷 시각초, 최소 MAD)
+        이고, ffmpeg 실패·프레임 부족·길이 확인 실패 등 어떤 이유로든 탐색이 불가하면
+        None을 돌려준다(호출부가 기존 트림으로 best-effort 폴백).
+        """
+        try:
+            a_start = speech_end_a + _SIM_GAP
+            a_dur = self._probe_duration_sec(clip_a)
+            if a_dur is None:
+                return None
+            a_end = min(speech_end_a + _SIM_A_WINDOW, a_dur)
+            if a_end - a_start < _SIM_FRAME_STEP:
+                return None
+            a_frames = self._extract_gray_frames(clip_a, a_start, a_end - a_start)
+            if not a_frames:
+                return None
+
+            b_window = max(0.0, speech_start_b - _SIM_GAP)
+            if b_window < _SIM_MIN_B_WINDOW:
+                b_frames = self._extract_gray_frames(clip_b, 0.0, _SIM_FRAME_STEP / 2)
+                b_frames = b_frames[:1]
+            else:
+                b_frames = self._extract_gray_frames(clip_b, 0.0, b_window)
+            if not b_frames:
+                return None
+            b_offsets = [k * _SIM_FRAME_STEP for k in range(len(b_frames))]
+
+            best: tuple[float, float, float] | None = None
+            for i, fa in enumerate(a_frames):
+                cut_a = a_start + i * _SIM_FRAME_STEP
+                for j, fb in enumerate(b_frames):
+                    diff = _frame_mad(fa, fb)
+                    if best is None or diff < best[2]:
+                        best = (cut_a, b_offsets[j], diff)
+            return best
+        except Exception:
+            # 유사도 탐색은 best-effort — 어떤 실패도 None(기존 트림 유지)으로 안전 처리.
+            return None
+
+    def _cut_clip_range(self, clip: str, start: float, end: float) -> str | None:
+        """clip의 [start, end) 구간만 남긴 새 클립을 만들어 경로를 반환한다(실패 시 None).
+
+        유사도 스티칭이 결정한 경계 컷 지점을 실제로 잘라내는 재인코딩. `_trim_tail_fixed`
+        와 동일한 보편 호환 코덱/픽셀포맷 처방(yuv420p + High 프로파일)을 쓴다.
+        """
+        dur = end - start
+        if dur < 0.3:
+            return None
+        import subprocess
+
+        import imageio_ffmpeg
+
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        out = str(Path(self.settings.nutti_media_dir) / f"veo_fal_simcut_{uuid4().hex[:8]}.mp4")
+        try:
+            cut = subprocess.run(
+                [ff, "-y", "-hide_banner", "-ss", f"{start:.3f}", "-i", clip,
+                 "-t", f"{dur:.3f}", "-c:v", "libx264", "-profile:v", "high",
+                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-c:a", "aac", out],
+                capture_output=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if cut.returncode != 0 or not Path(out).exists():
+            return None
+        return out
+
+    def _stitch(
+        self,
+        clips: list[str],
+        durations: list[float | None] | None = None,
+        *,
+        boundary_dissolves: list[float] | None = None,
+    ) -> str:
         """여러 8초 클립을 ffmpeg로 이어붙여 하나의 MP4로 만든다.
 
         `settings.veo_fal_crossfade_sec`>0 이고 모든 클립 길이를 알면 비트 경계에 짧은
@@ -1092,7 +1309,9 @@ class VideoStudio:
             return clips[0]
         dissolve = float(getattr(self.settings, "veo_fal_crossfade_sec", 0.0) or 0.0)
         if dissolve > 0 and durations is not None and len(durations) == len(clips):
-            faded = self._stitch_dissolve(clips, durations, dissolve)
+            faded = self._stitch_dissolve(
+                clips, durations, dissolve, boundary_dissolves=boundary_dissolves
+            )
             if faded is not None:
                 self._last_stitch_dissolve = dissolve
                 return faded
@@ -1120,7 +1339,12 @@ class VideoStudio:
         return f"{base},scale={_STITCH_W}:{_STITCH_H},setsar=1"
 
     def _stitch_dissolve(
-        self, clips: list[str], durations: list[float | None], dissolve: float
+        self,
+        clips: list[str],
+        durations: list[float | None],
+        dissolve: float,
+        *,
+        boundary_dissolves: list[float] | None = None,
     ) -> str | None:
         """클립 경계에 짧은 디졸브(xfade+acrossfade)를 줘 이어붙인다(best-effort).
 
@@ -1128,11 +1352,24 @@ class VideoStudio:
         하나라도 길이를 모르거나 너무 짧으면 None을 돌려 호출부가 concat으로 폴백한다.
         디졸브 ffmpeg 실패(필터 비호환·타임아웃 등)도 None으로 안전 폴백. xfade는 입력
         해상도/fps/SAR가 같아야 하므로 각 비디오를 fps/format/SAR로 정규화한 뒤 체이닝한다.
+
+        `boundary_dissolves`(경계별 길이, len=len(clips)-1)를 주면 경계마다 다른 디졸브를
+        쓴다 — 유사도 스티칭이 불일치로 판정한 경계만 2배로 늘려 완화하는 용도(2026-07-07
+        PO). None(기본)이면 전 경계가 `dissolve`를 쓴다(기존 동작 그대로). 자막 타이밍
+        (`_last_stitch_dissolve`)은 경계별 값과 무관하게 여전히 대표 기본값 `dissolve`를
+        쓴다 — 자막은 기본 꺼져 있고 경계별 정확한 오프셋 반영은 범위 밖(스펙 명시).
         """
+        n = len(clips)
+        per_boundary = list(boundary_dissolves) if boundary_dissolves is not None else None
+        if per_boundary is None or len(per_boundary) != n - 1:
+            per_boundary = [dissolve] * (n - 1)
         dur: list[float] = []
-        for d in durations:
-            # 디졸브보다 충분히 길어야 offset=길이-디졸브가 양수로 성립한다.
-            if d is None or d <= dissolve + 0.1:
+        for idx, d in enumerate(durations):
+            # 이 클립과 맞닿은 경계들(왼쪽·오른쪽) 중 더 큰 디졸브 길이 기준으로 충분한
+            # 길이인지 검사한다 — 한쪽 경계가 2배로 늘어나도 offset이 음수가 되면 안 된다.
+            neighbors = per_boundary[max(0, idx - 1):idx + 1]
+            needed = max(neighbors) if neighbors else dissolve
+            if d is None or d <= needed + 0.1:
                 return None
             dur.append(float(d))
         import subprocess
@@ -1143,25 +1380,26 @@ class VideoStudio:
         inputs: list[str] = []
         for clip in clips:
             inputs += ["-i", clip]
-        n = len(clips)
         parts: list[str] = [f"{self._input_norm(i)}[v{i}]" for i in range(n)]
-        # 비디오 xfade 체인: 클립 k 합류 시 offset = 직전 출력길이 - 디졸브.
+        # 비디오 xfade 체인: 클립 k 합류 시 offset = 직전 출력길이 - 그 경계의 디졸브.
         vlabel = "v0"
         cum = dur[0]
         for k in range(1, n):
-            offset = cum - dissolve
+            d_k = per_boundary[k - 1]
+            offset = cum - d_k
             out = f"vx{k}"
             parts.append(
                 f"[{vlabel}][v{k}]xfade=transition=fade:"
-                f"duration={dissolve:.3f}:offset={offset:.3f}[{out}]"
+                f"duration={d_k:.3f}:offset={offset:.3f}[{out}]"
             )
             vlabel = out
-            cum = cum + dur[k] - dissolve
+            cum = cum + dur[k] - d_k
         # 오디오 acrossfade 체인: 경계에서 자동으로 끝-시작을 겹쳐 페이드(offset 불요).
         alabel = "0:a"
         for k in range(1, n):
+            d_k = per_boundary[k - 1]
             out = f"ax{k}"
-            parts.append(f"[{alabel}][{k}:a]acrossfade=d={dissolve:.3f}[{out}]")
+            parts.append(f"[{alabel}][{k}:a]acrossfade=d={d_k:.3f}[{out}]")
             alabel = out
         cmd = [
             imageio_ffmpeg.get_ffmpeg_exe(),
