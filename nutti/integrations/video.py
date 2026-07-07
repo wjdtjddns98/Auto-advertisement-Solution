@@ -288,6 +288,35 @@ def _guess_image_mime(path: str) -> str:
     return "image/jpeg"
 
 
+# ================= 영상 프롬프트 하드가드(2026-07-07 PO 지시) =================
+# 대본 파서와 같은 원리 — "프롬프트 관례"로만 지키던 규칙을 과금 전에 코드로 강제한다.
+# 실측 렌더 사고 리터럴: "tripod"→화면에 삼각대 렌더(2026-06-29), "Nutti"/"9:16"→화면
+# 자막으로 렌더(2026-06-16). PO 수정 구역(의상·장소·연출 템플릿)을 고치다 실수로
+# 들어가면 테스트 전에 여기서 잡힌다. 사고 단어가 새로 실측되면 목록에 추가.
+_PROMPT_BANNED_LITERALS = ["tripod", "nutti", "누띠", "누티", "9:16"]
+
+
+def _validate_visual_prompt(prompt: str, *, expected_quotes: int) -> None:
+    """조립 완료된 Veo/Kontext 프롬프트의 하드룰 검증 — 위반 시 과금 전에 시끄럽게 실패.
+
+    expected_quotes: ASCII 작은따옴표(') 기대 개수 — 비트 프롬프트는 대사 인용 한 쌍(2),
+    프레임 프롬프트는 0. 어긋나면 인용 탈출 주입 방어의 전제가 깨진 것이다.
+    """
+    low = prompt.lower()
+    for word in _PROMPT_BANNED_LITERALS:
+        if word in low:
+            raise ValueError(
+                f"영상 프롬프트 하드룰 위반: 금지 리터럴 '{word}' 포함 — 화면 렌더 사고"
+                " 실측 단어입니다. PO 수정 구역(의상·장소·연출) 문구를 확인하세요."
+            )
+    quotes = prompt.count("'")
+    if quotes != expected_quotes:
+        raise ValueError(
+            f"영상 프롬프트 하드룰 위반: 작은따옴표 {quotes}개(기대 {expected_quotes}) — "
+            "템플릿/의상/장소 문구의 ASCII 작은따옴표(주입 방어 충돌)를 제거하세요."
+        )
+
+
 class EpisodeStyle(NamedTuple):
     """편 단위 연출 스타일(의상·장소상황).
 
@@ -413,7 +442,14 @@ class VeoPromptBuilder:
         "one specific recognizable person with a fixed vocal fingerprint): a bright, "
         "cute Little girl Korean voice, sounding about 6 years old, slightly high-pitched, "
         "cheeky and energetic, with a warm soft timbre and a consistent speaking rhythm at "
-        "a lively natural pace. Keep the identical timbre, pitch, accent, and speaking speed "
+        "a lively natural pace. "
+        # 발음 교정(2026-07-06 PO 실측: 쉬운 단어도 발음이 뭉개짐 — 아이 페르소나의
+        # 혀 짧은 딕션 재현이 유력 원인). 톤은 아이답게 유지하되 발음만 성인급 정확도로.
+        "Her Korean PRONUNCIATION however is flawlessly clear and precise: perfect "
+        "standard Korean diction, every syllable fully and accurately articulated, "
+        "never slurred, never mumbled, never babyish or lisping — like a professional "
+        "child voice actor whose enunciation is adult-level crisp and correct. "
+        "Keep the identical timbre, pitch, accent, and speaking speed "
         "in every clip. Keep this exact same voice even on excited, exclamatory, or "
         "call-to-action lines: do not raise the pitch, do not get louder, do not turn into "
         "an excited announcer or a promotional voice-over, and never switch to a different "
@@ -474,6 +510,26 @@ class VeoPromptBuilder:
         "living motion all the way through. The clip ends on a calm, clean, fully-lit, "
         "razor-sharp frame — no fade-out, no dimming, no blur, no warping, no morphing, no "
         "freeze, and no glitch at the end."
+    )
+    # 마지막 비트(CTA) 전용 모션 — 진정(wind-down) 강제 없이 귀여운 행동을 자유롭게
+    # 허용한다(2026-07-06 PO: "마지막 비트는 제한 걸지 말고 귀여운 행동 하게 냅둬").
+    # 마지막 비트는 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 불필요 — 화면 이탈·끝
+    # 페이드/글리치 같은 깨짐 방지 최소 가드만 남긴다.
+    _MOTION_FINAL_FREE = (
+        "The puppy stays seated and centered in frame but is free to be playful and "
+        "adorable as it talks — happy head tilts, little paw waves, excited ear wiggles, "
+        "a joyful tail wag, cute expressive reactions. Let its natural charm show; no "
+        "forced calm-down at the end. It never leaves the frame. The clip ends on a "
+        "clean, fully-lit, sharp frame — no fade-out, no dimming, no blur, no warping, "
+        "and no glitch at the end."
+    )
+    # 립싱크 강제 — 간헐적으로 입을 안 움직이며 내레이션처럼 나오는 클립 방지
+    # (2026-07-06 PO 실측). 모든 비트 프롬프트에 포함.
+    _LIPSYNC = (
+        "The puppy visibly speaks every word on camera: its mouth clearly opens and moves "
+        "in sync with the spoken Korean line from the first word to the last. The voice is "
+        "never detached narration or voice-over — it always comes from the puppy talking "
+        "on screen with matching mouth movements."
     )
     _NEGATIVE = (
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
@@ -537,13 +593,21 @@ class VeoPromptBuilder:
         if style is not None:
             scene = f"The puppy wears {style.outfit}, {style.setting}. "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
-        motion = self._MOTION_LIVELY if motion_release else self._MOTION_HOLD
+        # 마지막 비트는 진정 강제 없이 귀여운 행동 자유(_MOTION_FINAL_FREE, 2026-07-06 PO) —
+        # 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 필요 없다. 중간 비트는 기존 로직 유지.
+        if motion_release and final_cta:
+            motion = self._MOTION_FINAL_FREE
+        elif motion_release:
+            motion = self._MOTION_LIVELY
+        else:
+            motion = self._MOTION_HOLD
         cta = f"{self._CTA_VOICE_ANCHOR} " if final_cta else ""
-        return (
+        prompt = (
             f"A photorealistic shot of {self._PERSONA}, {speaking}, "
             f"saying (as spoken audio only, no on-screen text): '{dialogue}'. "
             f"{scene}{mic}"
             f"{self._VOICE} {cta}"
+            f"{self._LIPSYNC} "
             f"{self._CAMERA} "
             f"{motion} "
             f"{self._CONTINUITY} "
@@ -551,6 +615,11 @@ class VeoPromptBuilder:
             "Format: tall vertical portrait orientation, single continuous 8-second shot. "
             f"{self._NEGATIVE}"
         )
+        # 하드가드: 금지 리터럴·인용 구분자 한 쌍 — 과금 전 검증(2026-07-07 PO).
+        # 대사(quoted)는 검사에서 제외한다: 음성으로 발화될 뿐 화면 렌더 사고와 무관하고,
+        # 대사 속 브랜드명·발음 리스크는 대본 파서(ai_text.validate_script_body) 담당.
+        _validate_visual_prompt(prompt.replace(dialogue, ""), expected_quotes=2)
+        return prompt
 
 
 # NanoBananaClient(Gemini 이미지 생성)는 2026-06 PO 결정으로 FalKontextClient로 교체됨.
@@ -1325,6 +1394,7 @@ class VideoStudio:
         (작은따옴표 치환 + 길이 제한 — 간접 프롬프트 주입 심층 방어).
         """
         topic = _sanitize_prompt_text(script.topic, _MAX_TOPIC_CHARS)
+        # (아래 조립 결과는 반환 직전에 _validate_visual_prompt로 하드가드 — 2026-07-07 PO)
         # ===================== PO 수정 구역 (첫 장면 비주얼) =====================
         # 영상 "첫 장면의 구도·표정·마이크 연출"을 바꾸려면 아래 영어 묘사를 고친다.
         # 배경·의상은 위 로테이션 리스트(PO 수정 구역 — 편별 연출 로테이션)에서 고친다.
@@ -1332,7 +1402,7 @@ class VideoStudio:
         # ASCII 작은따옴표(') 금지(주입 방어 검증과 충돌). 한국어로 원하는 그림만 정해도 됨.
         # 리터럴 "9:16"·브랜드명은 화면 자막으로 렌더되므로 넣지 않는다(세로 비율은 Kontext
         # aspect_ratio 파라미터가 담당). 캐릭터는 "진짜 실사 강아지"로 못박아 인형탈 방지.
-        return (
+        prompt = (
             "A photorealistic tall vertical portrait-orientation starting frame for a "
             f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}, {style.setting}, "
             "looking straight at the camera with a calm, gentle, friendly face, ready to "
@@ -1342,4 +1412,7 @@ class VideoStudio:
             "watermarks anywhere. No people, no humans in costume, no other animals. "
             "No microphone and no interview setup in frame."
         )
+        # 하드가드: 금지 리터럴·작은따옴표 0개(대사 없음) — 과금 전 검증(2026-07-07 PO).
+        _validate_visual_prompt(prompt, expected_quotes=0)
+        return prompt
         # =================== PO 수정 구역 끝 (첫 장면 비주얼) ===================

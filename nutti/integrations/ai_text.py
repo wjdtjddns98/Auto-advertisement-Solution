@@ -39,6 +39,10 @@ SCRIPT_SYSTEM_PROMPT = (
     "각 비트는 강아지 마스코트가 말하는 8초짜리 한 클립이 된다 — 발화가 약 7초 안에 끝나 "
     "끝에 약간 여유가 남도록 한국어 2문장, 공백 포함 40~46자로 쓴다(너무 짧으면 비트 사이가 "
     "비고, 46자를 넘겨 8초를 꽉 채우면 끝 글리치 구간을 잘라낼 여유가 없어진다). "
+    "대사는 AI 음성이 그대로 읽는다 — 발음이 꼬이기 쉬운 단어(희귀 복합명사, 받침·경음이 "
+    "연달아 붙는 표현, 예: '귀진드기' 같은 전문 복합어)는 자연스러운 일상어로 풀어 쓴다"
+    "('귀에 사는 진드기', '외이염' 등 또박또박 읽히는 형태). 의학 용어가 꼭 필요하면 짧고 "
+    "발음이 명확한 단어를 고르고, 긴 복합어는 쉼표로 끊어 읽기 쉽게 나눈다. "
     "반드시 팩트체크 가능한 내용만 포함하고, 과장·근거 없는 의학 주장은 금지한다. "
     "출력은 각 비트를 줄바꿈으로 구분해 정확히 4줄로 — 머리말·번호·따옴표 없이 대사 문장만."
 )
@@ -217,6 +221,63 @@ def _split_into_beats(text: str, n: int = 4) -> list[str]:
     return sentences or ([joined] if joined else [])
 
 
+# ==================== 대본 하드룰 파서(2026-07-07 PO 지시) ====================
+# 프롬프트 지시는 모델이 "참고사항"으로 취급해 간헐적으로 어긴다(실측: 의성어·발음
+# 리스크 단어 잔존). 아래 규칙은 코드 레벨로 강제하고, 위반 시 위반 사유를 붙여
+# 자동 재생성한다. 목록은 실측 축적 — 새 사례가 나오면 여기에 추가.
+_BEAT_COUNT = 4
+# 지시상 40~46자지만 하드룰은 완충(재생성 무한루프 방지). 이 범위 밖만 반려.
+_BEAT_MIN_CHARS, _BEAT_MAX_CHARS = 35, 48
+# 의성어 — 대사에 들어가면 Veo가 효과음을 내며 입모양이 어긋난다(립싱크 붕괴 실측:
+# '콜록콜록'). 서술("기침을 한다면")로 풀어 쓰게 강제한다.
+_BANNED_ONOMATOPOEIA = [
+    "콜록", "쿨럭", "캑캑", "에취", "멍멍", "왈왈", "킁킁", "낑낑", "헥헥", "그르렁",
+]
+# 발음 리스크 — Veo TTS가 오발음한 실측 단어 축적('귀진드기'→'귀진득기').
+_PRONUNCIATION_BLOCKLIST = ["귀진드기"]
+# CTA 브랜드명 금지(시스템 프롬프트 지시의 하드룰판).
+_BRAND_BLOCKLIST = ["nutti", "누띠", "누티"]
+
+
+def validate_script_body(body: str) -> list[str]:
+    """대본 하드룰 검증 — 위반 사유 목록을 반환한다(빈 리스트=통과).
+
+    각 사유는 모델에게 재생성 피드백으로 그대로 전달되므로 "무엇을 어떻게 고칠지"
+    형태의 한국어 문장으로 쓴다.
+    """
+    lines = [ln.strip() for ln in (body or "").splitlines() if ln.strip()]
+    violations: list[str] = []
+    if len(lines) != _BEAT_COUNT:
+        violations.append(f"비트가 {len(lines)}줄 — 정확히 {_BEAT_COUNT}줄로 다시 쓸 것")
+    for i, ln in enumerate(lines, start=1):
+        if not (_BEAT_MIN_CHARS <= len(ln) <= _BEAT_MAX_CHARS):
+            violations.append(
+                f"{i}번 비트가 {len(ln)}자 — 공백 포함 40~46자로 다시 쓸 것"
+            )
+        for word in _BANNED_ONOMATOPOEIA:
+            if word in ln:
+                violations.append(
+                    f"{i}번 비트에 의성어 '{word}' — 의성어는 영상에서 입모양과 "
+                    "어긋나므로 금지, 서술형으로 풀어 쓸 것"
+                )
+        for word in _PRONUNCIATION_BLOCKLIST:
+            if word in ln:
+                violations.append(
+                    f"{i}번 비트에 발음이 어려운 단어 '{word}' — 일상어로 풀어 쓸 것"
+                )
+        for word in _BRAND_BLOCKLIST:
+            if word in ln.lower():
+                violations.append(f"{i}번 비트에 브랜드명 '{word}' — 브랜드명 언급 금지")
+    if lines and "!" in lines[-1]:
+        violations.append("마지막 비트에 느낌표 — 차분한 권유체로 느낌표 없이 쓸 것")
+    return violations
+
+
+# 하드룰 위반 시 재생성 횟수(최초 1회 + 재시도 2회). 초과하면 마지막 결과를 그대로
+# 반환하고 경고 로그를 남긴다 — 최종 안전망은 텔레그램 검수①(사람).
+_SCRIPT_MAX_TRIES = 3
+
+
 class AITextClient:
     """Anthropic SDK 래퍼. dry_run이면 더미 대본/메타데이터를 생성한다."""
 
@@ -259,10 +320,46 @@ class AITextClient:
                 fact_checked=True,
             )
 
-        if self._client is None:
-            # 비-dry_run + Anthropic 키 없음 → claude -p(Claude Code) 폴백.
-            return self._generate_via_fallback(topic, prompt)
+        # 라이브 경로(API/폴백 공통): 하드룰 파서 위반 시 위반 사유를 붙여 재생성
+        # (2026-07-07 PO — 프롬프트 지시만으로는 의성어·발음 리스크가 새는 실측).
+        body = ""
+        gen_prompt = prompt
+        for attempt in range(1, _SCRIPT_MAX_TRIES + 1):
+            body = self._generate_body_once(gen_prompt)
+            violations = validate_script_body(body)
+            if not violations:
+                break
+            log.warning(
+                "script.hard_rule_violation",
+                attempt=attempt,
+                violations=violations,
+            )
+            gen_prompt = (
+                f"{prompt}\n[하드룰 위반 — 아래를 반드시 고쳐 대사 4줄만 다시 출력]\n- "
+                + "\n- ".join(violations)
+            )
+        else:
+            # 재시도 소진 — 마지막 결과로 진행(최종 안전망 = 텔레그램 검수①).
+            log.warning("script.hard_rule_gave_up", tries=_SCRIPT_MAX_TRIES)
+        # 실제 모드에서는 호출자가 fact_check_script로 검증/갱신한다.
+        return Script(
+            topic=topic,
+            body=body,
+            prompt=prompt,
+            beats=_split_into_beats(body),
+            fact_checked=False,
+        )
 
+    def _generate_body_once(self, prompt: str) -> str:
+        """대본 본문 1회 생성 — Anthropic API 우선, 키 없으면 claude -p 폴백."""
+        if self._client is None:
+            full = (
+                f"{SCRIPT_SYSTEM_PROMPT}\n\n{prompt}\n\n"
+                "비트별로 정확히 4줄만 출력해줘. 머리말·번호·설명·코드블록 없이 대사 문장만."
+            )
+            body = self._llm_text(full, max_tokens=1024)
+            log.info("script.generated_via_fallback", chars=len(body))
+            return body
         # 시스템 프롬프트에 prompt caching 적용(ephemeral).
         msg = self._client.messages.create(
             model=self.settings.script_model,
@@ -276,15 +373,7 @@ class AITextClient:
             ],
             messages=[{"role": "user", "content": prompt}],
         )
-        body = _first_text(msg)
-        # 실제 모드에서는 호출자가 fact_check_script로 검증/갱신한다.
-        return Script(
-            topic=topic,
-            body=body,
-            prompt=prompt,
-            beats=_split_into_beats(body),
-            fact_checked=False,
-        )
+        return _first_text(msg)
 
     def _claude_cli(self, full_prompt: str) -> str:
         """claude -p(헤드리스 print 모드)로 프롬프트를 보내고 stdout(텍스트)을 반환.
@@ -322,22 +411,6 @@ class AITextClient:
         claude -p가 받지 않으므로 무시한다(시그니처 호환용으로만 유지).
         """
         return self._claude_cli(full_prompt)
-
-    def _generate_via_fallback(self, topic: str, prompt: str) -> Script:
-        """Anthropic API 대신 Claude Code(claude -p)로 대본 생성 — 추가 키/과금 없음."""
-        full = (
-            f"{SCRIPT_SYSTEM_PROMPT}\n\n{prompt}\n\n"
-            "비트별로 정확히 4줄만 출력해줘. 머리말·번호·설명·코드블록 없이 대사 문장만."
-        )
-        body = self._llm_text(full, max_tokens=1024)
-        log.info("script.generated_via_fallback", topic=topic, chars=len(body))
-        return Script(
-            topic=topic,
-            body=body,
-            prompt=prompt,
-            beats=_split_into_beats(body),
-            fact_checked=False,
-        )
 
     def _fact_check_via_fallback(self, script: Script) -> FactCheckResult:
         """Anthropic API 없이 Claude Code(claude -p)로 팩트체크 — 안전 게이트 유지.

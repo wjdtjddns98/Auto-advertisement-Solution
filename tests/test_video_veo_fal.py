@@ -842,11 +842,15 @@ def test_videostudio_veo_fal_endframe_lock_fixes_frames_and_skips_chaining(monke
 
     assert len(veo_fal.calls) == 3
     # 매 비트: 시작 프레임 = 끝 프레임 = 원본 마스코트 프레임 + lock 모드는 모션 해제 프롬프트.
-    for frame_path, prompt, last_frame in veo_fal.calls:
+    for i, (frame_path, prompt, last_frame) in enumerate(veo_fal.calls, start=1):
         assert frame_path == "data/fake/shared_frame.jpg"
         assert last_frame == "data/fake/shared_frame.jpg"
-        # 끝 프레임이 고정되므로 모션을 풀어 생동감을 준다(_MOTION_LIVELY).
-        assert "moves naturally and expressively" in prompt
+        if i < len(veo_fal.calls):
+            # 중간 비트: 끝 프레임 고정이라 모션을 풀되 끝 진정 유지(_MOTION_LIVELY).
+            assert "moves naturally and expressively" in prompt
+        else:
+            # 마지막 비트: 진정 강제 없이 귀여운 행동 자유(_MOTION_FINAL_FREE, 2026-07-06 PO).
+            assert "free to be playful" in prompt
 
 
 def test_videostudio_veo_fal_same_seed_across_beats(monkeypatch):

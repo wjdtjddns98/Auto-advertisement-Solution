@@ -907,6 +907,25 @@ def test_build_beat_mic_only_in_interview_mode():
     assert "microphone" not in direct
 
 
+def test_build_beat_hard_guard_blocks_banned_literal_and_smuggled_quote():
+    """영상 프롬프트 하드가드(2026-07-07 PO): 실측 렌더 사고 리터럴·따옴표 밀반입을
+    과금 전에 ValueError로 차단한다(관례→코드 강제)."""
+    b = VeoPromptBuilder()
+    with pytest.raises(ValueError, match="tripod"):
+        b.build_beat("대사", style=EpisodeStyle("a tripod jacket", "sitting on a bench"))
+    with pytest.raises(ValueError, match="작은따옴표"):
+        b.build_beat("대사", style=EpisodeStyle("a hunter's hat", "sitting on a bench"))
+
+
+def test_frame_prompt_hard_guard_blocks_banned_literal():
+    """프레임 프롬프트도 같은 하드가드 — 브랜드명이 화면 자막으로 렌더되는 사고 차단."""
+    with pytest.raises(ValueError, match="nutti"):
+        VideoStudio._frame_prompt(
+            _script(topic="강아지 간식"),
+            EpisodeStyle("a Nutti hoodie", "sitting on a bench"),
+        )
+
+
 def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
     """모든 프롬프트 템플릿·로테이션 항목에 ASCII 작은따옴표 금지(주입 방어 핀).
 
@@ -922,6 +941,9 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
         VeoPromptBuilder._CAMERA,
         VeoPromptBuilder._MOTION_HOLD,
         VeoPromptBuilder._MOTION_LIVELY,
+        VeoPromptBuilder._MOTION_FINAL_FREE,
+        VeoPromptBuilder._LIPSYNC,
+        VeoPromptBuilder._CTA_VOICE_ANCHOR,
         VeoPromptBuilder._CONTINUITY,
         VeoPromptBuilder._NEGATIVE,
         video_module._MASCOT_APPEARANCE,
@@ -929,6 +951,36 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
     )
     for text in templates + tuple(video_module._EPISODE_OUTFITS + video_module._EPISODE_SETTINGS):
         assert "'" not in text
+
+
+def test_build_beat_final_cta_frees_motion():
+    """마지막 비트(final_cta+lock)는 진정 강제 없이 귀여운 행동 자유(2026-07-06 PO).
+
+    중간 비트는 기존 _MOTION_LIVELY(끝 진정)를 유지해 경계 수렴을 지키고,
+    마지막 비트만 _MOTION_FINAL_FREE로 풀되 화면 이탈·끝 페이드 금지는 남는다.
+    """
+    b = VeoPromptBuilder()
+    final = b.build_beat("대사", motion_release=True, final_cta=True)
+    mid = b.build_beat("대사", motion_release=True, final_cta=False)
+    assert "free to be playful" in final
+    assert "winding down its gestures" not in final  # 진정 강제 해제
+    assert "never leaves the frame" in final  # 최소 깨짐 가드는 유지
+    assert "no fade-out" in final
+    assert "winding down its gestures" in mid  # 중간 비트는 기존 유지
+
+
+def test_build_beat_always_demands_lipsync():
+    """모든 비트 프롬프트에 립싱크 강제 문구 포함(간헐 내레이션화 방지, 2026-07-06 PO)."""
+    b = VeoPromptBuilder()
+    for kwargs in (
+        {},
+        {"motion_release": True},
+        {"motion_release": True, "final_cta": True},
+        {"off_screen_interviewer": False},
+    ):
+        prompt = b.build_beat("대사", **kwargs)
+        assert "mouth clearly opens and moves in sync" in prompt
+        assert "never detached narration" in prompt
 
 
 def test_frame_prompt_includes_episode_style_and_no_microphone():
