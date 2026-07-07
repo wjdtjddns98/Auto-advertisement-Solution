@@ -106,6 +106,15 @@ def test_script_system_prompt_cta_calm_tone():
     assert "느낌표를 쓰지 말 것" in SCRIPT_SYSTEM_PROMPT
 
 
+def test_topic_system_prompt_bans_brand_in_topic():
+    """주제 프롬프트의 브랜드명 금지 리버트 가드(리뷰 medium — 주제가 영상 장면 묘사에
+    삽입되므로 브랜드명 리터럴이 화면 자막으로 렌더되는 사고 경로)."""
+    from nutti.integrations.ai_text import TOPIC_SYSTEM_PROMPT
+
+    assert "브랜드명" in TOPIC_SYSTEM_PROMPT
+    assert "절대 넣지 않는다" in TOPIC_SYSTEM_PROMPT
+
+
 def test_script_system_prompt_pins_pronunciation_guidance():
     """발음 리스크 지시 리버트 가드(2026-07-06 PO: '귀진드기'→'귀진득기' 오발음 실측).
 
