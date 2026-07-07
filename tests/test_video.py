@@ -577,8 +577,8 @@ def test_produce_clips_caption_failure_keeps_stitched(tmp_path, monkeypatch):
     assert stitched.exists()
 
 
-def test_produce_clips_caption_off_by_default_skips_burn(tmp_path, monkeypatch):
-    """caption_burn 기본값(False)이면 _burn_captions를 아예 호출하지 않는다(PO 판정)."""
+def test_produce_clips_caption_on_by_default_invokes_burn(tmp_path, monkeypatch):
+    """caption_burn 기본값(True)이면 _burn_captions를 호출한다(2줄/26px 승인 후 재활성, PO 판정)."""
     calls: list[str] = []
     clip = tmp_path / "clip1.mp4"
     clip.write_bytes(b"clip")
@@ -594,6 +594,37 @@ def test_produce_clips_caption_off_by_default_skips_burn(tmp_path, monkeypatch):
 
     studio = VideoStudio(
         _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), veo_fal_client=_FakeVeo()
+    )
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
+    monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durs: str(stitched))
+    monkeypatch.setattr(
+        VideoStudio,
+        "_burn_captions",
+        lambda self, *a, **kw: calls.append("burn"),
+    )
+    final, _total = studio._produce_clips_veo_fal("frame.png", ["비트1"], pick_episode_style("x"))
+    assert calls == ["burn"]
+    assert final == str(stitched)
+
+
+def test_produce_clips_caption_explicit_off_skips_burn(tmp_path, monkeypatch):
+    """NUTTI_CAPTION_BURN=false로 명시적으로 끄면 _burn_captions를 호출하지 않는다."""
+    calls: list[str] = []
+    clip = tmp_path / "clip1.mp4"
+    clip.write_bytes(b"clip")
+    stitched = tmp_path / "stitched.mp4"
+    stitched.write_bytes(b"stitched")
+
+    class _FakeVeo:
+        def generate(self, frame_path, prompt, last_frame_path=None, seed=None):
+            return str(clip)
+
+        def close(self):
+            pass
+
+    studio = VideoStudio(
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_BURN="false"),
+        veo_fal_client=_FakeVeo(),
     )
     monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
     monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durs: str(stitched))
@@ -767,7 +798,9 @@ def test_produce_clips_similarity_failure_falls_back_to_existing_trim(tmp_path, 
         "warning",
         lambda event, **kw: warnings.append({"event": event, **kw}),
     )
-    studio, stitched, clip_paths, captured = _sim_stitch_studio(tmp_path, monkeypatch)
+    studio, stitched, clip_paths, captured = _sim_stitch_studio(
+        tmp_path, monkeypatch, NUTTI_CAPTION_BURN="false"
+    )
     monkeypatch.setattr(
         VideoStudio, "_find_similarity_cuts", lambda self, a, b, se, ss: None, raising=True
     )
@@ -1448,7 +1481,8 @@ def test_produce_clips_qc_retry_regenerates_bad_clip(tmp_path, monkeypatch):
 
     veo = _FakeVeo()
     studio = VideoStudio(
-        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), veo_fal_client=veo
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_BURN="false"),
+        veo_fal_client=veo,
     )
     monkeypatch.setattr(
         VideoStudio,
@@ -1492,7 +1526,8 @@ def test_produce_clips_qc_fallback_after_max_retries(tmp_path, monkeypatch):
 
     veo = _FakeVeo()
     studio = VideoStudio(
-        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), veo_fal_client=veo
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_BURN="false"),
+        veo_fal_client=veo,
     )
     # 항상 불량 판정 → 상한(qc_max_retries=2)까지 재생성 후 폴백 수용.
     monkeypatch.setattr(

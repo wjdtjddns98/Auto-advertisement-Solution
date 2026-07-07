@@ -119,10 +119,10 @@ class Settings(BaseSettings):
     # 얼굴이 화면 상단에 있어 크롭 세로 기준은 상단 1/3. 권장 1.08~1.15.
     veo_fal_punch_in_scale: float = Field(default=1.12, alias="NUTTI_VEO_FAL_PUNCH_IN_SCALE")
     # 비트별 대사를 하단 한글 자막으로 굽기(스티칭 후 ffmpeg drawtext, best-effort).
-    # 기본 False — 실전 시사에서 PO가 "자막 화면 표시 이상함" 판정(2026-07-06, run
-    # d10681d2ac84 반려). 스타일 개선 후 재시도할 때만 명시적으로 켤 것. 켜더라도
-    # Veo가 임의로 박는 깨진 자막은 negative_prompt로 계속 막는다(별개 방어).
-    caption_burn: bool = Field(default=False, alias="NUTTI_CAPTION_BURN")
+    # 기본 True — 2줄/26px 렌더 결과를 PO가 승인(2026-07-07, 최초 "이상함" 판정 시의
+    # 렌더 결함은 26px 수정으로 이미 해소됨). Veo가 임의로 박는 깨진 자막은
+    # negative_prompt로 계속 막는다(별개 방어).
+    caption_burn: bool = Field(default=True, alias="NUTTI_CAPTION_BURN")
     # 자막 폰트 파일 경로. 비우면 OS 기본 후보 탐색(Windows 맑은고딕 → Noto CJK → 나눔).
     caption_font: str = Field(default="", alias="NUTTI_CAPTION_FONT")
     # 자막 글자 크기(px, 720px 폭 기준). 실전 시사에서 40은 "너무 크다"(2026-07-06 PO) —
