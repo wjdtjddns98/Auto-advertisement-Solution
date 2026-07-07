@@ -1125,6 +1125,21 @@ def test_frame_prompt_hard_guard_blocks_banned_literal():
         )
 
 
+def test_frame_prompt_strips_banned_literals_from_topic():
+    """AI 생성 주제의 금지 리터럴은 크래시가 아니라 결정적으로 제거된다(리뷰 medium).
+
+    주제 자동생성이 브랜드명을 섞어 와도 파이프라인이 무복구 크래시하지 않는다 —
+    사람이 고치는 PO 수정 구역(의상·장소)의 시끄러운 실패와 의도된 비대칭.
+    """
+    style = EpisodeStyle("a cozy cream knitted sweater", "sitting on a park bench")
+    prompt = VideoStudio._frame_prompt(
+        _script(topic="Nutti 간식과 9:16 쇼츠로 보는 강아지 건강"), style
+    )
+    assert "nutti" not in prompt.lower()
+    assert "9:16" not in prompt
+    assert "강아지 건강" in prompt  # 나머지 주제 문안은 보존
+
+
 def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
     """모든 프롬프트 템플릿·로테이션 항목에 ASCII 작은따옴표 금지(주입 방어 핀).
 

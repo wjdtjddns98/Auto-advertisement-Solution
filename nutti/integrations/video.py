@@ -19,6 +19,7 @@ HTTP 상태·전송·JSON 파싱·디스크 쓰기 실패 전부 포함(오케�
 
 from __future__ import annotations
 
+import re
 import time
 import zlib
 from pathlib import Path
@@ -1632,6 +1633,13 @@ class VideoStudio:
         (작은따옴표 치환 + 길이 제한 — 간접 프롬프트 주입 심층 방어).
         """
         topic = _sanitize_prompt_text(script.topic, _MAX_TOPIC_CHARS)
+        # 주제는 AI 생성물 — 금지 리터럴(브랜드명 등)이 섞여 오면 크래시 대신 결정적으로
+        # 제거하고 진행한다(리뷰 medium: 대본 파서는 회복형인데 프레임 가드만 무복구
+        # 크래시인 설계 비대칭 해소). 사람이 직접 고치는 PO 수정 구역(의상·장소)은
+        # 반대로 시끄럽게 실패(_validate_visual_prompt)하는 것이 맞다 — 의도된 비대칭.
+        for banned in _PROMPT_BANNED_LITERALS:
+            topic = re.sub(re.escape(banned), "", topic, flags=re.IGNORECASE)
+        topic = " ".join(topic.split())
         # (아래 조립 결과는 반환 직전에 _validate_visual_prompt로 하드가드 — 2026-07-07 PO)
         # ===================== PO 수정 구역 (첫 장면 비주얼) =====================
         # 영상 "첫 장면의 구도·표정·마이크 연출"을 바꾸려면 아래 영어 묘사를 고친다.
