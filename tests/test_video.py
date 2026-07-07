@@ -907,6 +907,25 @@ def test_build_beat_mic_only_in_interview_mode():
     assert "microphone" not in direct
 
 
+def test_build_beat_hard_guard_blocks_banned_literal_and_smuggled_quote():
+    """영상 프롬프트 하드가드(2026-07-07 PO): 실측 렌더 사고 리터럴·따옴표 밀반입을
+    과금 전에 ValueError로 차단한다(관례→코드 강제)."""
+    b = VeoPromptBuilder()
+    with pytest.raises(ValueError, match="tripod"):
+        b.build_beat("대사", style=EpisodeStyle("a tripod jacket", "sitting on a bench"))
+    with pytest.raises(ValueError, match="작은따옴표"):
+        b.build_beat("대사", style=EpisodeStyle("a hunter's hat", "sitting on a bench"))
+
+
+def test_frame_prompt_hard_guard_blocks_banned_literal():
+    """프레임 프롬프트도 같은 하드가드 — 브랜드명이 화면 자막으로 렌더되는 사고 차단."""
+    with pytest.raises(ValueError, match="nutti"):
+        VideoStudio._frame_prompt(
+            _script(topic="강아지 간식"),
+            EpisodeStyle("a Nutti hoodie", "sitting on a bench"),
+        )
+
+
 def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
     """모든 프롬프트 템플릿·로테이션 항목에 ASCII 작은따옴표 금지(주입 방어 핀).
 
