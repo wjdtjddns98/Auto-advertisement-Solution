@@ -802,22 +802,28 @@ class VideoStudio:
                     motion_release=lock,
                     final_cta=(i == len(beats)),
                 )
-                if lock:
-                    # 시작·끝 모두 마스코트 프레임으로 고정(끝프레임 고정 모드).
-                    clip_path = client.generate(
-                        frame_path, prompt, last_frame_path=frame_path, seed=video_seed
+                # 생성 + 끝 잉여 고정 트림(글리치 온상 제거, 8초→약7초, 2026-06-29 PO).
+                # QC 재생성이 같은 단계를 다시 밟도록 헬퍼로 묶었다.
+                clip_path = self._generate_and_trim_clip(
+                    client, prompt, current_frame, frame_path, lock, video_seed
+                )
+                # 클립 QC 레이어(2026-07-07 PO): 중간 프리즈·블랙·무발화·꼬리 미수렴을
+                # 잡아 그 비트만 재생성한다. 상한(qc_max_retries) 초과 시 현행 트림·마스킹
+                # 폴백으로 그대로 수용한다 — 여기서 예외/실패로 파이프라인을 죽이지 않는다.
+                reasons = self._qc_check_beat(clip_path, frame_path, lock)
+                attempt = 0
+                while reasons and attempt < self.settings.qc_max_retries:
+                    attempt += 1
+                    log.info(
+                        "video.veo_fal.qc.retry", beat=i, attempt=attempt, reasons=reasons
                     )
-                else:
-                    clip_path = client.generate(current_frame, prompt, seed=video_seed)
-                # 끝 잉여 구간(글리치·이상동작 온상) 강제 제거: 8초→약7초(2026-06-29 PO).
-                # 트림 성공 시 원본 8초 클립은 즉시 삭제(잔존 방지). 이후 체이닝 끝프레임
-                # 추출·무음 트림은 모두 트림된 클립 기준 — 글리치 구간이 다음 단계에도 안 샌다.
-                tail = self.settings.veo_fal_clip_tail_trim_sec
-                if tail > 0:
-                    cut = self._trim_tail_fixed(clip_path, tail)
-                    if cut != clip_path:
-                        Path(clip_path).unlink(missing_ok=True)
-                        clip_path = cut
+                    Path(clip_path).unlink(missing_ok=True)
+                    clip_path = self._generate_and_trim_clip(
+                        client, prompt, current_frame, frame_path, lock, video_seed
+                    )
+                    reasons = self._qc_check_beat(clip_path, frame_path, lock)
+                if reasons:
+                    log.info("video.veo_fal.qc.fallback", beat=i, reasons=reasons)
                 log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
                 clips.append(clip_path)
                 # 가드된 체이닝(기본 모드만): 다음 비트가 있으면 이 클립의 끝 안정 프레임을
@@ -1284,6 +1290,175 @@ class VideoStudio:
         if cut.returncode != 0 or not Path(out).exists():
             return None
         return out
+
+    def _extract_gray_frame_from_image(self, path: str) -> bytes | None:
+        """이미지 파일 1장을 유사도 비교용 저해상도 그레이스케일 raw 바이트로 뽑는다.
+
+        `_extract_gray_frames`의 이미지 단발 버전 — 꼬리 수렴 판정의 기준 프레임
+        (고정 마스코트 프레임)을 뽑는 데 쓴다. 어떤 실패(ffmpeg 오류·짧은 출력)든 None을
+        돌려 QC가 판단을 보류하도록 한다(best-effort, 파이프라인 비차단).
+        """
+        import subprocess
+
+        import imageio_ffmpeg
+
+        try:
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+            res = subprocess.run(
+                [ff, "-hide_banner", "-i", path, "-vf",
+                 f"scale={_SIM_W}:{_SIM_H},format=gray",
+                 "-f", "rawvideo", "-frames:v", "1", "-"],
+                capture_output=True,
+                timeout=15,
+            )
+            raw = res.stdout or b""
+            frame_size = _SIM_W * _SIM_H
+            if len(raw) < frame_size:
+                return None
+            return raw[:frame_size]
+        except Exception:
+            return None
+
+    def _qc_freeze_black(self, clip_path: str, dur: float) -> list[str]:
+        """클립에서 중간 프리즈/블랙프레임 구간을 검출해 사유 리스트를 반환한다.
+
+        ffmpeg freezedetect·blackdetect를 한 번에 돌려 stderr의 freeze/black 구간을
+        파싱한다. 끝프레임 고정 모드는 클립이 같은 정적 마스코트 프레임에서 시작·종료하므로
+        가장자리(`qc_edge_ignore_sec` 이내) 프리즈/블랙은 의도된 것 — 그 구간에 걸친 창은
+        무시하고, 클립 중간에서 시작·종료하는 창만 결함으로 센다. 파싱/서브프로세스 실패는
+        빈 리스트로 폴백한다(best-effort, 절대 파이프라인을 막지 않음).
+        """
+        import re
+        import subprocess
+
+        import imageio_ffmpeg
+
+        try:
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+            edge = self.settings.qc_edge_ignore_sec
+            vf = (
+                f"freezedetect=n=-60dB:d={self.settings.qc_freeze_min_sec},"
+                f"blackdetect=d={self.settings.qc_black_min_sec}:pic_th=0.98"
+            )
+            res = subprocess.run(
+                [ff, "-hide_banner", "-i", clip_path, "-vf", vf, "-f", "null", "-"],
+                capture_output=True,
+            )
+            err = (res.stderr or b"").decode("utf-8", "replace")
+
+            def has_mid(starts: list[str], ends: list[str]) -> bool:
+                for k, s in enumerate(starts):
+                    st = float(s)
+                    if k < len(ends):
+                        # 양끝 다 있는 창: 클립 중간에서 시작·종료해야 결함(가장자리 정적
+                        # 프레임은 정상).
+                        if st > edge and float(ends[k]) < dur - edge:
+                            return True
+                    # 종료 라인 없음 = 회복 없이 EOF까지 지속. 끝 가장자리 전에 시작했으면
+                    # 무조건 결함 — 중간~끝 내내 얼어붙은 최악 케이스(QC가 잡아야 할 바로
+                    # 그 상황)를 en=dur로 면제하던 버그를 막는다(리뷰 지적, HIGH).
+                    elif st < dur - edge:
+                        return True
+                return False
+
+            reasons: list[str] = []
+            if has_mid(
+                re.findall(r"freeze_start:\s*([0-9.]+)", err),
+                re.findall(r"freeze_end:\s*([0-9.]+)", err),
+            ):
+                reasons.append("mid_freeze")
+            if has_mid(
+                re.findall(r"black_start:\s*([0-9.]+)", err),
+                re.findall(r"black_end:\s*([0-9.]+)", err),
+            ):
+                reasons.append("black_frame")
+            return reasons
+        except Exception:
+            return []
+
+    def _qc_tail_convergence(self, clip_path: str, frame_path: str, dur: float) -> str | None:
+        """클립 꼬리가 고정 마스코트 프레임으로 수렴하지 못했으면 사유를, 아니면 None을 반환.
+
+        끝프레임 고정 모드에서만 의미가 있다(모든 클립이 같은 프레임으로 수렴해야 함).
+        마지막 `qc_tail_window_sec`초를 샘플링해, 마지막 프레임이 기준(고정) 프레임에서
+        여전히 멀고(`mad_ref`) **동시에** 아직 눈에 띄게 변하는 중(`mad_delta`)일 때만
+        "tail_not_converged"를 낸다 — 기준에 가깝거나, 다른 포즈지만 안정된 클립은 오검출
+        하지 않는다(두 조건 AND). 샘플 부족·기준 추출 실패·바이트 길이 불일치·기타 실패는
+        None(판단 보류)으로 돌려 파이프라인을 막지 않는다.
+        """
+        try:
+            start = max(0.0, dur - self.settings.qc_tail_window_sec)
+            tail = self._extract_gray_frames(clip_path, start, dur - start)
+            ref = self._extract_gray_frame_from_image(frame_path)
+            if len(tail) < 2 or ref is None:
+                return None
+            last = tail[-1]
+            second = tail[-2]
+            if len(last) != len(ref) or len(second) != len(last):
+                return None
+            mad_ref = _frame_mad(last, ref)
+            mad_delta = _frame_mad(second, last)
+            if (
+                mad_ref > self.settings.qc_tail_converge_mad_max
+                and mad_delta > self.settings.qc_tail_delta_max
+            ):
+                return "tail_not_converged"
+            return None
+        except Exception:
+            return None
+
+    def _qc_check_beat(self, clip_path: str, frame_path: str, lock: bool) -> list[str]:
+        """한 비트 클립의 QC 사유 리스트를 모아 반환한다(빈 리스트 = 통과).
+
+        검사: ①중간 프리즈/블랙(_qc_freeze_black) ②무발화(트림 실측 발화 길이가
+        `qc_min_speech_sec` 미만) ③(lock 모드) 꼬리 미수렴(_qc_tail_convergence).
+        `_trim_to_speech`는 발화 길이 측정용으로만 호출하고, 새로 만든 트림 파일은 즉시
+        삭제한다 — 실제 대량 트림은 기존 후처리에서 그대로 수행한다. 어떤 검사도 파이프라인을
+        막지 않도록 best-effort로 동작한다(qc_enabled=False면 즉시 빈 리스트).
+        """
+        if not self.settings.qc_enabled:
+            return []
+        reasons: list[str] = []
+        try:
+            dur = self._probe_duration_sec(clip_path)
+        except Exception:
+            dur = None
+        if dur is not None:
+            reasons.extend(self._qc_freeze_black(clip_path, dur))
+        trimmed, speech_sec = self._trim_to_speech(clip_path)
+        if trimmed != clip_path:
+            Path(trimmed).unlink(missing_ok=True)
+        if speech_sec is not None and speech_sec < self.settings.qc_min_speech_sec:
+            reasons.append("short_speech")
+        if lock and dur is not None:
+            tail_reason = self._qc_tail_convergence(clip_path, frame_path, dur)
+            if tail_reason is not None:
+                reasons.append(tail_reason)
+        return reasons
+
+    def _generate_and_trim_clip(
+        self, client, prompt: str, current_frame: str, frame_path: str,
+        lock: bool, seed: int | None,
+    ) -> str:
+        """비트 클립 1개를 생성하고 끝 잉여 고정 트림까지 마친 경로를 반환한다.
+
+        QC 재생성이 같은 단계를 다시 밟을 수 있도록 "생성 + tail-trim"을 헬퍼로 묶었다.
+        끝 잉여 구간(글리치·이상동작 온상)은 트림 후 원본을 즉시 삭제한다(잔존 방지).
+        """
+        if lock:
+            # 시작·끝 모두 마스코트 프레임으로 고정(끝프레임 고정 모드).
+            clip_path = client.generate(
+                frame_path, prompt, last_frame_path=frame_path, seed=seed
+            )
+        else:
+            clip_path = client.generate(current_frame, prompt, seed=seed)
+        tail = self.settings.veo_fal_clip_tail_trim_sec
+        if tail > 0:
+            cut = self._trim_tail_fixed(clip_path, tail)
+            if cut != clip_path:
+                Path(clip_path).unlink(missing_ok=True)
+                clip_path = cut
+        return clip_path
 
     def _stitch(
         self,
