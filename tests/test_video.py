@@ -1293,3 +1293,222 @@ def test_veo_fal_negative_prompt_default_suppresses_background_music():
     neg = Settings(NUTTI_DRY_RUN=True).veo_fal_negative_prompt
     assert "background music" in neg
     assert "instrumental" in neg
+
+
+# --- 클립 QC 레이어(_qc_freeze_black / _qc_tail_convergence / _qc_check_beat / 재생성) ---
+
+
+def _fake_stderr_run(stderr: str):
+    """stderr만 채운 가짜 subprocess.run 팩토리(freeze/black 파싱 검증용)."""
+    data = stderr.encode()
+
+    def fake_run(cmd, **kw):
+        class _R:
+            returncode = 0
+            stderr = data
+            stdout = b""
+
+        return _R()
+
+    return fake_run
+
+
+def test_qc_freeze_black_detects_mid_freeze_ignores_edge(tmp_path, monkeypatch):
+    """중간 프리즈는 검출하고, 클립 시작 가장자리(끝프레임 고정 정적 프레임) 프리즈는 무시."""
+    import subprocess as _sp
+
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    # dur=8, edge=0.5. 3.0~4.0은 중간 → 검출.
+    monkeypatch.setattr(
+        _sp, "run", _fake_stderr_run("freeze_start: 3.0\nfreeze_end: 4.0\n")
+    )
+    assert "mid_freeze" in studio._qc_freeze_black("clip.mp4", 8.0)
+    # 0.1~0.3은 시작 가장자리(edge 0.5 이내) → 무시.
+    monkeypatch.setattr(
+        _sp, "run", _fake_stderr_run("freeze_start: 0.1\nfreeze_end: 0.3\n")
+    )
+    assert "mid_freeze" not in studio._qc_freeze_black("clip.mp4", 8.0)
+
+
+def test_qc_freeze_black_detects_unterminated_freeze(tmp_path, monkeypatch):
+    """freeze_start만 있고 freeze_end가 없는(EOF까지 지속) 프리즈도 결함으로 잡는다.
+
+    freezedetect는 프리즈가 클립 끝까지 이어지면 freeze_end를 안 낸다 — 중간에 얼어붙어
+    회복 못 한 최악 케이스(QC 존재 이유)가 en=dur 면제로 새던 버그(리뷰 HIGH) 회귀 핀.
+    """
+    import subprocess as _sp
+
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    # dur=8, edge=0.5. 3.0에서 얼어붙고 freeze_end 없음(EOF까지) → mid_freeze.
+    monkeypatch.setattr(_sp, "run", _fake_stderr_run("freeze_start: 3.0\n"))
+    assert "mid_freeze" in studio._qc_freeze_black("clip.mp4", 8.0)
+    # 종료 라인 없더라도 시작이 끝 가장자리(7.5s) 이후면 정상(끝 정적 프레임) → 무시.
+    monkeypatch.setattr(_sp, "run", _fake_stderr_run("freeze_start: 7.9\n"))
+    assert "mid_freeze" not in studio._qc_freeze_black("clip.mp4", 8.0)
+
+
+def test_qc_freeze_black_detects_mid_black(tmp_path, monkeypatch):
+    """클립 중간의 블랙프레임 구간을 black_frame으로 검출한다."""
+    import subprocess as _sp
+
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    monkeypatch.setattr(
+        _sp,
+        "run",
+        _fake_stderr_run("black_start:2.0 black_end:3.0 black_duration:1.0\n"),
+    )
+    assert "black_frame" in studio._qc_freeze_black("clip.mp4", 8.0)
+
+
+def test_qc_tail_convergence_flags_far_and_changing_else_none(tmp_path, monkeypatch):
+    """마지막 프레임이 기준에서 멀고 아직 변하는 중일 때만 tail_not_converged를 낸다."""
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    frame_size = video_module._SIM_W * video_module._SIM_H
+    tail = [
+        bytes([50]) * frame_size,
+        bytes([100]) * frame_size,
+        bytes([200]) * frame_size,
+    ]
+    monkeypatch.setattr(VideoStudio, "_extract_gray_frames", lambda self, c, s, d: tail)
+
+    # 기준=0 → mad_ref=200(>20), delta=|100-200|=100(>8) → 플래그.
+    monkeypatch.setattr(
+        VideoStudio, "_extract_gray_frame_from_image", lambda self, p: bytes([0]) * frame_size
+    )
+    assert studio._qc_tail_convergence("clip.mp4", "frame.png", 8.0) == "tail_not_converged"
+
+    # 기준이 마지막과 동일 → mad_ref=0(수렴) → None.
+    monkeypatch.setattr(
+        VideoStudio,
+        "_extract_gray_frame_from_image",
+        lambda self, p: bytes([200]) * frame_size,
+    )
+    assert studio._qc_tail_convergence("clip.mp4", "frame.png", 8.0) is None
+
+    # 기준 추출 실패(None) → 판단 보류 None.
+    monkeypatch.setattr(VideoStudio, "_extract_gray_frame_from_image", lambda self, p: None)
+    assert studio._qc_tail_convergence("clip.mp4", "frame.png", 8.0) is None
+
+
+def test_qc_check_beat_flags_short_speech(tmp_path, monkeypatch):
+    """발화 실측 길이가 qc_min_speech_sec 미만이면 short_speech를 낸다."""
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    monkeypatch.setattr(VideoStudio, "_probe_duration_sec", lambda self, c: None)
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 0.4))
+    reasons = studio._qc_check_beat("clip.mp4", "frame.png", lock=False)
+    assert "short_speech" in reasons
+
+
+def test_qc_check_beat_deletes_measurement_trim_file(tmp_path, monkeypatch):
+    """발화 측정용으로 새로 만든 트림 파일은 즉시 삭제한다(실측만 취함)."""
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    trimmed = tmp_path / "veo_fal_trim_x.mp4"
+    trimmed.write_bytes(b"t")
+    monkeypatch.setattr(VideoStudio, "_probe_duration_sec", lambda self, c: None)
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (str(trimmed), 5.0))
+    studio._qc_check_beat("clip.mp4", "frame.png", lock=False)
+    assert not trimmed.exists()
+
+
+def test_qc_check_beat_disabled_returns_empty(tmp_path, monkeypatch):
+    """qc_enabled=False면 어떤 검사도 실행하지 않고 빈 리스트를 돌려준다."""
+    studio = VideoStudio(
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_QC_ENABLED="false")
+    )
+
+    def boom(*a, **k):
+        raise AssertionError("QC 비활성인데 검사가 실행됨")
+
+    monkeypatch.setattr(VideoStudio, "_probe_duration_sec", boom)
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", boom)
+    assert studio._qc_check_beat("clip.mp4", "frame.png", lock=True) == []
+
+
+def test_produce_clips_qc_retry_regenerates_bad_clip(tmp_path, monkeypatch):
+    """QC가 불량으로 판정하면 그 비트만 재생성하고 재생성 클립을 최종 사용한다."""
+    bad = tmp_path / "bad.mp4"
+    bad.write_bytes(b"bad")
+    good = tmp_path / "good.mp4"
+    good.write_bytes(b"good")
+    stitched = tmp_path / "stitched.mp4"
+    stitched.write_bytes(b"s")
+    seq = [str(bad), str(good)]
+
+    class _FakeVeo:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, frame_path, prompt, last_frame_path=None, seed=None):
+            path = seq[self.calls]
+            self.calls += 1
+            return path
+
+        def close(self):
+            pass
+
+    veo = _FakeVeo()
+    studio = VideoStudio(
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), veo_fal_client=veo
+    )
+    monkeypatch.setattr(
+        VideoStudio,
+        "_qc_check_beat",
+        lambda self, clip, frame, lock: ["mid_freeze"] if clip == str(bad) else [],
+    )
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
+    captured: dict = {}
+
+    def fake_stitch(self, clips, durs=None, **kw):
+        captured["clips"] = list(clips)
+        return str(stitched)
+
+    monkeypatch.setattr(VideoStudio, "_stitch", fake_stitch)
+    final, _total = studio._produce_clips_veo_fal(
+        "frame.png", ["비트1"], pick_episode_style("x")
+    )
+    assert final == str(stitched)
+    assert veo.calls == 2  # 최초 불량 + 재생성 1회
+    assert captured["clips"] == [str(good)]  # 재생성 클립이 최종 사용
+    assert not bad.exists()  # 불량 클립은 재생성 전에 삭제
+
+
+def test_produce_clips_qc_fallback_after_max_retries(tmp_path, monkeypatch):
+    """재생성 상한을 넘겨도 예외 없이 마지막(여전히 불량) 클립을 그대로 수용한다."""
+    made: list[str] = []
+
+    class _FakeVeo:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, frame_path, prompt, last_frame_path=None, seed=None):
+            p = tmp_path / f"bad_{self.calls}.mp4"
+            p.write_bytes(b"b")
+            self.calls += 1
+            made.append(str(p))
+            return str(p)
+
+        def close(self):
+            pass
+
+    veo = _FakeVeo()
+    studio = VideoStudio(
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), veo_fal_client=veo
+    )
+    # 항상 불량 판정 → 상한(qc_max_retries=2)까지 재생성 후 폴백 수용.
+    monkeypatch.setattr(
+        VideoStudio, "_qc_check_beat", lambda self, c, f, lock: ["short_speech"]
+    )
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
+    captured: dict = {}
+
+    def fake_stitch(self, clips, durs=None, **kw):
+        captured["clips"] = list(clips)
+        return str(tmp_path / "final.mp4")
+
+    monkeypatch.setattr(VideoStudio, "_stitch", fake_stitch)
+    final, _total = studio._produce_clips_veo_fal(
+        "frame.png", ["비트1"], pick_episode_style("x")
+    )
+    assert final == str(tmp_path / "final.mp4")
+    assert veo.calls == 3  # 최초 1회 + 상한 2회
+    assert captured["clips"] == [made[-1]]  # 마지막 불량 클립 그대로 사용

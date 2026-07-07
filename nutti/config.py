@@ -164,6 +164,22 @@ class Settings(BaseSettings):
     # 완전히 끄고 기존 고정 트림 경로만 쓴다.
     stitch_sim_threshold: float = Field(default=18.0, alias="NUTTI_STITCH_SIM_THRESHOLD")
 
+    # 비트 클립 QC 레이어(2026-07-07 PO 지시). 각 비트 클립이 스티칭에 도달하기 전에
+    # 중간 프리즈·블랙프레임·무발화·꼬리 미수렴을 잡아 그 비트만 재생성한다(상한 초과 시
+    # 현행 트림·마스킹 폴백). 아래 MAD 임계값들은 미검증 기본값으로, 6차 라이브 런에서 실측
+    # 보정할 예정이다 — 지금은 보수적으로 두어 정상 클립을 오검출하지 않는 쪽에 무게를 둔다.
+    qc_enabled: bool = Field(default=True, alias="NUTTI_QC_ENABLED")
+    qc_max_retries: int = Field(default=2, alias="NUTTI_QC_MAX_RETRIES")
+    qc_freeze_min_sec: float = Field(default=0.5, alias="NUTTI_QC_FREEZE_MIN_SEC")
+    qc_black_min_sec: float = Field(default=0.3, alias="NUTTI_QC_BLACK_MIN_SEC")
+    qc_edge_ignore_sec: float = Field(default=0.5, alias="NUTTI_QC_EDGE_IGNORE_SEC")
+    qc_min_speech_sec: float = Field(default=1.0, alias="NUTTI_QC_MIN_SPEECH_SEC")
+    qc_tail_window_sec: float = Field(default=1.0, alias="NUTTI_QC_TAIL_WINDOW_SEC")
+    qc_tail_converge_mad_max: float = Field(
+        default=20.0, alias="NUTTI_QC_TAIL_CONVERGE_MAD_MAX"
+    )
+    qc_tail_delta_max: float = Field(default=8.0, alias="NUTTI_QC_TAIL_DELTA_MAX")
+
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
     google_service_account_json: str = Field(default="", alias="GOOGLE_SERVICE_ACCOUNT_JSON")
