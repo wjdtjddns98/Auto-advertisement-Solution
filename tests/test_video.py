@@ -1481,7 +1481,8 @@ def test_produce_clips_qc_retry_regenerates_bad_clip(tmp_path, monkeypatch):
 
     veo = _FakeVeo()
     studio = VideoStudio(
-        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), veo_fal_client=veo
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_BURN="false"),
+        veo_fal_client=veo,
     )
     monkeypatch.setattr(
         VideoStudio,
@@ -1525,7 +1526,8 @@ def test_produce_clips_qc_fallback_after_max_retries(tmp_path, monkeypatch):
 
     veo = _FakeVeo()
     studio = VideoStudio(
-        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), veo_fal_client=veo
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_BURN="false"),
+        veo_fal_client=veo,
     )
     # 항상 불량 판정 → 상한(qc_max_retries=2)까지 재생성 후 폴백 수용.
     monkeypatch.setattr(
