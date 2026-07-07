@@ -781,6 +781,43 @@ def test_produce_clips_similarity_failure_falls_back_to_existing_trim(tmp_path, 
     assert captured["durs"] == [7.0, 7.0]
 
 
+def test_produce_clips_similarity_success_replaces_cuts(tmp_path, monkeypatch):
+    """best_diff<=임계면 유사도 컷으로 양쪽 클립을 실제 교체해 _stitch에 넘긴다(성공 경로).
+
+    리뷰 지적(테스트 갭): 이 기능의 존재 이유인 성공 경로가 미검증이었다 — 원본 재컷
+    호출 범위·심컷 파일/재계산 길이의 _stitch 전달·스티칭 후 임시파일 정리까지 핀한다.
+    """
+    studio, stitched, clip_paths, captured = _sim_stitch_studio(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        VideoStudio,
+        "_find_similarity_cuts",
+        lambda self, a, b, se, ss: (7.6, 0.0, 1.5),  # 1.5 <= 기본 임계 18.0 → 컷 채택
+        raising=True,
+    )
+    cut_calls: list[tuple[float, float]] = []
+
+    def fake_cut(self, clip, start, end):
+        p = tmp_path / f"simcut_{len(cut_calls)}.mp4"
+        p.write_bytes(b"cut")
+        cut_calls.append((start, end))
+        return str(p)
+
+    monkeypatch.setattr(VideoStudio, "_cut_clip_range", fake_cut, raising=True)
+    final, _total = studio._produce_clips_veo_fal(
+        "frame.png", ["비트1", "비트2"], pick_episode_style("x")
+    )
+    assert final == stitched
+    # 경계 0→1: A는 [0, cut_a=7.6), B는 [cut_b=0.0, 발화끝 7.0)으로 원본에서 재컷.
+    assert cut_calls == [(0.0, 7.6), (0.0, 7.0)]
+    # _stitch에는 기존 트림이 아니라 심컷 파일 + 재계산 길이가 전달된다.
+    assert captured["clips"] != clip_paths
+    assert all("simcut_" in p for p in captured["clips"])
+    assert captured["durs"] == [7.6, 7.0]
+    assert "boundary_dissolves" not in captured["kwargs"]  # 불일치 없음 → 기본 디졸브
+    # 심컷 임시파일은 스티칭 후 정리된다.
+    assert not list(tmp_path.glob("simcut_*.mp4"))
+
+
 def test_produce_clips_similarity_disabled_skips_search(tmp_path, monkeypatch):
     """stitch_sim_threshold<=0이면 유사도 탐색 자체를 호출하지 않는다(완전 미개입)."""
 
