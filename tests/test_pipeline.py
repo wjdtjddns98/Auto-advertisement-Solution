@@ -207,12 +207,49 @@ def test_analysis_feedback_loop(tmp_path):
     orch = Orchestrator(
         _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
     )
-    run = orch.run("강아지 간식")
-    analysis = orch.collect_and_analyze(run)
+    # run은 업로드를 대기 큐에 넣는다(즉시 분석하지 않음).
+    orch.run("강아지 간식")
+    assert state.get_pending_uploads()  # 업로드가 큐에 등록됨
+    # dry_run은 숙성 지연이 없으니 collect가 즉시 수집·분석한다.
+    analysis = orch.collect_ready_feedback()
     assert isinstance(analysis, str) and analysis
-    assert run.reports and run.reports[0].views > 0
     # 피드백 루프: 분석 결과가 상태에 저장돼 다음 사이클로 자동 연결돼야 한다.
     assert state.get_feedback() == analysis
+    # 수집을 마친 업로드는 큐에서 빠진다(재조회 방지).
+    assert state.get_pending_uploads() == []
+
+
+def test_collect_defers_until_upload_matures(tmp_path):
+    """라이브 모드: 방금 올린 업로드는 숙성 전이라 수집하지 않는다(즉시 조회 시 0 방지)."""
+    from datetime import datetime, timedelta, timezone
+
+    state = _tmp_state(tmp_path)
+    orch = Orchestrator(
+        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+    )
+    orch.settings.dry_run = False  # collect만 라이브로 판정(미숙성이라 실제 조회는 안 됨)
+    orch.settings.analytics_min_age_hours = 48
+
+    now = datetime.now(timezone.utc)
+    # 이제 막 올린 것(0h) → 미숙성, 이틀 하고도 한 시간 지난 것(49h) → 숙성.
+    state.add_pending_upload("youtube", "vid_new", "u", now.isoformat())
+    state.add_pending_upload(
+        "youtube", "vid_old", "u", (now - timedelta(hours=49)).isoformat()
+    )
+    fetched: list[str] = []
+    orch.publisher.fetch_performance = lambda up: fetched.append(up.external_id) or _report(up)
+    orch.ai.analyze_performance = lambda reports: "분석"
+
+    assert orch.collect_ready_feedback(now=now) == "분석"
+    assert fetched == ["vid_old"]  # 숙성분만 조회
+    remaining = state.get_pending_uploads()
+    assert [u["external_id"] for u in remaining] == ["vid_new"]  # 미숙성분은 큐에 남음
+
+
+def _report(up):
+    from nutti.models import PerformanceReport
+
+    return PerformanceReport(platform=up.platform, external_id=up.external_id, views=8)
 
 
 # --- 피드백 자동 연결 + 주제 자동 생성(resolve_inputs) ---
@@ -268,30 +305,34 @@ def test_feedback_loop_closes_end_to_end(tmp_path):
     orch = Orchestrator(
         _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
     )
-    run = orch.run("강아지 간식")
-    analysis = orch.collect_and_analyze(run)
+    orch.run("강아지 간식")
+    analysis = orch.collect_ready_feedback()
     # 다음 사이클: feedback 인자 없이도 직전 분석이 자동 주입돼야 한다.
     _, next_feedback = orch.resolve_inputs(None, "")
     assert next_feedback == analysis
 
 
-def test_collect_and_analyze_persists_nonempty_skips_empty(tmp_path, monkeypatch):
+def test_collect_ready_feedback_persists_nonempty_skips_empty(tmp_path, monkeypatch):
     """비어있지 않은 분석은 저장하고, 빈 분석은 기존 피드백을 덮어쓰지 않는다."""
     state = _tmp_state(tmp_path)
     orch = Orchestrator(
         _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
     )
-    run = orch.run("주제")
 
-    # 비어있지 않은 분석 → 저장됨.
+    # 비어있지 않은 분석 → 저장됨(dry_run이라 큐의 업로드가 즉시 숙성 처리).
+    orch.run("주제")
     monkeypatch.setattr(orch.ai, "analyze_performance", lambda reports: "실제 분석 결과")
-    assert orch.collect_and_analyze(run) == "실제 분석 결과"
+    assert orch.collect_ready_feedback() == "실제 분석 결과"
     assert state.get_feedback() == "실제 분석 결과"
 
-    # 빈 분석(예: 라이브 모드 빈 응답) → 직전 피드백 유지.
+    # 빈 분석(예: 라이브 LLM 폴백 오류) → 직전 피드백 유지 + 숙성분을 큐에 남겨 재분석.
+    orch.run("주제2")
+    assert len(state.get_pending_uploads()) == 1  # 2번째 업로드가 큐에 있음
     monkeypatch.setattr(orch.ai, "analyze_performance", lambda reports: "")
-    assert orch.collect_and_analyze(run) == ""
+    assert orch.collect_ready_feedback() == ""
     assert state.get_feedback() == "실제 분석 결과"
+    # 분석만 실패했으니 이미 성공한 조회 결과를 버리지 않고 큐에 남긴다(다음 사이클 재분석).
+    assert len(state.get_pending_uploads()) == 1
 
 
 class _RejectGate:

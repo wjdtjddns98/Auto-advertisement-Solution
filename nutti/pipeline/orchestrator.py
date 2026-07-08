@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from nutti.config import Settings, get_settings
 from nutti.integrations.ai_text import AITextClient
 from nutti.integrations.publishing import Publisher
@@ -19,6 +21,7 @@ from nutti.models import (
     ReviewRequest,
     Script,
     Stage,
+    UploadResult,
 )
 from nutti.pipeline.cost import estimate_run_cost
 from nutti.pipeline.cost_ledger import CostLedger
@@ -200,8 +203,14 @@ class Orchestrator:
         # 누적 원장에 기록 — `nutti cost`로 일/월/전체 실제 지출을 조회한다.
         self.ledger.record(run)
 
-        # 5단계: 성과 수집(분석/피드백은 collect_and_analyze에서 별도 주기로 수행)
+        # 5단계: 성과 수집 예약 — 이번 업로드를 대기 큐에 넣는다. 실제 조회·분석은
+        # analytics_min_age_hours가 지난 뒤(다음 사이클의 collect_ready_feedback)에 한다.
+        # 업로드 직후엔 YouTube Analytics가 아직 0이라 즉시 조회하면 루프가 오염된다.
         run.current_stage = Stage.ANALYTICS
+        for up in run.uploads:
+            self.state.add_pending_upload(
+                up.platform, up.external_id, up.url, up.uploaded_at.isoformat()
+            )
         self.store.log_run(run)
         log.info("pipeline.done", run_id=run.id, uploads=len(run.uploads))
         return run
@@ -266,16 +275,70 @@ class Orchestrator:
             log.error("factcheck.rejected", issues=result.issues)
             raise FactCheckFailed(result.issues)
 
-    def collect_and_analyze(self, run: PipelineRun) -> str:
-        """업로드된 콘텐츠의 성과를 수집하고 다음 대본 개선안을 도출(피드백 루프).
+    def collect_ready_feedback(self, *, now: datetime | None = None) -> str:
+        """숙성된 업로드의 성과를 수집·분석해 다음 대본 개선 피드백으로 저장한다(피드백 루프).
 
-        도출한 분석 결과를 상태에 저장해, 다음 사이클의 resolve_inputs가 이를
-        feedback으로 자동 주입하도록 한다(피드백 루프 닫기).
+        업로드 직후엔 YouTube Analytics가 조회수 0을 돌려주므로(집계 지연), 대기 큐에서
+        analytics_min_age_hours가 지난 업로드만 꺼내 조회한다. dry_run은 지연이 없으니
+        전부 즉시 수집한다. 숙성분은 조회 후 큐에서 제거하고(재조회 방지), 남은 미숙성분은
+        다시 저장한다. 분석 결과가 비어 있으면 기존 피드백을 유지한다(save_feedback가 무시).
+
+        반환: 이번에 도출·저장한 분석 문자열(수집 대상이 없으면 빈 문자열).
         """
-        run.reports = [self.publisher.fetch_performance(u) for u in run.uploads]
-        analysis = self.ai.analyze_performance(run.reports)
+        pending = self.state.get_pending_uploads()
+        if not pending:
+            return ""
+        now = now or datetime.now(timezone.utc)
+        min_age = 0.0 if self.settings.dry_run else float(self.settings.analytics_min_age_hours)
+        ready: list[dict] = []
+        remaining: list[dict] = []
+        for item in pending:
+            if self._upload_age_hours(item.get("uploaded_at"), now) >= min_age:
+                ready.append(item)
+            else:
+                remaining.append(item)
+        if not ready:
+            return ""
+        reports = [
+            self.publisher.fetch_performance(
+                UploadResult(
+                    platform=item.get("platform", "youtube"),
+                    external_id=item.get("external_id", ""),
+                    url=item.get("url", ""),
+                )
+            )
+            for item in ready
+        ]
+        analysis = self.ai.analyze_performance(reports)
+        if not (analysis and analysis.strip()):
+            # 분석 실패(라이브 LLM 폴백 오류 등) — 큐를 건드리지 않아 ready가 남는다.
+            # 조회는 이미 성공했지만 LLM 단계만 실패한 것이라, 이미 성공한 성과 신호를
+            # 버리지 않고 다음 사이클에 재분석하도록 둔다(리뷰 지적, medium). LLM이 계속
+            # 실패하면 큐에 쌓이지만, 그건 피드백 루프 자체가 죽은 환경이라 유실보다 낫다.
+            log.info("pipeline.feedback.analysis_empty", n_ready=len(ready))
+            return ""
+        # 분석 성공 — 숙성분을 큐에서 제거(재조회 방지)하고 피드백 저장.
+        self.state.replace_pending_uploads(remaining)
         self.state.save_feedback(analysis)
+        log.info("pipeline.feedback.collected", n_ready=len(ready), n_remaining=len(remaining))
         return analysis
+
+    @staticmethod
+    def _upload_age_hours(uploaded_at: str | None, now: datetime) -> float:
+        """업로드 ISO8601 시각과 now의 시간차(시간). 파싱 불가면 무한대(=항상 숙성 처리).
+
+        타임스탬프가 깨졌거나 없는 항목을 영구히 큐에 남기지 않도록 '충분히 오래됨'으로
+        본다 — 한 번 조회하고 큐에서 빼는 편이 무한 적재보다 안전하다.
+        """
+        if not uploaded_at:
+            return float("inf")
+        try:
+            ts = datetime.fromisoformat(uploaded_at)
+        except (ValueError, TypeError):
+            return float("inf")
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (now - ts).total_seconds() / 3600.0
 
     def _gate(self, gate: ReviewGate, stage: Stage, title: str, preview: str) -> None:
         review = ReviewRequest(stage=stage, title=title, preview=preview)
