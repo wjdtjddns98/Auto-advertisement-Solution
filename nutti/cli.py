@@ -55,6 +55,14 @@ def run(
     fmt = ContentFormat.REELS if reels else ContentFormat.SHORTS
 
     orchestrator = Orchestrator(settings)
+    # 성과 수집: 숙성된(며칠 지난) 직전 업로드의 조회수를 걷어 이번 사이클 피드백으로
+    # 저장한다. 업로드 직후엔 Analytics가 0이라, 수집은 항상 지난 사이클 영상을 대상으로
+    # 지연 수행한다(collect_ready_feedback). resolve_inputs보다 먼저 호출해 방금 걷은
+    # 피드백이 이번 대본에 곧바로 반영되게 한다.
+    analysis = orchestrator.collect_ready_feedback()
+    if analysis:
+        typer.echo(f"[직전 업로드 성과 분석 → 피드백 저장]\n{analysis}\n")
+
     # 피드백 자동 연결 + (주제 미지정 시) 주제 자동 생성.
     topic, feedback = orchestrator.resolve_inputs(topic, feedback)
     typer.secho(f"주제: {topic}", fg=typer.colors.CYAN)
@@ -75,8 +83,7 @@ def run(
         typer.echo("")
         typer.secho(format_cost(result.cost), fg=typer.colors.MAGENTA)
 
-    analysis = orchestrator.collect_and_analyze(result)
-    typer.echo(f"\n[성과 분석 → 다음 사이클 피드백으로 저장됨]\n{analysis}")
+    typer.echo("\n[이번 업로드는 성과 수집 대기 큐에 등록됨 — 며칠 뒤 다음 실행에서 분석]")
 
 
 @app.command()

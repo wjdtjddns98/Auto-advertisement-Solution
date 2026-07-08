@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # 매 사이클의 성과 분석을 다음 사이클 feedback으로 자동 연결하고,
     # 최근 주제를 기억해 주제 자동 생성 시 중복을 피하는 데 쓴다.
     state_path: str = Field(default="data/pipeline_state.json", alias="NUTTI_STATE_PATH")
+    # 성과 수집 지연(시간). 업로드 직후 YouTube Analytics는 최근 1~3일치를 아직 집계하지
+    # 않아 조회수·시청시간이 0으로 나온다(실측 2026-07-08: 전날 업로드분 API 조회 전부 0).
+    # 그 0을 다음 대본 피드백으로 저장하면 루프가 노이즈로 오염된다 — 업로드는 대기 큐에
+    # 쌓고, 이 시간(기본 48h)이 지난 건만 조회해 분석한다. dry_run은 지연 없이 즉시 수집.
+    analytics_min_age_hours: int = Field(default=48, ge=0, alias="NUTTI_ANALYTICS_MIN_AGE_HOURS")
     # 사이클별 제작 비용을 누적 기록하는 원장(ledger) 경로. `nutti cost`로 일/월/전체
     # 실제 지출을 조회한다(dry_run 실행은 실제 지출 0으로 기록·구분).
     cost_ledger_path: str = Field(
