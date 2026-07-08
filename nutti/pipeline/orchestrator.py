@@ -310,8 +310,14 @@ class Orchestrator:
             for item in ready
         ]
         analysis = self.ai.analyze_performance(reports)
-        # 조회를 마친 숙성분은 성패와 무관하게 큐에서 제거한다 — 재조회해도 지표가
-        # 나아지지 않고, 남겨두면 매 사이클 같은 영상을 반복 분석하게 된다.
+        if not (analysis and analysis.strip()):
+            # 분석 실패(라이브 LLM 폴백 오류 등) — 큐를 건드리지 않아 ready가 남는다.
+            # 조회는 이미 성공했지만 LLM 단계만 실패한 것이라, 이미 성공한 성과 신호를
+            # 버리지 않고 다음 사이클에 재분석하도록 둔다(리뷰 지적, medium). LLM이 계속
+            # 실패하면 큐에 쌓이지만, 그건 피드백 루프 자체가 죽은 환경이라 유실보다 낫다.
+            log.info("pipeline.feedback.analysis_empty", n_ready=len(ready))
+            return ""
+        # 분석 성공 — 숙성분을 큐에서 제거(재조회 방지)하고 피드백 저장.
         self.state.replace_pending_uploads(remaining)
         self.state.save_feedback(analysis)
         log.info("pipeline.feedback.collected", n_ready=len(ready), n_remaining=len(remaining))

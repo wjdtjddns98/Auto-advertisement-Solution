@@ -94,7 +94,8 @@ class PipelineState:
 
     # --- 성과 수집 대기 큐(업로드 → 며칠 숙성 후 조회) ---
     # YouTube Analytics 지연 때문에 업로드 직후 조회하면 조회수가 0으로 나온다. 업로드를
-    # 여기 쌓아두고, 오케스트레이터가 숙성된 것만 꺼내(take_pending_uploads) 조회·분석한다.
+    # 여기 쌓아두고(add_pending_upload), 오케스트레이터가 get_pending_uploads로 읽어
+    # 숙성된 것만 조회·분석한 뒤 replace_pending_uploads로 남은 것만 다시 저장한다.
     # 항목: {"platform", "external_id", "url", "uploaded_at"(ISO8601)}.
 
     def get_pending_uploads(self) -> list[dict]:

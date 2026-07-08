@@ -325,11 +325,14 @@ def test_collect_ready_feedback_persists_nonempty_skips_empty(tmp_path, monkeypa
     assert orch.collect_ready_feedback() == "실제 분석 결과"
     assert state.get_feedback() == "실제 분석 결과"
 
-    # 빈 분석(예: 라이브 모드 빈 응답) → 직전 피드백 유지. 새 업로드를 큐에 넣고 재수집.
+    # 빈 분석(예: 라이브 LLM 폴백 오류) → 직전 피드백 유지 + 숙성분을 큐에 남겨 재분석.
     orch.run("주제2")
+    assert len(state.get_pending_uploads()) == 1  # 2번째 업로드가 큐에 있음
     monkeypatch.setattr(orch.ai, "analyze_performance", lambda reports: "")
     assert orch.collect_ready_feedback() == ""
     assert state.get_feedback() == "실제 분석 결과"
+    # 분석만 실패했으니 이미 성공한 조회 결과를 버리지 않고 큐에 남긴다(다음 사이클 재분석).
+    assert len(state.get_pending_uploads()) == 1
 
 
 class _RejectGate:
