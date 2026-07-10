@@ -100,7 +100,10 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     """motion_release=True면 정적 _MOTION_HOLD 대신 생동감 _MOTION_LIVELY를 쓴다.
 
     2026-06-29 PO: 끝프레임 고정(lock) 모드는 끝 프레임이 모델로 고정되므로 중간 모션을
-    풀어 생기를 준다. 단 화면 이탈은 금지하고 끝은 차분한 앉은 자세로 수렴한다.
+    풀어 생기를 준다. 화면 이탈은 금지.
+    2026-07-10 PO: 끝 2~3초 진정(wind-down) 강제를 제거 — 매 비트 끝 에너지 소멸이
+    "비트별 페이드아웃 체감"의 직접 원인. 끝 포즈 수렴은 FLF 모델이 물리 담당하고
+    수렴 실패는 QC(tail_not_converged)가 잡는다. 페이드/프리즈 금지 가드는 유지.
     """
     builder = VeoPromptBuilder()
     lively = builder.build_beat("안녕", motion_release=True)
@@ -108,14 +111,12 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     # lively: 자연스러운 제스처 허용, 정적 고정 문구는 없음.
     assert "moves naturally and expressively" in lively
     assert "stays in the exact same upright seated position" not in lively
-    # 화면 이탈 방지·막판 안정화는 lively에도 유지(막판 이상행동 방어).
+    # 화면 이탈 방지는 lively에도 유지(막판 이상행동 방어).
     assert "leaves the frame" in lively
-    # 끝 2~3초는 '완전 정지'가 아니라 차분히 안정 + 미세 자연동작 유지(2026-06-30 PO):
-    # 하드 freeze를 명령하면 Veo가 프레임 고정 영상을 내놓는다(freezedetect 실측) →
-    # 적응 트림이 발화 뒤 꼬리를 잘라내므로 freeze 지시는 불필요·유해 → 완화.
-    assert "final two to three seconds" in lively
+    # 끝 진정(wind-down) 강제는 제거하고 끝까지 에너지 유지를 지시한다(2026-07-10 PO).
+    assert "final two to three seconds" not in lively
+    assert "do not wind down" in lively
     assert "completely frozen and motionless" not in lively
-    assert "must NOT hard-freeze" in lively
     assert "no fade-out" in lively and "no freeze" in lively
     # 기본(static)은 기존 _MOTION_HOLD 유지(하위호환).
     assert "stays in the exact same upright seated position" in static
@@ -546,7 +547,7 @@ def _caption_lifecycle_studio(tmp_path, monkeypatch, *, caption_result, **settin
     monkeypatch.setattr(
         VideoStudio,
         "_burn_captions",
-        lambda self, video, beats, durs, dissolve=0.0: caption_result,
+        lambda self, video, beats, durs, dissolve=0.0, boundary_dissolves=None: caption_result,
         raising=True,
     )
     return studio, stitched
@@ -846,7 +847,9 @@ def test_produce_clips_similarity_success_replaces_cuts(tmp_path, monkeypatch):
     assert captured["clips"] != clip_paths
     assert all("simcut_" in p for p in captured["clips"])
     assert captured["durs"] == [7.6, 7.0]
-    assert "boundary_dissolves" not in captured["kwargs"]  # 불일치 없음 → 기본 디졸브
+    # 매칭 성공 경계는 마이크로 컷(0.08s)으로 붙인다(2026-07-10 PO) — 유사 프레임 간
+    # 0.35초 디졸브가 "멈춤+페이드아웃"으로 보이는 비트 끊김 체감의 직접 원인이었다.
+    assert captured["kwargs"].get("boundary_dissolves") == [pytest.approx(0.08)]
     # 심컷 임시파일은 스티칭 후 정리된다.
     assert not list(tmp_path.glob("simcut_*.mp4"))
 
@@ -1240,8 +1243,9 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
 def test_build_beat_final_cta_frees_motion():
     """마지막 비트(final_cta+lock)는 진정 강제 없이 귀여운 행동 자유(2026-07-06 PO).
 
-    중간 비트는 기존 _MOTION_LIVELY(끝 진정)를 유지해 경계 수렴을 지키고,
-    마지막 비트만 _MOTION_FINAL_FREE로 풀되 화면 이탈·끝 페이드 금지는 남는다.
+    중간 비트(_MOTION_LIVELY)도 끝 2~3초 진정(wind-down) 강제를 제거했다(2026-07-10
+    PO — 매 비트 끝 에너지 소멸이 "비트별 페이드아웃 체감"의 직접 원인). 끝 포즈
+    수렴은 FLF 모델이 물리 담당하고, 페이드/글리치 금지 가드는 양쪽 모두 유지된다.
     """
     b = VeoPromptBuilder()
     final = b.build_beat("대사", motion_release=True, final_cta=True)
@@ -1250,7 +1254,9 @@ def test_build_beat_final_cta_frees_motion():
     assert "winding down its gestures" not in final  # 진정 강제 해제
     assert "never leaves the frame" in final  # 최소 깨짐 가드는 유지
     assert "no fade-out" in final
-    assert "winding down its gestures" in mid  # 중간 비트는 기존 유지
+    assert "winding down its gestures" not in mid  # 중간 비트도 진정 강제 제거(2026-07-10)
+    assert "do not wind down" in mid  # 끝까지 에너지 유지 지시
+    assert "no fade-out" in mid  # 페이드 금지 가드는 유지
 
 
 def test_build_beat_always_demands_lipsync():
@@ -1547,3 +1553,202 @@ def test_produce_clips_qc_fallback_after_max_retries(tmp_path, monkeypatch):
     assert final == str(tmp_path / "final.mp4")
     assert veo.calls == 3  # 최초 1회 + 상한 2회
     assert captured["clips"] == [made[-1]]  # 마지막 불량 클립 그대로 사용
+
+
+# --- 화면 텍스트 QC(_qc_text_overlay — 외계어 자막 차단, 2026-07-10 PO) ---
+
+
+def test_qc_text_overlay_flags_text_and_cleans_frames(tmp_path, monkeypatch):
+    """판정자가 True(글자 있음)면 text_overlay를 내고, 샘플 프레임은 정리한다."""
+    frame = tmp_path / "qc_text_ab_01.png"
+    frame.write_bytes(b"png")
+    calls: list[list[str]] = []
+
+    def judge(paths):
+        calls.append(list(paths))
+        return True
+
+    studio = VideoStudio(
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), text_judge=judge
+    )
+    monkeypatch.setattr(
+        VideoStudio, "_extract_color_frames", lambda self, c, d: [str(frame)]
+    )
+    assert studio._qc_text_overlay("clip.mp4", 7.0) == "text_overlay"
+    assert calls == [[str(frame)]]
+    assert not frame.exists()  # 판정 후 샘플 프레임 정리
+
+
+def test_qc_text_overlay_false_or_none_passes(tmp_path, monkeypatch):
+    """판정 False(글자 없음)·None(보류)은 둘 다 통과(None) — 파이프라인을 막지 않는다."""
+    for verdict in (False, None):
+        frame = tmp_path / f"qc_text_{verdict}_01.png"
+        frame.write_bytes(b"png")
+        studio = VideoStudio(
+            _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)),
+            text_judge=lambda paths, v=verdict: v,
+        )
+        monkeypatch.setattr(
+            VideoStudio, "_extract_color_frames", lambda self, c, d, f=frame: [str(f)]
+        )
+        assert studio._qc_text_overlay("clip.mp4", 7.0) is None
+        assert not frame.exists()
+
+
+def test_qc_text_overlay_disabled_skips_everything(tmp_path, monkeypatch):
+    """NUTTI_QC_TEXT_ENABLED=false면 프레임 추출·판정 자체를 실행하지 않는다."""
+
+    def boom(*a, **k):
+        raise AssertionError("텍스트 QC 비활성인데 실행됨")
+
+    studio = VideoStudio(
+        _live_settings_with_key(
+            NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_QC_TEXT_ENABLED="false"
+        ),
+        text_judge=boom,
+    )
+    monkeypatch.setattr(VideoStudio, "_extract_color_frames", boom)
+    assert studio._qc_text_overlay("clip.mp4", 7.0) is None
+
+
+def test_qc_check_beat_appends_text_overlay(tmp_path, monkeypatch):
+    """다른 사유가 없고 글자가 검출되면 _qc_check_beat가 text_overlay를 사유로 낸다."""
+    studio = VideoStudio(
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), text_judge=lambda p: True
+    )
+    frame = tmp_path / "qc_text_cd_01.png"
+    frame.write_bytes(b"png")
+    monkeypatch.setattr(VideoStudio, "_probe_duration_sec", lambda self, c: 8.0)
+    monkeypatch.setattr(VideoStudio, "_qc_freeze_black", lambda self, c, d: [])
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
+    monkeypatch.setattr(
+        VideoStudio, "_extract_color_frames", lambda self, c, d: [str(frame)]
+    )
+    assert studio._qc_check_beat("clip.mp4", "frame.png", lock=False) == ["text_overlay"]
+
+
+def test_qc_check_beat_skips_text_judge_when_other_reasons(tmp_path, monkeypatch):
+    """다른 사유로 이미 재생성이 확정되면 비싼 텍스트 판정을 건너뛴다(재생성본이 재검사)."""
+
+    def boom(*a, **k):
+        raise AssertionError("다른 사유가 있는데 텍스트 판정이 실행됨")
+
+    studio = VideoStudio(
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), text_judge=boom
+    )
+    monkeypatch.setattr(VideoStudio, "_probe_duration_sec", lambda self, c: 8.0)
+    monkeypatch.setattr(
+        VideoStudio, "_qc_freeze_black", lambda self, c, d: ["mid_freeze"]
+    )
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
+    monkeypatch.setattr(VideoStudio, "_extract_color_frames", boom)
+    reasons = studio._qc_check_beat("clip.mp4", "frame.png", lock=False)
+    assert reasons == ["mid_freeze"]
+
+
+def test_produce_clips_qc_retry_offsets_seed(tmp_path, monkeypatch):
+    """QC 재생성은 seed를 오프셋한다 — 같은 seed+같은 프롬프트 재제출은 같은 결함
+    (텍스트 오버레이 등)을 그대로 재현할 수 있어 재시도가 무효가 되기 때문."""
+    bad = tmp_path / "bad.mp4"
+    bad.write_bytes(b"bad")
+    good = tmp_path / "good.mp4"
+    good.write_bytes(b"good")
+    seq = [str(bad), str(good)]
+    seeds: list[int | None] = []
+
+    class _FakeVeo:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, frame_path, prompt, last_frame_path=None, seed=None):
+            seeds.append(seed)
+            path = seq[self.calls]
+            self.calls += 1
+            return path
+
+        def close(self):
+            pass
+
+    studio = VideoStudio(
+        _live_settings_with_key(
+            NUTTI_MEDIA_DIR=str(tmp_path),
+            NUTTI_CAPTION_BURN="false",
+            NUTTI_VEO_FAL_SEED="123",
+        ),
+        veo_fal_client=_FakeVeo(),
+    )
+    monkeypatch.setattr(
+        VideoStudio,
+        "_qc_check_beat",
+        lambda self, clip, frame, lock: ["text_overlay"] if clip == str(bad) else [],
+    )
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
+    monkeypatch.setattr(
+        VideoStudio, "_stitch", lambda self, clips, durs=None, **kw: str(tmp_path / "f.mp4")
+    )
+    studio._produce_clips_veo_fal("frame.png", ["비트1"], pick_episode_style("x"))
+    assert seeds == [123, 124]  # 최초 seed → 재생성 seed+1
+
+
+# --- 경계별 디졸브 기록·자막 타이밍 동기화(2026-07-10 PO) ---
+
+
+def test_stitch_records_actual_boundary_dissolves(tmp_path, monkeypatch):
+    """_stitch는 실제 적용한 경계별 디졸브를 기록한다(자막 타이밍 동기화용).
+
+    디졸브 성공 시 경계별 리스트, concat 폴백 시 None(자막은 디졸브 0으로 계산).
+    """
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    monkeypatch.setattr(
+        VideoStudio,
+        "_stitch_dissolve",
+        lambda self, clips, durs, dissolve, boundary_dissolves=None: "faded.mp4",
+    )
+    out = studio._stitch(["a.mp4", "b.mp4"], [7.0, 7.0], boundary_dissolves=[0.08])
+    assert out == "faded.mp4"
+    assert studio._last_boundary_dissolves == [0.08]
+    # 디졸브 실패 → concat 폴백이면 경계별 기록은 None으로 남는다.
+    monkeypatch.setattr(
+        VideoStudio,
+        "_stitch_dissolve",
+        lambda self, clips, durs, dissolve, boundary_dissolves=None: None,
+    )
+    monkeypatch.setattr(VideoStudio, "_concat", lambda self, clips: "concat.mp4")
+    out = studio._stitch(["a.mp4", "b.mp4"], [7.0, 7.0], boundary_dissolves=[0.08])
+    assert out == "concat.mp4"
+    assert studio._last_boundary_dissolves is None
+
+
+def test_burn_captions_uses_per_boundary_dissolves(tmp_path, monkeypatch):
+    """자막 전환 시점은 경계별 실적용 디졸브의 중앙 — 대표값(dissolve)보다 우선한다."""
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    font = tmp_path / "font.ttf"
+    font.write_bytes(b"fake-font")
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_FONT=str(font)
+    )
+    studio = VideoStudio(settings)
+    out = studio._burn_captions(
+        "in.mp4",
+        ["첫 비트 대사", "둘째 비트 대사"],
+        [7.0, 7.0],
+        dissolve=0.25,  # 경계별 값이 있으면 무시돼야 한다
+        boundary_dissolves=[0.08],
+    )
+    assert out is not None
+    joined = " ".join(captured["cmd"])
+    # 전환 시점 = 7.0 - 0.08/2 = 6.96초(경계별 값 기준, 대표값 0.25 기준 6.875 아님).
+    assert "between(t,0.000,6.960)" in joined
+    assert "between(t,6.960," in joined

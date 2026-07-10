@@ -420,6 +420,65 @@ class AITextClient:
         """
         return self._claude_cli(full_prompt)
 
+    # 영상 QC용 화면 텍스트 판정 프롬프트 — 우리가 굽는 하단 자막은 비트 클립 단계에는
+    # 아직 없으므로, 비트 클립 프레임에서 글자가 보이면 전부 Veo가 임의로 그린 결함이다.
+    _TEXT_OVERLAY_JUDGE_PROMPT = (
+        "당신은 영상 QC 검사원입니다. 첨부된 이미지들은 AI 생성 쇼츠 영상에서 뽑은 "
+        "스틸 프레임입니다. 프레임 화면 안에 렌더링된 글자(자막·캡션·문자·단어·"
+        "워터마크·로고 텍스트 — 언어 무관, 깨진 글자 포함)가 하나라도 보이면 YES, "
+        "전혀 없으면 NO만 출력하세요. 다른 말은 붙이지 마세요."
+    )
+
+    def judge_frames_have_text(self, frame_paths: list[str]) -> bool | None:
+        """프레임 이미지들에 렌더된 글자가 보이는지 Claude 비전으로 판정한다.
+
+        영상 QC(외계어 자막 차단, video._qc_text_overlay)가 쓴다. 반환:
+        True(글자 있음 → 해당 비트 재생성) / False(없음) / None(판단 보류 —
+        dry_run이거나 응답이 YES/NO가 아님). 경로는 3-way: dry_run→보류,
+        API 키 있음→Anthropic 비전, 없음→claude -p(Claude Code가 파일을 직접 읽음).
+        호출부(video)가 예외를 보류로 삼키므로 여기선 전파해도 안전하다.
+        """
+        if self.settings.dry_run or not frame_paths:
+            return None
+        if self._client is not None:
+            import base64
+            from pathlib import Path
+
+            content: list[dict] = []
+            for p in frame_paths:
+                data = base64.b64encode(Path(p).read_bytes()).decode("ascii")
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": data,
+                        },
+                    }
+                )
+            content.append({"type": "text", "text": self._TEXT_OVERLAY_JUDGE_PROMPT})
+            msg = self._client.messages.create(
+                model=self.settings.script_model,
+                max_tokens=8,
+                messages=[{"role": "user", "content": content}],
+            )
+            answer = _first_text(msg)
+        else:
+            prompt = (
+                f"{self._TEXT_OVERLAY_JUDGE_PROMPT}\n\n"
+                "아래 이미지 파일들을 Read 도구로 하나씩 직접 열어 확인한 뒤 판정하세요:\n"
+                + "\n".join(frame_paths)
+            )
+            answer = self._llm_text(prompt, max_tokens=8)
+        a = (answer or "").strip().upper()
+        if a.startswith("YES"):
+            return True
+        if a.startswith("NO"):
+            return False
+        log.warning("qc.text_judge.unparseable")
+        return None
+
     def _fact_check_via_fallback(self, script: Script) -> FactCheckResult:
         """Anthropic API 없이 Claude Code(claude -p)로 팩트체크 — 안전 게이트 유지.
 
