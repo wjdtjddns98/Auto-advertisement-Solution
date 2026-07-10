@@ -657,3 +657,36 @@ def test_clean_topic_empty_returns_blank():
     assert _clean_topic("") == ""
     assert _clean_topic("   \n  ") == ""
 
+
+# --- 화면 텍스트 판정(judge_frames_have_text — 영상 QC 외계어 자막 차단용) ---
+
+
+def test_judge_frames_have_text_dry_run_returns_none():
+    """dry_run은 항상 보류(None) — 외부 호출 없는 결정적 시뮬레이션 계약."""
+    assert _client().judge_frames_have_text(["f.png"]) is None
+
+
+def test_judge_frames_have_text_empty_paths_returns_none():
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    assert AITextClient(settings).judge_frames_have_text([]) is None
+
+
+def test_judge_frames_have_text_parses_yes_no(monkeypatch):
+    """claude -p 폴백 경로: YES→True, no→False, 그 외→None(보류). 프롬프트에 파일 경로 포함."""
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    prompts: list[str] = []
+    answers = {"value": "YES"}
+
+    def fake_llm(self, prompt, max_tokens=1024):
+        prompts.append(prompt)
+        return answers["value"]
+
+    monkeypatch.setattr(AITextClient, "_llm_text", fake_llm)
+    assert client.judge_frames_have_text(["C:/x/f1.png", "C:/x/f2.png"]) is True
+    assert "C:/x/f1.png" in prompts[-1] and "C:/x/f2.png" in prompts[-1]
+    answers["value"] = "no"
+    assert client.judge_frames_have_text(["f.png"]) is False
+    answers["value"] = "잘 모르겠어요"
+    assert client.judge_frames_have_text(["f.png"]) is None
+

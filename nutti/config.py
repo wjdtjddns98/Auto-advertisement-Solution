@@ -184,6 +184,12 @@ class Settings(BaseSettings):
         default=20.0, alias="NUTTI_QC_TAIL_CONVERGE_MAD_MAX"
     )
     qc_tail_delta_max: float = Field(default=8.0, alias="NUTTI_QC_TAIL_DELTA_MAX")
+    # 화면 텍스트(외계어 자막) QC(2026-07-10 PO "절대 안 생기게"). Veo가 프레임 안에
+    # 임의로 그리는 깨진 한글 자막은 프롬프트 3겹 방어(본문 금지문 + _NEGATIVE +
+    # negative_prompt 전송)로도 확률적으로 뚫린다(실측: "칙하 아대되?" 등) — 하드룰
+    # 원칙(AI 생성물=회복형 재생성)대로 비트 클립 프레임을 Claude 비전으로 판정해
+    # 검출 시 그 비트만 재생성한다. qc_enabled와 AND. 판정 실패는 보류(파이프라인 무해).
+    qc_text_enabled: bool = Field(default=True, alias="NUTTI_QC_TEXT_ENABLED")
 
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
