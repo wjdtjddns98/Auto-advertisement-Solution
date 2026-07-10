@@ -396,13 +396,16 @@ def test_stitch_punch_in_alternates_shot_scale(tmp_path, monkeypatch):
         return _R()
 
     monkeypatch.setattr(_sp, "run", fake_run)
+    # 펀치인은 기본 꺼짐(1.0, 2026-07-10 PO "크기 들쭉날쭉") — 기능 검증은 명시 옵트인.
     settings = _live_settings_with_key(
-        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_VEO_FAL_CROSSFADE_SEC="0.25"
+        NUTTI_MEDIA_DIR=str(tmp_path),
+        NUTTI_VEO_FAL_CROSSFADE_SEC="0.25",
+        NUTTI_VEO_FAL_PUNCH_IN_SCALE="1.12",
     )
     studio = VideoStudio(settings)
     studio._stitch(["a.mp4", "b.mp4", "c.mp4"], [3.0, 3.0, 3.0])
     joined = " ".join(captured["cmd"])
-    # 기본 배율 1.12: scale=806:1432 후 720x1280 크롭(상단 1/3 기준) — 입력 0·2만.
+    # 배율 1.12: scale=806:1432 후 720x1280 크롭(상단 1/3 기준) — 입력 0·2만.
     assert joined.count("crop=720:1280") == 2
     assert "scale=806:1432" in joined
     # 비펀치 입력(1)도 공통 해상도로 정규화돼 xfade 크기 불일치가 없다.
@@ -436,8 +439,16 @@ def test_stitch_punch_in_disabled_when_scale_le_1(tmp_path, monkeypatch):
     assert "scale=720:1280" in joined
 
 
+def test_punch_in_default_disabled():
+    """펀치인 기본값은 1.0(비활성) — 교차 줌이 강아지 크기를 비트마다 들쭉날쭉하게
+    만들어 연속 영상 체감을 깨는 직접 원인이었다(2026-07-10 PO). 켜려면 env 옵트인."""
+    from nutti.config import Settings
+
+    assert Settings(NUTTI_ENV="test").veo_fal_punch_in_scale == 1.0
+
+
 def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):
-    """디졸브 불가(길이 미상) concat 폴백에서도 교차 펀치인이 유지된다."""
+    """디졸브 불가(길이 미상) concat 폴백에서도 (옵트인 시) 교차 펀치인이 유지된다."""
     import subprocess as _sp
 
     captured: dict = {}
@@ -451,7 +462,11 @@ def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):
         return _R()
 
     monkeypatch.setattr(_sp, "run", fake_run)
-    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    studio = VideoStudio(
+        _live_settings_with_key(
+            NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_VEO_FAL_PUNCH_IN_SCALE="1.12"
+        )
+    )
     studio._stitch(["a.mp4", "b.mp4"])  # durations 없음 → concat 경로
     joined = " ".join(captured["cmd"])
     assert "concat=n=2" in joined
