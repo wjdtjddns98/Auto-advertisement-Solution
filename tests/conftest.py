@@ -142,6 +142,18 @@ def _isolate_cost_ledger(tmp_path, monkeypatch, _isolate_settings_env):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_state_path(tmp_path, monkeypatch, _isolate_settings_env):
+    """파이프라인 상태가 리포지토리 data/pipeline_state.json을 오염시키지 않도록 격리한다.
+
+    종전엔 test_pipeline.py 로컬에만 있어, 다른 파일의 오케스트레이터 실행 테스트
+    (test_cost_ledger 등)가 실제 상태 파일에 가짜 pending_uploads(yt_<hex>)를 쌓았다
+    (2026-07-10 실측: pytest 1회당 큐 +1~4건 → 48h 숙성 후 라이브 run이 Analytics
+    HTTP 400으로 즉사하는 오염 경로의 한 축). 원장 격리와 같은 이유로 전역 autouse.
+    """
+    monkeypatch.setenv("NUTTI_STATE_PATH", str(tmp_path / "pipeline_state.json"))
+
+
+@pytest.fixture(autouse=True)
 def _no_system_caption_fonts(monkeypatch):
     """자막 굽기가 호스트 시스템 폰트를 주워 실제 ffmpeg를 띄우는 것을 차단한다.
 

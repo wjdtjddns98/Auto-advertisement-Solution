@@ -24,13 +24,9 @@ def _tmp_state(tmp_path) -> PipelineState:
     return PipelineState(str(tmp_path / "state.json"))
 
 
-@pytest.fixture(autouse=True)
-def _isolate_state(tmp_path, monkeypatch):
-    """모든 테스트가 기본 상태 경로 대신 tmp를 쓰도록 격리(리포지토리 data/ 오염 방지).
-
-    state=를 명시 주입하지 않는 Orchestrator(예: _approving_orch)도 이 경로를 따른다.
-    """
-    monkeypatch.setenv("NUTTI_STATE_PATH", str(tmp_path / "default_state.json"))
+# 상태 경로 격리는 conftest의 전역 autouse(_isolate_state_path)가 담당한다 —
+# 종전 로컬 격리는 이 파일만 지켜 다른 파일의 오케스트레이터 테스트가 실제
+# data/pipeline_state.json을 오염시켰다(2026-07-10 실측, conftest로 승격).
 
 
 def test_full_run_dry_run():
@@ -232,9 +228,11 @@ def test_collect_defers_until_upload_matures(tmp_path):
 
     now = datetime.now(timezone.utc)
     # 이제 막 올린 것(0h) → 미숙성, 이틀 하고도 한 시간 지난 것(49h) → 숙성.
-    state.add_pending_upload("youtube", "vid_new", "u", now.isoformat())
+    # dry_run=False: 라이브 업로드로 태깅 — 라이브 collect는 dry 항목을 정화하므로
+    # (2026-07-10 모드 분리) 이 테스트의 대상은 라이브 항목이어야 한다.
+    state.add_pending_upload("youtube", "vid_new", "u", now.isoformat(), dry_run=False)
     state.add_pending_upload(
-        "youtube", "vid_old", "u", (now - timedelta(hours=49)).isoformat()
+        "youtube", "vid_old", "u", (now - timedelta(hours=49)).isoformat(), dry_run=False
     )
     fetched: list[str] = []
     orch.publisher.fetch_performance = lambda up: fetched.append(up.external_id) or _report(up)
@@ -250,6 +248,120 @@ def _report(up):
     from nutti.models import PerformanceReport
 
     return PerformanceReport(platform=up.platform, external_id=up.external_id, views=8)
+
+
+def _live_collect_orch(tmp_path):
+    """라이브 모드 collect 테스트용 (orch, state) — 숙성 임계 48h."""
+    state = _tmp_state(tmp_path)
+    orch = Orchestrator(
+        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+    )
+    orch.settings.dry_run = False
+    orch.settings.analytics_min_age_hours = 48
+    return orch, state
+
+
+def test_collect_live_purges_dry_items_without_fetching(tmp_path):
+    """라이브 run은 dry 항목(가짜 ID)을 조회 없이 정화한다(2026-07-10 Analytics 400 결함).
+
+    dry_run 실행·테스트가 남긴 yt_<hex> 가짜 ID를 라이브 Analytics로 조회하면 HTTP
+    400으로 run이 시작 즉시 죽었다 — 플래그 없는 레거시 항목도 dry로 간주해 정화한다.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    orch, state = _live_collect_orch(tmp_path)
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(hours=49)).isoformat()
+    state.add_pending_upload("youtube", "yt_fake_legacy", "u", old)  # 플래그 없음 → dry 간주
+    state.add_pending_upload("youtube", "yt_fake_tagged", "u", old, dry_run=True)
+    state.add_pending_upload("youtube", "RealVideoId", "u", old, dry_run=False)
+    fetched: list[str] = []
+    orch.publisher.fetch_performance = lambda up: fetched.append(up.external_id) or _report(up)
+    orch.ai.analyze_performance = lambda reports: "분석"
+
+    assert orch.collect_ready_feedback(now=now) == "분석"
+    assert fetched == ["RealVideoId"]  # 가짜 항목은 조회 자체가 발생하지 않는다
+    assert state.get_pending_uploads() == []  # 정화 + 수집 완료
+
+
+def test_collect_live_purge_only_persists_and_returns_empty(tmp_path):
+    """라이브 run: 큐가 dry 항목뿐이면 조회 없이 정화만 영속화하고 빈 문자열을 돌려준다."""
+    from datetime import datetime, timezone
+
+    orch, state = _live_collect_orch(tmp_path)
+    now = datetime.now(timezone.utc)
+    state.add_pending_upload("youtube", "yt_fake1", "u", now.isoformat())
+
+    def boom(up):
+        raise AssertionError("가짜 항목인데 조회가 발생함")
+
+    orch.publisher.fetch_performance = boom
+    assert orch.collect_ready_feedback(now=now) == ""
+    assert state.get_pending_uploads() == []  # 정화가 저장됨(다음 run에 재등장 금지)
+
+
+def test_collect_dry_preserves_live_items(tmp_path):
+    """dry run은 라이브 항목을 소모하지 않는다 — 가짜 0 지표로 진짜 성과 신호 소모 방지."""
+    from datetime import datetime, timezone
+
+    state = _tmp_state(tmp_path)
+    orch = Orchestrator(
+        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+    )
+    now = datetime.now(timezone.utc)
+    state.add_pending_upload("youtube", "RealVideoId", "u", now.isoformat(), dry_run=False)
+    fetched: list[str] = []
+    orch.publisher.fetch_performance = lambda up: fetched.append(up.external_id) or _report(up)
+
+    assert orch.collect_ready_feedback(now=now) == ""
+    assert fetched == []
+    assert [u["external_id"] for u in state.get_pending_uploads()] == ["RealVideoId"]
+
+
+def test_collect_fetch_failure_drops_item_and_survives(tmp_path):
+    """항목별 조회 실패(Analytics 400 등)는 그 항목만 제거하고 run을 죽이지 않는다."""
+    from datetime import datetime, timedelta, timezone
+
+    from nutti.integrations.publishing import PublishError
+
+    orch, state = _live_collect_orch(tmp_path)
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(hours=49)).isoformat()
+    state.add_pending_upload("youtube", "BadVideoId", "u", old, dry_run=False)
+    state.add_pending_upload("youtube", "GoodVideoId", "u", old, dry_run=False)
+    fetched: list[str] = []
+
+    def fetch(up):
+        if up.external_id == "BadVideoId":
+            raise PublishError("YouTube Analytics 조회 HTTP 400")
+        fetched.append(up.external_id)
+        return _report(up)
+
+    orch.publisher.fetch_performance = fetch
+    orch.ai.analyze_performance = lambda reports: "분석"
+
+    assert orch.collect_ready_feedback(now=now) == "분석"  # 예외 없이 완주
+    assert fetched == ["GoodVideoId"]
+    assert state.get_pending_uploads() == []  # 실패 항목도 제거(매 run 반복 오류 방지)
+
+
+def test_collect_all_fetches_fail_returns_empty_without_crash(tmp_path):
+    """숙성분 전부 조회 실패해도 예외 없이 빈 문자열 + 큐 정리(런 생존이 최우선)."""
+    from datetime import datetime, timedelta, timezone
+
+    from nutti.integrations.publishing import PublishError
+
+    orch, state = _live_collect_orch(tmp_path)
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(hours=49)).isoformat()
+    state.add_pending_upload("youtube", "BadVideoId", "u", old, dry_run=False)
+
+    def fetch(up):
+        raise PublishError("YouTube Analytics 조회 HTTP 400")
+
+    orch.publisher.fetch_performance = fetch
+    assert orch.collect_ready_feedback(now=now) == ""
+    assert state.get_pending_uploads() == []
 
 
 # --- 피드백 자동 연결 + 주제 자동 생성(resolve_inputs) ---

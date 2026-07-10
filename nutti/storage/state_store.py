@@ -96,7 +96,7 @@ class PipelineState:
     # YouTube Analytics 지연 때문에 업로드 직후 조회하면 조회수가 0으로 나온다. 업로드를
     # 여기 쌓아두고(add_pending_upload), 오케스트레이터가 get_pending_uploads로 읽어
     # 숙성된 것만 조회·분석한 뒤 replace_pending_uploads로 남은 것만 다시 저장한다.
-    # 항목: {"platform", "external_id", "url", "uploaded_at"(ISO8601)}.
+    # 항목: {"platform", "external_id", "url", "uploaded_at"(ISO8601), "dry_run"(bool)}.
 
     def get_pending_uploads(self) -> list[dict]:
         """성과 수집을 기다리는 업로드 목록(원소는 dict, 순서 보존)."""
@@ -104,9 +104,22 @@ class PipelineState:
         return [dict(x) for x in raw if isinstance(x, dict)] if isinstance(raw, list) else []
 
     def add_pending_upload(
-        self, platform: str, external_id: str, url: str, uploaded_at: str
+        self,
+        platform: str,
+        external_id: str,
+        url: str,
+        uploaded_at: str,
+        *,
+        dry_run: bool = True,
     ) -> None:
-        """업로드 1건을 성과 수집 대기 큐 끝에 추가한다."""
+        """업로드 1건을 성과 수집 대기 큐 끝에 추가한다.
+
+        `dry_run`은 어느 모드가 만든 항목인지 태깅한다 — dry_run 항목의 external_id는
+        가짜(yt_<script_id>)라 라이브 Analytics로 조회하면 HTTP 400이 난다(2026-07-10
+        실측: 라이브 run이 시작 즉시 사망). collect_ready_feedback가 모드 일치 항목만
+        조회한다. 기본 True(보수적) — 플래그 없는 레거시 항목도 dry로 간주돼 라이브에서
+        정화된다(현 큐 오염분 자동 청소).
+        """
         if not external_id:
             return
         data = self._load()
@@ -119,6 +132,7 @@ class PipelineState:
                 "external_id": external_id,
                 "url": url,
                 "uploaded_at": uploaded_at,
+                "dry_run": bool(dry_run),
             }
         )
         data["pending_uploads"] = queue
