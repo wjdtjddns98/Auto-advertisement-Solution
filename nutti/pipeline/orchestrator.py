@@ -341,10 +341,13 @@ class Orchestrator:
                     )
                 )
                 fetched.append(item)
-            except Exception:
+            except Exception as exc:
+                # error 필드 포함(리뷰 medium): Analytics 400이 아닌 코드 버그(TypeError
+                # 등)로 항목이 드롭될 때 원인 추적이 가능해야 한다(_handoff 관례와 동일).
                 log.warning(
                     "pipeline.feedback.fetch_failed",
                     external_id=item.get("external_id", ""),
+                    error=str(exc),
                 )
         if not reports:
             self.state.replace_pending_uploads(remaining)
