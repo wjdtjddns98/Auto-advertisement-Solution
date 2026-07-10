@@ -126,14 +126,16 @@ def test_script_system_prompt_pins_pronunciation_guidance():
 
 
 def test_script_system_prompt_pins_beat_char_range():
-    """SCRIPT_SYSTEM_PROMPT가 비트당 길이 범위(8초 채움~50자 상한)를 명시한다(리버트 가드).
+    """SCRIPT_SYSTEM_PROMPT가 비트당 길이 범위(8초 채움~44자 상한)를 명시한다(리버트 가드).
 
-    하한(40자)은 비트 사이 빈 구간을 막고, 상한(46자)은 발화가 약 7초 안에 끝나 끝
+    하한(38자)은 비트 사이 빈 구간을 막고, 상한(44자)은 발화가 약 7초 안에 끝나 끝
     글리치 구간을 적응 트림으로 잘라낼 여유를 남긴다(2026-06-29 PO: 8초 꽉 채우면
-    잘라낼 여유가 없어 글리치가 남고, 고정 트림은 대본별로 대사가 잘림). 회귀 방지 핀.
+    잘라낼 여유가 없어 글리치가 남고, 고정 트림은 대본별로 대사가 잘림). 상한은
+    2026-07-10 PO 지시로 46→44자 타이트화(발화 끝~클립 끝 여유 확대 → 비트 경계
+    유사도 매칭 품질 개선, 실측 근거). 회귀 방지 핀.
     """
-    assert "40~46자" in SCRIPT_SYSTEM_PROMPT  # 발화 ~7초 종료(끝 여유 확보)
-    assert "46자를 넘겨" in SCRIPT_SYSTEM_PROMPT  # 상한(트림 여유 보호)
+    assert "38~44자" in SCRIPT_SYSTEM_PROMPT  # 발화 ~7초 종료(끝 여유 확보)
+    assert "44자를 넘겨" in SCRIPT_SYSTEM_PROMPT  # 상한(트림 여유 보호)
 
 
 def test_split_into_beats_strips_bullets_and_numbers():
@@ -249,16 +251,14 @@ def _live_client(msg) -> AITextClient:
 
 
 def _valid_body() -> str:
-    """하드룰 4줄(각 40~46자) 전부 통과하는 대본 본문."""
-    line = "강아지 건강 상식을 수의사 기준으로 하나씩 차근차근 알려드릴게요 오늘도"  # 38..
+    """하드룰 4줄(각 33~46자) 전부 통과하는 대본 본문."""
     lines = [
         "강아지 간식 양 열에 아홉은 잘못 알고 있어요 지금 바로 확인해 보세요",
         "체중 일 킬로그램당 적정 열량 기준이 있어요 간식은 하루 열량의 십 퍼센트",
         "몸무게별 적정량은 고정이 아니라 활동량에 따라 조금씩 달라지니 살펴보세요",
         "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인해 보세요",
     ]
-    assert all(35 <= len(x) <= 48 for x in lines), [len(x) for x in lines]
-    del line
+    assert all(33 <= len(x) <= 46 for x in lines), [len(x) for x in lines]
     return "\n".join(lines)
 
 
@@ -283,7 +283,7 @@ def test_validate_script_body_catches_each_rule():
     # (교체할 줄, 기대 위반 키워드) — 규칙별 1케이스씩.
     cases = [
         (0, "강아지가 콜록콜록 기침하면 열에 아홉은 놓치는 위험 신호가 있어요", "의성어"),
-        (1, "짧은 대사", "40~46자"),
+        (1, "짧은 대사", "38~44자"),
         (2, "귀진드기 감염은 초기에 잡아야 해요 가려움 신호를 놓치지 마세요 꼭", "발음"),
         (3, "Nutti 계산기로 우리 아이 맞춤 급여량을 오늘 바로 확인해 보세요", "브랜드"),
         (3, "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인하세요!", "느낌표"),

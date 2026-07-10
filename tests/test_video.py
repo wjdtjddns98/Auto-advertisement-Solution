@@ -524,6 +524,62 @@ def test_burn_captions_builds_timed_drawtext(tmp_path, monkeypatch):
     assert not list(tmp_path.glob("caption_*.txt"))
 
 
+def test_split_caption_segments_splits_on_sentence_end():
+    """문장 종결부호 뒤에서 나뉜다 — 대본이 비트당 2문장을 강제하므로 보통 2개."""
+    segs = VideoStudio._split_caption_segments(
+        "핵심은 양이에요. 아이 체중에 맞춰 주는 게 제일 중요해요."
+    )
+    assert segs == ["핵심은 양이에요.", "아이 체중에 맞춰 주는 게 제일 중요해요."]
+
+
+def test_split_caption_segments_no_punctuation_returns_single_segment():
+    """구두점이 없으면 분리하지 않고 전체를 단일 세그먼트로 반환한다(하위호환)."""
+    assert VideoStudio._split_caption_segments("짧은 대사") == ["짧은 대사"]
+    assert VideoStudio._split_caption_segments("") == []
+
+
+def test_burn_captions_shows_sentences_sequentially(tmp_path, monkeypatch):
+    """한 비트 안의 문장들이 동시가 아니라 한 줄씩 순차적으로 표시된다(2026-07-10 PO).
+
+    비트 표시 구간을 문장 글자 수 비율로 나눠, 두 문장이 겹치지 않는 별도 구간에서만
+    보인다 — 종전(비트 전체 구간에 두 줄 동시 표시)과 달리 drawtext 필터마다 서로 다른
+    between(t,...) 창을 갖는다.
+    """
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    font = tmp_path / "font.ttf"
+    font.write_bytes(b"fake-font")
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_FONT=str(font)
+    )
+    studio = VideoStudio(settings)
+    # 두 문장 모두 wrap_width(22자, fontsize=26 기본값) 이내라 각각 1줄로 렌더된다.
+    # 첫 비트에만 2문장을 넣고, 둘째 비트는 단일 세그먼트라 검증 대상에서 제외한다
+    # (마지막 비트는 "영상 끝까지 +1초 여유" 보정이 붙어 경계 계산이 달라지므로 —
+    # 첫 비트만 보면 dissolve=0 기본값에서 beat_end가 그대로 dur[0]=8.0이 된다).
+    beat1 = "핵심은 양이에요. 체중에 맞춰 급여하는 게 중요해요."
+    out = studio._burn_captions("in.mp4", [beat1, "둘째 비트"], [8.0, 7.0])
+    assert out is not None
+    joined = " ".join(captured["cmd"])
+    # 첫 비트 두 문장 + 둘째 비트 1줄 = drawtext 3개.
+    assert joined.count("drawtext=") == 3
+    assert "between(t,0.000,8.000)" not in joined  # 문장1이 비트1 전체를 차지하지 않음
+    # 첫 문장(9자) : 둘째 문장(19자) 비율로 8초를 분할 — 경계 = 8*9/28 = 2.571초.
+    assert "between(t,0.000,2.571)" in joined
+    assert "between(t,2.571,8.000)" in joined
+
+
 def test_burn_captions_returns_none_without_font(tmp_path, monkeypatch):
     """폰트를 못 찾으면 자막 없이 None을 돌려 원본 영상이 유지된다(best-effort)."""
     monkeypatch.setattr(video_module, "_CAPTION_FONT_CANDIDATES", [])

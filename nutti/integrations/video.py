@@ -89,6 +89,10 @@ _CAPTION_FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
 ]
+# 자막을 문장 단위로 순차 표시하기 위한 분리 기준(2026-07-10 PO — 한 줄씩 넘어가는
+# 스타일 요청). 문장 종결부호 뒤 공백에서 나눈다 — ai_text._split_into_beats의 문장
+# 분리 정규식과 동일 패턴(대본이 비트당 한국어 2문장을 강제하므로 보통 2개로 나뉜다).
+_CAPTION_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。…])\s+")
 # 화면 자막(깨진 한글 텍스트) 억제용 negative_prompt는 이제 설정값
 # `Settings.veo_fal_negative_prompt`로 단일화되어 FalVeoClient._submit이 fal에 직접
 # 보낸다(2026-06-18). 프롬프트 본문의 "no on-screen text" 지시와 이중 방어를 이룬다.
@@ -1846,6 +1850,16 @@ class VideoStudio:
             lines.append(cur)
         return "\n".join(lines)
 
+    @staticmethod
+    def _split_caption_segments(text: str) -> list[str]:
+        """자막을 문장 단위 세그먼트로 분리한다 — 세그먼트별로 한 줄씩 순차 표시된다.
+
+        문장 종결부호(.!?。…) 뒤 공백 기준. 구두점이 없어 분리가 안 되면 전체 텍스트를
+        단일 세그먼트로 반환해 종전 동작(비트 전체 동시 표시)과 동일하게 폴백한다.
+        """
+        segs = [s.strip() for s in _CAPTION_SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
+        return segs or ([text.strip()] if text.strip() else [])
+
     def _find_caption_font(self) -> str | None:
         """자막 폰트 경로를 찾는다: 설정값 우선, 없으면 OS 기본 후보 순회. 없으면 None."""
         cands = [self.settings.caption_font] if self.settings.caption_font else []
@@ -1869,6 +1883,14 @@ class VideoStudio:
         생긴다. `boundary_dissolves`(경계별 실적용 값, len=len(beats)-1)가 오면 그걸
         우선한다 — 유사도 매칭 경계(마이크로 컷)와 미스매치 경계(2배)가 섞이면 대표값
         하나로는 전환 시점이 어긋난다(2026-07-10). 자막 전환 시점은 각 경계 디졸브의 중앙.
+
+        문장 단위 순차 표시(2026-07-10 PO — 한 줄씩 넘어가는 스타일): 각 비트를
+        `_split_caption_segments`로 문장 단위 세그먼트로 나누고, 비트의 표시 구간
+        [start,end)를 세그먼트 글자 수 비율로 나눠 세그먼트마다 그 시간에만 보이게
+        한다(발화 속도에 대한 근사 — 실제 음성 타임스탬프는 없음, 글자수 비례가
+        가장 단순하고 충분히 정확한 근사). 구두점이 없어 분리가 안 되면 세그먼트가
+        1개로 종전처럼 비트 전체 구간에 표시된다(하위호환).
+
         drawtext 이스케이프 지뢰를 피하려고 대사는 textfile(UTF-8)로 전달한다. 폰트가
         없거나 경로에 작은따옴표가 있으면 자막 없이 통과한다.
         """
@@ -1913,29 +1935,42 @@ class VideoStudio:
         try:
             filters: list[str] = []
             for k, beat in enumerate(beats):
-                # drawtext는 여러 줄을 블록 좌측 정렬로만 그린다(줄별 중앙정렬 미지원,
-                # 실측 2026-07-06) — 줄마다 독립 drawtext를 써서 각 줄을 중앙정렬한다.
-                # 블록 하단을 h*0.86에 고정(위로 쌓기)해 줄 수가 늘어도 화면 밖으로
-                # 잘리지 않는다(실측: 40px 4줄이 하단 잘림).
-                lines = self._wrap_caption(beat, width=wrap_width).split("\n")
-                for j, line in enumerate(lines):
-                    tf = media_dir / f"caption_{uuid4().hex[:8]}.txt"
-                    # newline='\n' 필수 — Windows 텍스트 모드가 \n을 \r\n으로 바꾸면
-                    # drawtext가 CR을 빈 줄로 렌더해 줄 간격이 두 배로 벌어진다(실측).
-                    tf.write_text(line, encoding="utf-8", newline="\n")
-                    txt_files.append(tf)
-                    tf_ff = str(tf).replace("\\", "/").replace(":", r"\:")
-                    if "'" in tf_ff or "'" in font_ff:
-                        log.warning("video.caption.path_quote")
-                        return None
-                    y = f"h*0.86-{(len(lines) - j) * line_h}"
-                    filters.append(
-                        f"drawtext=fontfile='{font_ff}':textfile='{tf_ff}':"
-                        f"fontsize={size}:fontcolor=white:"
-                        f"borderw={max(2, round(size / 10))}:bordercolor=black:"
-                        f"x=(w-text_w)/2:y={y}:"
-                        f"enable='between(t,{starts[k]:.3f},{ends[k]:.3f})'"
+                beat_start, beat_end = starts[k], ends[k]
+                beat_width = max(0.0, beat_end - beat_start)
+                segments = self._split_caption_segments(beat)
+                total_chars = sum(len(seg) for seg in segments) or 1
+                seg_start = beat_start
+                for si, seg in enumerate(segments):
+                    is_last = si == len(segments) - 1
+                    seg_end = (
+                        beat_end
+                        if is_last
+                        else seg_start + beat_width * len(seg) / total_chars
                     )
+                    # drawtext는 여러 줄을 블록 좌측 정렬로만 그린다(줄별 중앙정렬 미지원,
+                    # 실측 2026-07-06) — 줄마다 독립 drawtext를 써서 각 줄을 중앙정렬한다.
+                    # 블록 하단을 h*0.86에 고정(위로 쌓기)해 줄 수가 늘어도 화면 밖으로
+                    # 잘리지 않는다(실측: 40px 4줄이 하단 잘림).
+                    lines = self._wrap_caption(seg, width=wrap_width).split("\n")
+                    for j, line in enumerate(lines):
+                        tf = media_dir / f"caption_{uuid4().hex[:8]}.txt"
+                        # newline='\n' 필수 — Windows 텍스트 모드가 \n을 \r\n으로 바꾸면
+                        # drawtext가 CR을 빈 줄로 렌더해 줄 간격이 두 배로 벌어진다(실측).
+                        tf.write_text(line, encoding="utf-8", newline="\n")
+                        txt_files.append(tf)
+                        tf_ff = str(tf).replace("\\", "/").replace(":", r"\:")
+                        if "'" in tf_ff or "'" in font_ff:
+                            log.warning("video.caption.path_quote")
+                            return None
+                        y = f"h*0.86-{(len(lines) - j) * line_h}"
+                        filters.append(
+                            f"drawtext=fontfile='{font_ff}':textfile='{tf_ff}':"
+                            f"fontsize={size}:fontcolor=white:"
+                            f"borderw={max(2, round(size / 10))}:bordercolor=black:"
+                            f"x=(w-text_w)/2:y={y}:"
+                            f"enable='between(t,{seg_start:.3f},{seg_end:.3f})'"
+                        )
+                    seg_start = seg_end
             cmd = [
                 imageio_ffmpeg.get_ffmpeg_exe(),
                 "-y",
