@@ -120,9 +120,11 @@ class Settings(BaseSettings):
     veo_fal_crossfade_sec: float = Field(default=0.35, alias="NUTTI_VEO_FAL_CROSSFADE_SEC")
     # 비트 경계 점프컷 위장 + 시각 리듬용 교차 펀치인(디지털 줌) 배율(2026-07-06 PO).
     # 짝수 비트(1·3번째 — 훅 포함)를 이 배율로 확대 크롭해 컷마다 화면 크기가 교차되게
-    # 한다 — 같은 구도끼리 붙는 점프컷이 '의도된 편집'으로 읽힌다. 1.0 이하면 비활성.
-    # 얼굴이 화면 상단에 있어 크롭 세로 기준은 상단 1/3. 권장 1.08~1.15.
-    veo_fal_punch_in_scale: float = Field(default=1.12, alias="NUTTI_VEO_FAL_PUNCH_IN_SCALE")
+    # 한다. 1.0 이하면 비활성. 크롭 세로 기준은 상단 1/3(얼굴 보존). 켤 땐 1.08~1.15.
+    # 기본 1.0(비활성, 2026-07-10 PO): 교차 줌이 "강아지 크기가 비트마다 들쭉날쭉해
+    # 연속 영상 같지 않다"는 체감의 직접 원인 — 점프컷 위장은 유사도 컷(임계 이하
+    # 최이른 프레임)+마이크로 하드컷이 대신하므로 위장용 줌은 역효과만 남았다.
+    veo_fal_punch_in_scale: float = Field(default=1.0, alias="NUTTI_VEO_FAL_PUNCH_IN_SCALE")
     # 비트별 대사를 하단 한글 자막으로 굽기(스티칭 후 ffmpeg drawtext, best-effort).
     # 기본 True — 2줄/26px 렌더 결과를 PO가 승인(2026-07-07, 최초 "이상함" 판정 시의
     # 렌더 결함은 26px 수정으로 이미 해소됨). Veo가 임의로 박는 깨진 자막은

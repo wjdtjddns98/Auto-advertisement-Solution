@@ -904,7 +904,7 @@ class VideoStudio:
                     continue  # 발화 끝 미상 — 유사도 탐색 불가, 기존 트림 유지
                 try:
                     result = self._find_similarity_cuts(
-                        clips[i], clips[i + 1], speech_end_a, 0.0
+                        clips[i], clips[i + 1], speech_end_a, 0.0, threshold=threshold
                     )
                 except Exception:
                     result = None
@@ -916,6 +916,14 @@ class VideoStudio:
                     tail_from_sim[i] = True
                     head_start[i + 1] = cut_b
                     head_from_sim[i + 1] = True
+                    # 관측 로그: 발화 끝에서 컷까지의 잔여 초 — 설틀 꼬리가 실제로
+                    # 잘리는지 라이브 런 로그로 확인하는 유일한 신호(2026-07-10).
+                    log.info(
+                        "stitch.sim_cut",
+                        boundary=i,
+                        tail_sec=round(cut_a - speech_end_a, 2),
+                        diff=round(diff, 1),
+                    )
                     # 유사 프레임끼리는 디졸브 대신 사실상 하드컷(마이크로 디졸브)으로
                     # 붙인다 — 거의 같은 두 정지 프레임을 0.35초 디졸브하면 그 구간이
                     # "멈춤+페이드아웃"으로 보이는 것이 비트 끊김 체감의 직접 원인
@@ -1238,16 +1246,31 @@ class VideoStudio:
         return [raw[k * frame_size:(k + 1) * frame_size] for k in range(n)]
 
     def _find_similarity_cuts(
-        self, clip_a: str, clip_b: str, speech_end_a: float, speech_start_b: float
+        self,
+        clip_a: str,
+        clip_b: str,
+        speech_end_a: float,
+        speech_start_b: float,
+        threshold: float | None = None,
     ) -> tuple[float, float, float] | None:
-        """경계 A(꼬리)·B(머리) 후보 구간에서 가장 유사한 프레임 쌍의 컷 지점을 찾는다.
+        """경계 A(꼬리)·B(머리) 후보 구간에서 이어붙일 프레임 쌍의 컷 지점을 찾는다.
 
         끝프레임 고정(endframe_lock) 모드는 모든 클립이 같은 마스코트 프레임으로 수렴
         하므로, A의 발화 끝 직후 구간과 B의 발화 시작 직전 구간에는 실제로 유사한 프레임
-        쌍이 존재한다. `_SIM_FRAME_STEP` 간격 그레이스케일 프레임의 전 쌍 평균절대차(MAD,
-        0~255)를 계산해 최솟값 쌍을 고른다. 반환은 (A 컷 시각초, B 컷 시각초, 최소 MAD)
-        이고, ffmpeg 실패·프레임 부족·길이 확인 실패 등 어떤 이유로든 탐색이 불가하면
-        None을 돌려준다(호출부가 기존 트림으로 best-effort 폴백).
+        쌍이 존재한다. `_SIM_FRAME_STEP` 간격 그레이스케일 프레임 쌍의 평균절대차(MAD,
+        0~255)를 계산한다.
+
+        선택 규칙(2026-07-10 PO "매 비트 끝 페이드아웃"): `threshold`가 주어지면 MAD가
+        임계 이하인 **가장 이른** A 프레임에서 컷한다 — 최솟값(가장 유사=가장 정지된
+        프레임)을 고르면 발화 후 강아지가 고정 끝프레임으로 수렴하며 모션이 죽어가는
+        설틀(진정) 꼬리(실측 0.5~1초)를 매 비트 끝에 도로 포함시켜 페이드아웃처럼
+        보인다. 임계를 만족하는 프레임이 없으면 전 쌍 최솟값으로 폴백한다(호출부가
+        임계 초과=불일치로 판정해 디졸브 2배 마스킹). threshold=None이면 종전 그대로
+        전 쌍 최솟값.
+
+        반환은 (A 컷 시각초, B 컷 시각초, 채택 쌍 MAD)이고, ffmpeg 실패·프레임 부족·
+        길이 확인 실패 등 어떤 이유로든 탐색이 불가하면 None을 돌려준다(호출부가 기존
+        트림으로 best-effort 폴백).
         """
         try:
             a_start = speech_end_a + _SIM_GAP
@@ -1274,10 +1297,18 @@ class VideoStudio:
             best: tuple[float, float, float] | None = None
             for i, fa in enumerate(a_frames):
                 cut_a = a_start + i * _SIM_FRAME_STEP
+                # 이 A 프레임의 최적 B 짝을 찾고, 임계 이하면 즉시 채택(가장 이른 컷).
+                row_best: tuple[float, float, float] | None = None
                 for j, fb in enumerate(b_frames):
                     diff = _frame_mad(fa, fb)
-                    if best is None or diff < best[2]:
-                        best = (cut_a, b_offsets[j], diff)
+                    if row_best is None or diff < row_best[2]:
+                        row_best = (cut_a, b_offsets[j], diff)
+                if row_best is None:
+                    continue
+                if threshold is not None and threshold > 0 and row_best[2] <= threshold:
+                    return row_best
+                if best is None or row_best[2] < best[2]:
+                    best = row_best
             return best
         except Exception:
             # 유사도 탐색은 best-effort — 어떤 실패도 None(기존 트림 유지)으로 안전 처리.

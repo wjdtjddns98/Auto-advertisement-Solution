@@ -396,13 +396,16 @@ def test_stitch_punch_in_alternates_shot_scale(tmp_path, monkeypatch):
         return _R()
 
     monkeypatch.setattr(_sp, "run", fake_run)
+    # 펀치인은 기본 꺼짐(1.0, 2026-07-10 PO "크기 들쭉날쭉") — 기능 검증은 명시 옵트인.
     settings = _live_settings_with_key(
-        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_VEO_FAL_CROSSFADE_SEC="0.25"
+        NUTTI_MEDIA_DIR=str(tmp_path),
+        NUTTI_VEO_FAL_CROSSFADE_SEC="0.25",
+        NUTTI_VEO_FAL_PUNCH_IN_SCALE="1.12",
     )
     studio = VideoStudio(settings)
     studio._stitch(["a.mp4", "b.mp4", "c.mp4"], [3.0, 3.0, 3.0])
     joined = " ".join(captured["cmd"])
-    # 기본 배율 1.12: scale=806:1432 후 720x1280 크롭(상단 1/3 기준) — 입력 0·2만.
+    # 배율 1.12: scale=806:1432 후 720x1280 크롭(상단 1/3 기준) — 입력 0·2만.
     assert joined.count("crop=720:1280") == 2
     assert "scale=806:1432" in joined
     # 비펀치 입력(1)도 공통 해상도로 정규화돼 xfade 크기 불일치가 없다.
@@ -436,8 +439,16 @@ def test_stitch_punch_in_disabled_when_scale_le_1(tmp_path, monkeypatch):
     assert "scale=720:1280" in joined
 
 
+def test_punch_in_default_disabled():
+    """펀치인 기본값은 1.0(비활성) — 교차 줌이 강아지 크기를 비트마다 들쭉날쭉하게
+    만들어 연속 영상 체감을 깨는 직접 원인이었다(2026-07-10 PO). 켜려면 env 옵트인."""
+    from nutti.config import Settings
+
+    assert Settings(NUTTI_ENV="test").veo_fal_punch_in_scale == 1.0
+
+
 def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):
-    """디졸브 불가(길이 미상) concat 폴백에서도 교차 펀치인이 유지된다."""
+    """디졸브 불가(길이 미상) concat 폴백에서도 (옵트인 시) 교차 펀치인이 유지된다."""
     import subprocess as _sp
 
     captured: dict = {}
@@ -451,7 +462,11 @@ def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):
         return _R()
 
     monkeypatch.setattr(_sp, "run", fake_run)
-    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    studio = VideoStudio(
+        _live_settings_with_key(
+            NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_VEO_FAL_PUNCH_IN_SCALE="1.12"
+        )
+    )
     studio._stitch(["a.mp4", "b.mp4"])  # durations 없음 → concat 경로
     joined = " ".join(captured["cmd"])
     assert "concat=n=2" in joined
@@ -643,7 +658,7 @@ def test_produce_clips_caption_explicit_off_skips_burn(tmp_path, monkeypatch):
 
 
 def test_find_similarity_cuts_picks_minimum_mad_pair(tmp_path, monkeypatch):
-    """A·B 후보 프레임 전 쌍 중 평균절대차(MAD)가 최소인 쌍의 컷 지점을 고른다."""
+    """threshold 미지정이면 종전대로 전 쌍 MAD 최소 쌍의 컷 지점을 고른다(폴백 경로)."""
     import subprocess as _sp
 
     frame_size = video_module._SIM_W * video_module._SIM_H
@@ -677,6 +692,53 @@ def test_find_similarity_cuts_picks_minimum_mad_pair(tmp_path, monkeypatch):
     cut_a, cut_b, diff = result
     assert cut_a == pytest.approx(5.15 + 4 * 0.1)  # A 마지막 후보(값 10)
     assert cut_b == pytest.approx(0.0)  # B 첫 후보(값 12)
+    assert diff == pytest.approx(2.0)
+
+
+def test_find_similarity_cuts_prefers_earliest_under_threshold(tmp_path, monkeypatch):
+    """threshold가 있으면 임계 이하인 **가장 이른** A 프레임에서 컷한다(설틀 꼬리 제거).
+
+    2026-07-10 PO "매 비트 끝 페이드아웃": 최솟값 선택은 가장 정지된(=가장 늦은) 설틀
+    프레임을 고르는 경향이라, 발화 후 모션이 죽어가는 꼬리 0.5~1초를 매 비트 끝에 도로
+    포함시켰다(최종 영상 YDIF 실측). 임계만 만족하면 이르게 잘라 죽은 구간을 버린다.
+    """
+    import subprocess as _sp
+
+    frame_size = video_module._SIM_W * video_module._SIM_H
+    # A 후보: 첫 프레임(값 20)이 B(값 12)와 diff=8로 임계(18) 이하 → 즉시 채택.
+    # 더 뒤의 값 10(diff=2, 전역 최소)은 무시돼야 한다.
+    a_values = [20, 150, 100, 50, 10]
+    b_values = [12]
+
+    def fake_run(cmd, **kw):
+        joined = " ".join(cmd)
+
+        class _R:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        if "rawvideo" not in joined:
+            _R.stderr = b"Duration: 00:00:08.00, start: 0.000000"
+            return _R()
+        if "a.mp4" in joined:
+            _R.stdout = b"".join(bytes([v]) * frame_size for v in a_values)
+        elif "b.mp4" in joined:
+            _R.stdout = b"".join(bytes([v]) * frame_size for v in b_values)
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    result = studio._find_similarity_cuts("a.mp4", "b.mp4", 5.0, 0.1, threshold=18.0)
+    assert result is not None
+    cut_a, cut_b, diff = result
+    assert cut_a == pytest.approx(5.15)  # A 첫 후보 — 전역 최소(마지막 후보)가 아니다
+    assert diff == pytest.approx(8.0)
+    # 임계를 아무 쌍도 못 넘으면 전역 최소로 폴백한다(호출부가 불일치 마스킹 판정).
+    result = studio._find_similarity_cuts("a.mp4", "b.mp4", 5.0, 0.1, threshold=1.0)
+    assert result is not None
+    cut_a, _cut_b, diff = result
+    assert cut_a == pytest.approx(5.15 + 4 * 0.1)  # 전역 최소(값 10, diff=2)
     assert diff == pytest.approx(2.0)
 
 
@@ -778,7 +840,7 @@ def test_produce_clips_similarity_mismatch_warns_and_doubles_dissolve(tmp_path, 
     monkeypatch.setattr(
         VideoStudio,
         "_find_similarity_cuts",
-        lambda self, a, b, se, ss: (5.5, 0.0, 25.0),  # 25.0 > 기본 임계 18.0
+        lambda self, a, b, se, ss, threshold=None: (5.5, 0.0, 25.0),  # 25.0 > 기본 임계 18.0
         raising=True,
     )
     final, _total = studio._produce_clips_veo_fal(
@@ -803,7 +865,10 @@ def test_produce_clips_similarity_failure_falls_back_to_existing_trim(tmp_path, 
         tmp_path, monkeypatch, NUTTI_CAPTION_BURN="false"
     )
     monkeypatch.setattr(
-        VideoStudio, "_find_similarity_cuts", lambda self, a, b, se, ss: None, raising=True
+        VideoStudio,
+        "_find_similarity_cuts",
+        lambda self, a, b, se, ss, threshold=None: None,
+        raising=True,
     )
     final, _total = studio._produce_clips_veo_fal(
         "frame.png", ["비트1", "비트2"], pick_episode_style("x")
@@ -825,7 +890,7 @@ def test_produce_clips_similarity_success_replaces_cuts(tmp_path, monkeypatch):
     monkeypatch.setattr(
         VideoStudio,
         "_find_similarity_cuts",
-        lambda self, a, b, se, ss: (7.6, 0.0, 1.5),  # 1.5 <= 기본 임계 18.0 → 컷 채택
+        lambda self, a, b, se, ss, threshold=None: (7.6, 0.0, 1.5),  # 1.5 <= 임계 → 컷 채택
         raising=True,
     )
     cut_calls: list[tuple[float, float]] = []
