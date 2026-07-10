@@ -209,7 +209,11 @@ class Orchestrator:
         run.current_stage = Stage.ANALYTICS
         for up in run.uploads:
             self.state.add_pending_upload(
-                up.platform, up.external_id, up.url, up.uploaded_at.isoformat()
+                up.platform,
+                up.external_id,
+                up.url,
+                up.uploaded_at.isoformat(),
+                dry_run=self.settings.dry_run,
             )
         self.store.log_run(run)
         log.info("pipeline.done", run_id=run.id, uploads=len(run.uploads))
@@ -283,6 +287,11 @@ class Orchestrator:
         전부 즉시 수집한다. 숙성분은 조회 후 큐에서 제거하고(재조회 방지), 남은 미숙성분은
         다시 저장한다. 분석 결과가 비어 있으면 기존 피드백을 유지한다(save_feedback가 무시).
 
+        모드 분리(2026-07-10): 항목의 dry_run 플래그가 현재 모드와 일치할 때만 조회한다.
+        라이브 run은 dry 항목(가짜 ID — 조회 시 HTTP 400)을 큐에서 정화하고, dry run은
+        라이브 항목을 보존한다(가짜 0 지표로 소모 방지). 항목별 조회 실패는 경고 후 그
+        항목만 제거 — 어떤 경우에도 수집이 run 전체를 죽이지 않는다.
+
         반환: 이번에 도출·저장한 분석 문자열(수집 대상이 없으면 빈 문자열).
         """
         pending = self.state.get_pending_uploads()
@@ -292,35 +301,69 @@ class Orchestrator:
         min_age = 0.0 if self.settings.dry_run else float(self.settings.analytics_min_age_hours)
         ready: list[dict] = []
         remaining: list[dict] = []
+        purged = 0
         for item in pending:
+            # 모드 분리(2026-07-10 실측 결함): dry_run 항목의 external_id는 가짜
+            # (yt_<script_id>)라 라이브 Analytics 조회 시 HTTP 400으로 run이 시작 즉시
+            # 죽는다. 플래그 없는 레거시 항목은 dry로 간주(add_pending_upload 기본과
+            # 동일) — 현 큐의 오염분이 첫 라이브 run에서 자동 정화된다.
+            item_dry = bool(item.get("dry_run", True))
+            if not self.settings.dry_run and item_dry:
+                purged += 1  # 라이브 run: dry 항목은 조회 불가 쓰레기 — 큐에서 제거
+                continue
+            if self.settings.dry_run and not item_dry:
+                remaining.append(item)  # dry run: 라이브 항목은 건드리지 않고 보존
+                continue
             if self._upload_age_hours(item.get("uploaded_at"), now) >= min_age:
                 ready.append(item)
             else:
                 remaining.append(item)
+        if purged:
+            log.warning("pipeline.feedback.purged_dry_items", n=purged)
         if not ready:
+            if purged:
+                self.state.replace_pending_uploads(remaining)  # 정화 결과 영속화
             return ""
-        reports = [
-            self.publisher.fetch_performance(
-                UploadResult(
-                    platform=item.get("platform", "youtube"),
-                    external_id=item.get("external_id", ""),
-                    url=item.get("url", ""),
+        # 항목별 조회 격리(2026-07-10): 조회 실패(불량 ID·일시 오류) 하나가 run 전체를
+        # 죽이면 안 된다 — 피드백 루프는 best-effort. 실패 항목은 경고 후 큐에서 제거한다
+        # (남기면 영구 불량 ID가 매 run 같은 오류를 반복).
+        reports = []
+        fetched: list[dict] = []
+        for item in ready:
+            try:
+                reports.append(
+                    self.publisher.fetch_performance(
+                        UploadResult(
+                            platform=item.get("platform", "youtube"),
+                            external_id=item.get("external_id", ""),
+                            url=item.get("url", ""),
+                        )
+                    )
                 )
-            )
-            for item in ready
-        ]
+                fetched.append(item)
+            except Exception:
+                log.warning(
+                    "pipeline.feedback.fetch_failed",
+                    external_id=item.get("external_id", ""),
+                )
+        if not reports:
+            self.state.replace_pending_uploads(remaining)
+            return ""
         analysis = self.ai.analyze_performance(reports)
         if not (analysis and analysis.strip()):
-            # 분석 실패(라이브 LLM 폴백 오류 등) — 큐를 건드리지 않아 ready가 남는다.
-            # 조회는 이미 성공했지만 LLM 단계만 실패한 것이라, 이미 성공한 성과 신호를
-            # 버리지 않고 다음 사이클에 재분석하도록 둔다(리뷰 지적, medium). LLM이 계속
-            # 실패하면 큐에 쌓이지만, 그건 피드백 루프 자체가 죽은 환경이라 유실보다 낫다.
-            log.info("pipeline.feedback.analysis_empty", n_ready=len(ready))
+            # 분석 실패(라이브 LLM 폴백 오류 등) — 조회 성공분(fetched)은 큐에 보존해
+            # 다음 사이클에 재분석한다(이미 성공한 성과 신호 유실 방지, 리뷰 지적 medium).
+            # LLM이 계속 실패하면 큐에 쌓이지만, 그건 피드백 루프 자체가 죽은 환경이라
+            # 유실보다 낫다. 정화(purged)·조회 실패 제거는 이 경로에서도 영속화된다.
+            log.info("pipeline.feedback.analysis_empty", n_ready=len(fetched))
+            self.state.replace_pending_uploads(remaining + fetched)
             return ""
         # 분석 성공 — 숙성분을 큐에서 제거(재조회 방지)하고 피드백 저장.
         self.state.replace_pending_uploads(remaining)
         self.state.save_feedback(analysis)
-        log.info("pipeline.feedback.collected", n_ready=len(ready), n_remaining=len(remaining))
+        log.info(
+            "pipeline.feedback.collected", n_ready=len(fetched), n_remaining=len(remaining)
+        )
         return analysis
 
     @staticmethod
