@@ -83,6 +83,12 @@ _STITCH_H = 1280
 # 자막 굽기용 한글 폰트 후보(앞에서부터 존재하는 첫 파일 사용). Windows 맑은고딕 →
 # Debian/Ubuntu Noto CJK(fonts-noto-cjk, Dockerfile에 포함) → 나눔고딕 순.
 _CAPTION_FONT_CANDIDATES = [
+    # 로컬 전용 폰트(2026-07-10 PO 지시 — '여기어때 잘난체', 상업용 무료, noonnu.cc
+    # 배포. 영상 렌더 사용은 라이선스상 허용이나 "폰트 파일 배포"는 금지라 이 저장소가
+    # public이라 커밋하지 않는다 — .gitignore의 assets/fonts/ 참조). 이 머신에 파일이
+    # 있으면(로컬 배치) 최우선 사용, 없으면(CI·새 클론·Docker) 아래 폴백으로 넘어간다.
+    # 경로는 이 파일(video.py) 기준 상대경로로 계산해 리포지토리 어디서 실행해도 찾는다.
+    str(Path(__file__).resolve().parents[2] / "assets" / "fonts" / "yg-jalnan.otf"),
     "C:/Windows/Fonts/malgunbd.ttf",
     "C:/Windows/Fonts/malgun.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
@@ -1947,11 +1953,17 @@ class VideoStudio:
                         if is_last
                         else seg_start + beat_width * len(seg) / total_chars
                     )
+                    # 표시 텍스트는 끝 온점(.)을 뗀다(2026-07-10 PO — 캡션에 마침표가
+                    # 거슬린다는 지적). 물음표·느낌표는 의미를 담으므로 남긴다. 문장
+                    # 분리(_split_caption_segments)는 이 처리 전 원문 `seg`로 이미 끝났으므로
+                    # 세그먼트 경계 판정에는 영향 없다 — 표시 시점의 순수 시각적 처리.
+                    display_text = seg[:-1] if seg.endswith(".") else seg
                     # drawtext는 여러 줄을 블록 좌측 정렬로만 그린다(줄별 중앙정렬 미지원,
                     # 실측 2026-07-06) — 줄마다 독립 drawtext를 써서 각 줄을 중앙정렬한다.
-                    # 블록 하단을 h*0.86에 고정(위로 쌓기)해 줄 수가 늘어도 화면 밖으로
-                    # 잘리지 않는다(실측: 40px 4줄이 하단 잘림).
-                    lines = self._wrap_caption(seg, width=wrap_width).split("\n")
+                    # 블록 하단을 caption_y_pos(기본 1200px, 2026-07-10 PO)에 고정(위로
+                    # 쌓기)해 줄 수가 늘어도 화면 밖으로 잘리지 않는다(실측: 40px 4줄이
+                    # 하단 잘림 — 여전히 유효한 가드, 기준점만 h*0.86→명시 픽셀로 변경).
+                    lines = self._wrap_caption(display_text, width=wrap_width).split("\n")
                     for j, line in enumerate(lines):
                         tf = media_dir / f"caption_{uuid4().hex[:8]}.txt"
                         # newline='\n' 필수 — Windows 텍스트 모드가 \n을 \r\n으로 바꾸면
@@ -1962,7 +1974,7 @@ class VideoStudio:
                         if "'" in tf_ff or "'" in font_ff:
                             log.warning("video.caption.path_quote")
                             return None
-                        y = f"h*0.86-{(len(lines) - j) * line_h}"
+                        y = f"{self.settings.caption_y_pos}-{(len(lines) - j) * line_h}"
                         filters.append(
                             f"drawtext=fontfile='{font_ff}':textfile='{tf_ff}':"
                             f"fontsize={size}:fontcolor=white:"

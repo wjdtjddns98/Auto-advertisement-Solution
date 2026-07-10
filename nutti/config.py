@@ -130,13 +130,20 @@ class Settings(BaseSettings):
     # 렌더 결함은 26px 수정으로 이미 해소됨). Veo가 임의로 박는 깨진 자막은
     # negative_prompt로 계속 막는다(별개 방어).
     caption_burn: bool = Field(default=True, alias="NUTTI_CAPTION_BURN")
-    # 자막 폰트 파일 경로. 비우면 OS 기본 후보 탐색(Windows 맑은고딕 → Noto CJK → 나눔).
+    # 자막 폰트 파일 경로. 비우면 OS 기본 후보 탐색(2026-07-10 PO 지시로 '여기어때
+    # 잘난체'가 최우선 — assets/fonts/yg-jalnan.otf, 상업용 무료 폰트지만 "파일 배포"는
+    # 라이선스 금지라 이 public 저장소엔 커밋하지 않고 로컬에만 둔다(.gitignore). 그
+    # 파일이 없는 환경(CI·새 클론·Docker)은 맑은고딕 → Noto CJK → 나눔 순으로 폴백.
     caption_font: str = Field(default="", alias="NUTTI_CAPTION_FONT")
-    # 자막 글자 크기(px, 720px 폭 기준). 실전 시사에서 40은 "너무 크다"(2026-07-06 PO) —
-    # 쇼츠 관례상 화면 폭의 3~4% 수준이 무난. 테두리 두께는 크기에 비례해 자동 산출.
+    # 자막 글자 크기(px, 720px 폭 기준). 26px가 "너무 작다"(2026-07-10 PO)는 지적으로
+    # 34px로 상향(화면 폭의 ~4.7%). 이전 40px "너무 크다"(2026-06-06) 판정보다는 작게.
+    # 테두리 두께는 크기에 비례해 자동 산출.
     # ge=1: 0이면 _burn_captions의 wrap_width 나눗셈이 ZeroDivisionError로 클립 생산을
     # 죽인다(리뷰 지적) — 설정 로드 시점에 시끄럽게 거부한다(과금 전 fail-fast).
-    caption_font_size: int = Field(default=26, ge=1, alias="NUTTI_CAPTION_FONT_SIZE")
+    caption_font_size: int = Field(default=34, ge=1, alias="NUTTI_CAPTION_FONT_SIZE")
+    # 자막 하단 기준 y좌표(px, 1280px 높이 기준). 2026-07-10 PO 지시로 h*0.86(≈1101px)
+    # 대신 명시 픽셀값 1200px 사용 — 화면 더 아래쪽에 고정.
+    caption_y_pos: int = Field(default=1200, ge=1, alias="NUTTI_CAPTION_Y_POS")
     # 비트 경계 끊김(클립이 8초 동안 포즈가 drift해 다음 클립과 안 이어짐)을 근본적으로
     # 줄이기 위한 "끝프레임 고정" 모드(2026-06-29 PO 아이디어). True면 image-to-video
     # 대신 first-last-frame-to-video 모델을 써 각 비트 클립의 시작·끝 프레임을 동일한

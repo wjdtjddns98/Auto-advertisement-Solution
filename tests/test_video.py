@@ -545,12 +545,23 @@ def test_burn_captions_shows_sentences_sequentially(tmp_path, monkeypatch):
     보인다 — 종전(비트 전체 구간에 두 줄 동시 표시)과 달리 drawtext 필터마다 서로 다른
     between(t,...) 창을 갖는다.
     """
+    import re
     import subprocess as _sp
+    from pathlib import Path
 
     captured: dict = {}
 
     def fake_run(cmd, **kw):
         captured["cmd"] = cmd
+        # 임시 자막 텍스트 파일은 호출 직후 finally에서 삭제되므로, 여기(subprocess.run이
+        # 실행되는 시점 — 아직 파일이 존재)에서 미리 내용을 읽어 캡처한다. 파일명이
+        # uuid4라 glob 정렬은 작성 순서와 무관 — "-vf" 필터 문자열의 textfile='...'
+        # 등장 순서(=drawtext 생성 순서)를 그대로 따라가야 순차 표시 순서가 맞다.
+        vf = cmd[cmd.index("-vf") + 1]
+        paths = re.findall(r"textfile='([^']+)'", vf)
+        captured["texts"] = [
+            Path(p.replace("\\:", ":")).read_text(encoding="utf-8") for p in paths
+        ]
 
         class _R:
             returncode = 0
@@ -564,20 +575,22 @@ def test_burn_captions_shows_sentences_sequentially(tmp_path, monkeypatch):
         NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_FONT=str(font)
     )
     studio = VideoStudio(settings)
-    # 두 문장 모두 wrap_width(22자, fontsize=26 기본값) 이내라 각각 1줄로 렌더된다.
+    # 두 문장 모두 wrap_width(17자, fontsize=34 기본값) 이내라 각각 1줄로 렌더된다.
     # 첫 비트에만 2문장을 넣고, 둘째 비트는 단일 세그먼트라 검증 대상에서 제외한다
     # (마지막 비트는 "영상 끝까지 +1초 여유" 보정이 붙어 경계 계산이 달라지므로 —
     # 첫 비트만 보면 dissolve=0 기본값에서 beat_end가 그대로 dur[0]=8.0이 된다).
-    beat1 = "핵심은 양이에요. 체중에 맞춰 급여하는 게 중요해요."
+    beat1 = "핵심은 양이에요. 체중 맞춰 급여해요."
     out = studio._burn_captions("in.mp4", [beat1, "둘째 비트"], [8.0, 7.0])
     assert out is not None
     joined = " ".join(captured["cmd"])
     # 첫 비트 두 문장 + 둘째 비트 1줄 = drawtext 3개.
     assert joined.count("drawtext=") == 3
     assert "between(t,0.000,8.000)" not in joined  # 문장1이 비트1 전체를 차지하지 않음
-    # 첫 문장(9자) : 둘째 문장(19자) 비율로 8초를 분할 — 경계 = 8*9/28 = 2.571초.
-    assert "between(t,0.000,2.571)" in joined
-    assert "between(t,2.571,8.000)" in joined
+    # 첫 문장(9자) : 둘째 문장(11자) 비율로 8초를 분할 — 경계 = 8*9/20 = 3.600초.
+    assert "between(t,0.000,3.600)" in joined
+    assert "between(t,3.600,8.000)" in joined
+    # 표시 텍스트는 끝 온점을 뗀다(2026-07-10 PO) — 원문(분리 기준)엔 있어도 렌더엔 없다.
+    assert captured["texts"] == ["핵심은 양이에요", "체중 맞춰 급여해요", "둘째 비트"]
 
 
 def test_burn_captions_returns_none_without_font(tmp_path, monkeypatch):
@@ -1041,6 +1054,50 @@ def test_stitch_sim_threshold_default():
     from nutti.config import Settings
 
     assert Settings(NUTTI_DRY_RUN=True).stitch_sim_threshold == 18.0
+
+
+def test_caption_font_size_and_y_pos_defaults():
+    """자막 크기·위치 기본값(2026-07-10 PO — 26px는 작다·1200px로 아래 이동)."""
+    from nutti.config import Settings
+
+    settings = Settings(NUTTI_DRY_RUN=True)
+    assert settings.caption_font_size == 34
+    assert settings.caption_y_pos == 1200
+
+
+def _bundled_jalnan_font_path():
+    from pathlib import Path
+
+    return Path(video_module.__file__).resolve().parents[2] / "assets" / "fonts" / "yg-jalnan.otf"
+
+
+@pytest.mark.skipif(
+    not _bundled_jalnan_font_path().is_file(),
+    reason="라이선스 폰트 파일은 로컬 전용(.gitignore) — CI·새 클론엔 없음, 로컬 스모크 체크",
+)
+def test_bundled_jalnan_font_file_exists_on_disk_when_present():
+    """이 머신에 로컬 배치된 '여기어때 잘난체' 폰트가 있으면 실제 파일임을 확인한다.
+
+    저장소는 public이고 폰트 라이선스가 "폰트 파일 배포" 금지를 명시(noonnu.cc)해
+    이 파일은 커밋하지 않는다(.gitignore assets/fonts/) — CI·새 클론에는 없는 게
+    정상이라 그 환경에서는 스킵한다. 이 세션처럼 PO 로컬 머신에 배치된 경우에만
+    실제 파일인지 확인하는 스모크 체크.
+    """
+    assert _bundled_jalnan_font_path().is_file()
+
+
+def test_find_caption_font_prefers_first_existing_candidate(tmp_path, monkeypatch):
+    """후보 목록에서 실제 존재하는 첫 파일을 고른다(번들 폰트 유무와 무관하게 검증).
+
+    실제 라이선스 폰트 파일(로컬 전용, CI엔 없음)에 의존하지 않도록 tmp_path의
+    가짜 폰트 파일로 검색 로직(존재하는 후보 우선)만 독립적으로 확인한다.
+    """
+    missing = str(tmp_path / "missing.otf")
+    present = tmp_path / "present.ttf"
+    present.write_bytes(b"fake-font")
+    monkeypatch.setattr(video_module, "_CAPTION_FONT_CANDIDATES", [missing, str(present)])
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    assert studio._find_caption_font() == str(present)
 
 
 def _synthetic_speech_pcm(sample_rate: int = 16000) -> bytes:
