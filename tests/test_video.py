@@ -742,6 +742,49 @@ def test_find_similarity_cuts_prefers_earliest_under_threshold(tmp_path, monkeyp
     assert diff == pytest.approx(2.0)
 
 
+def test_find_similarity_cuts_clamps_window_and_prefers_latest(tmp_path, monkeypatch):
+    """대사가 클립 끝까지 차 창이 소멸하면 마지막 3프레임으로 클램프 + 가장 늦은 컷.
+
+    6차 런 실측: 경계 0·1이 speech_end≈dur로 창 폭이 음수가 돼 매칭을 포기(None)하고
+    0.35s 디졸브 폴백 — 유일하게 창이 생긴 경계 2만 하드컷(PO 호평). 클램프 모드에선
+    창이 대사 구간 위이므로 대사 잘림 최소화를 위해 임계 이하 중 가장 늦은 프레임을
+    채택해야 한다(가장 이른 컷이 아님).
+    """
+    import subprocess as _sp
+
+    frame_size = video_module._SIM_W * video_module._SIM_H
+    # 클램프 창(마지막 0.3s) 3프레임: diffs vs B(12) = [38, 4, 7].
+    # 역순 채택이면 마지막(diff=7), 이른 채택이면 중간(diff=4)이 나온다 — 역순을 핀.
+    a_values = [50, 8, 5]
+    b_values = [12]
+
+    def fake_run(cmd, **kw):
+        joined = " ".join(cmd)
+
+        class _R:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        if "rawvideo" not in joined:
+            _R.stderr = b"Duration: 00:00:08.00, start: 0.000000"
+            return _R()
+        if "a.mp4" in joined:
+            _R.stdout = b"".join(bytes([v]) * frame_size for v in a_values)
+        elif "b.mp4" in joined:
+            _R.stdout = b"".join(bytes([v]) * frame_size for v in b_values)
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    # speech_end=8.0(=dur) → a_start=8.15 > a_end=8.0 → 창 소멸 → 클램프 [7.7, 8.0].
+    result = studio._find_similarity_cuts("a.mp4", "b.mp4", 8.0, 0.1, threshold=18.0)
+    assert result is not None
+    cut_a, cut_b, diff = result
+    assert cut_a == pytest.approx(7.7 + 2 * 0.1)  # 마지막 프레임(가장 늦은 임계 이하)
+    assert diff == pytest.approx(7.0)
+
+
 def test_find_similarity_cuts_collapses_b_window_when_narrow(tmp_path, monkeypatch):
     """speech_start_b가 작아 B 후보 구간이 0.2s 미만이면 B는 t=0 단일 후보로 수렴한다."""
     import subprocess as _sp
@@ -1558,7 +1601,9 @@ def test_produce_clips_qc_retry_regenerates_bad_clip(tmp_path, monkeypatch):
     monkeypatch.setattr(
         VideoStudio,
         "_qc_check_beat",
-        lambda self, clip, frame, lock: ["mid_freeze"] if clip == str(bad) else [],
+        lambda self, clip, frame, lock, final_beat=False: (
+            ["mid_freeze"] if clip == str(bad) else []
+        ),
     )
     monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
     captured: dict = {}
@@ -1602,7 +1647,9 @@ def test_produce_clips_qc_fallback_after_max_retries(tmp_path, monkeypatch):
     )
     # 항상 불량 판정 → 상한(qc_max_retries=2)까지 재생성 후 폴백 수용.
     monkeypatch.setattr(
-        VideoStudio, "_qc_check_beat", lambda self, c, f, lock: ["short_speech"]
+        VideoStudio,
+        "_qc_check_beat",
+        lambda self, c, f, lock, final_beat=False: ["short_speech"],
     )
     monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
     captured: dict = {}
@@ -1711,6 +1758,30 @@ def test_qc_check_beat_skips_text_judge_when_other_reasons(tmp_path, monkeypatch
     assert reasons == ["mid_freeze"]
 
 
+def test_qc_check_beat_final_beat_skips_tail_convergence(tmp_path, monkeypatch):
+    """마지막 비트(final_beat=True)는 꼬리 수렴 검사를 면제한다.
+
+    뒤에 이어붙일 클립이 없고 모션도 자유(_MOTION_FINAL_FREE)라 수렴 실패가 결함이
+    아니다 — 6차 런 실측: 마지막 비트가 tail_not_converged로 2회 재생성($0.8 낭비).
+    """
+    studio = VideoStudio(
+        _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)), text_judge=lambda p: False
+    )
+    monkeypatch.setattr(VideoStudio, "_probe_duration_sec", lambda self, c: 8.0)
+    monkeypatch.setattr(VideoStudio, "_qc_freeze_black", lambda self, c, d: [])
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
+    monkeypatch.setattr(VideoStudio, "_extract_color_frames", lambda self, c, d: [])
+    monkeypatch.setattr(
+        VideoStudio,
+        "_qc_tail_convergence",
+        lambda self, c, f, d: "tail_not_converged",
+    )
+    # 중간 비트: 꼬리 미수렴이 사유로 잡힌다(기존 동작 유지).
+    assert studio._qc_check_beat("c.mp4", "f.png", lock=True) == ["tail_not_converged"]
+    # 마지막 비트: 같은 조건에서도 면제돼 통과한다.
+    assert studio._qc_check_beat("c.mp4", "f.png", lock=True, final_beat=True) == []
+
+
 def test_produce_clips_qc_retry_offsets_seed(tmp_path, monkeypatch):
     """QC 재생성은 seed를 오프셋한다 — 같은 seed+같은 프롬프트 재제출은 같은 결함
     (텍스트 오버레이 등)을 그대로 재현할 수 있어 재시도가 무효가 되기 때문."""
@@ -1745,7 +1816,9 @@ def test_produce_clips_qc_retry_offsets_seed(tmp_path, monkeypatch):
     monkeypatch.setattr(
         VideoStudio,
         "_qc_check_beat",
-        lambda self, clip, frame, lock: ["text_overlay"] if clip == str(bad) else [],
+        lambda self, clip, frame, lock, final_beat=False: (
+            ["text_overlay"] if clip == str(bad) else []
+        ),
     )
     monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0))
     monkeypatch.setattr(

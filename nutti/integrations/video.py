@@ -818,7 +818,11 @@ class VideoStudio:
                 # 클립 QC 레이어(2026-07-07 PO): 중간 프리즈·블랙·무발화·꼬리 미수렴을
                 # 잡아 그 비트만 재생성한다. 상한(qc_max_retries) 초과 시 현행 트림·마스킹
                 # 폴백으로 그대로 수용한다 — 여기서 예외/실패로 파이프라인을 죽이지 않는다.
-                reasons = self._qc_check_beat(clip_path, frame_path, lock)
+                # 마지막 비트는 꼬리 수렴 검사 면제(final_beat) — 뒤에 이어붙일 클립이
+                # 없고 모션도 자유(_MOTION_FINAL_FREE)라 수렴 실패가 결함이 아니다.
+                # 6차 런 실측: 마지막 비트가 tail_not_converged로 2회 재생성($0.8 낭비).
+                final_beat = i == len(beats)
+                reasons = self._qc_check_beat(clip_path, frame_path, lock, final_beat=final_beat)
                 attempt = 0
                 while reasons and attempt < self.settings.qc_max_retries:
                     attempt += 1
@@ -833,7 +837,9 @@ class VideoStudio:
                     clip_path = self._generate_and_trim_clip(
                         client, prompt, current_frame, frame_path, lock, retry_seed
                     )
-                    reasons = self._qc_check_beat(clip_path, frame_path, lock)
+                    reasons = self._qc_check_beat(
+                        clip_path, frame_path, lock, final_beat=final_beat
+                    )
                 if reasons:
                     log.info("video.veo_fal.qc.fallback", beat=i, reasons=reasons)
                 log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
@@ -909,6 +915,9 @@ class VideoStudio:
                 except Exception:
                     result = None
                 if result is None:
+                    # 관측 로그: 이 경계는 매칭 시도조차 못 해 기본 디졸브로 폴백된다 —
+                    # 라이브 런에서 "왜 이 경계만 페이드처럼 보이나"를 추적하는 신호.
+                    log.info("stitch.sim_search_miss", boundary=i)
                     continue  # ffmpeg 실패·프레임 부족 등 — best-effort 폴백(기존 트림 유지)
                 cut_a, cut_b, diff = result
                 if diff <= threshold:
@@ -1268,6 +1277,11 @@ class VideoStudio:
         임계 초과=불일치로 판정해 디졸브 2배 마스킹). threshold=None이면 종전 그대로
         전 쌍 최솟값.
 
+        클램프 모드: 대사가 클립 끝까지 차 발화 끝 이후 창이 없으면 클립 마지막
+        3프레임으로 창을 옮기고 **가장 늦은** 임계 이하 프레임을 채택한다(대사 잘림
+        최소화 — 창 자체가 대사 구간 위에 있기 때문. FLF 고정 끝프레임이라 마지막
+        프레임이 B 시작과 유사).
+
         반환은 (A 컷 시각초, B 컷 시각초, 채택 쌍 MAD)이고, ffmpeg 실패·프레임 부족·
         길이 확인 실패 등 어떤 이유로든 탐색이 불가하면 None을 돌려준다(호출부가 기존
         트림으로 best-effort 폴백).
@@ -1278,8 +1292,20 @@ class VideoStudio:
             if a_dur is None:
                 return None
             a_end = min(speech_end_a + _SIM_A_WINDOW, a_dur)
+            # 대사가 클립 끝까지 꽉 차면(무음 미검출 → speech_end≈dur) 발화 끝 이후
+            # 탐색 창이 소멸한다 — 6차 런 실측: 경계 0·1이 이걸로 매칭을 포기하고 0.35s
+            # 디졸브 폴백(페이드 체감), 창이 생긴 경계 2만 하드컷(PO 호평). 포기 대신
+            # 클립 마지막 3프레임으로 창을 클램프한다: FLF 고정 끝프레임이라 마지막
+            # 프레임은 B 시작(같은 마스코트 프레임)과 유사할 확률이 높다. 이 모드에선
+            # 대사 잘림을 최소화해야 하므로 "가장 이른"이 아니라 "가장 늦은" 프레임을
+            # 채택한다(아래 clamped 역순 순회).
+            clamped = False
             if a_end - a_start < _SIM_FRAME_STEP:
-                return None
+                clamped = True
+                a_start = max(0.0, a_dur - 3 * _SIM_FRAME_STEP)
+                a_end = a_dur
+                if a_end - a_start < _SIM_FRAME_STEP:
+                    return None
             a_frames = self._extract_gray_frames(clip_a, a_start, a_end - a_start)
             if not a_frames:
                 return None
@@ -1295,9 +1321,12 @@ class VideoStudio:
             b_offsets = [k * _SIM_FRAME_STEP for k in range(len(b_frames))]
 
             best: tuple[float, float, float] | None = None
-            for i, fa in enumerate(a_frames):
+            # 기본: 시간순(가장 이른 컷 — 설틀 꼬리 제거). 클램프 모드: 역순(가장 늦은
+            # 컷 — 창이 대사 위라 뒤로 갈수록 대사가 덜 잘린다).
+            order = reversed(list(enumerate(a_frames))) if clamped else enumerate(a_frames)
+            for i, fa in order:
                 cut_a = a_start + i * _SIM_FRAME_STEP
-                # 이 A 프레임의 최적 B 짝을 찾고, 임계 이하면 즉시 채택(가장 이른 컷).
+                # 이 A 프레임의 최적 B 짝을 찾고, 임계 이하면 즉시 채택.
                 row_best: tuple[float, float, float] | None = None
                 for j, fb in enumerate(b_frames):
                     diff = _frame_mad(fa, fb)
@@ -1458,11 +1487,16 @@ class VideoStudio:
         except Exception:
             return None
 
-    def _qc_check_beat(self, clip_path: str, frame_path: str, lock: bool) -> list[str]:
+    def _qc_check_beat(
+        self, clip_path: str, frame_path: str, lock: bool, *, final_beat: bool = False
+    ) -> list[str]:
         """한 비트 클립의 QC 사유 리스트를 모아 반환한다(빈 리스트 = 통과).
 
         검사: ①중간 프리즈/블랙(_qc_freeze_black) ②무발화(트림 실측 발화 길이가
-        `qc_min_speech_sec` 미만) ③(lock 모드) 꼬리 미수렴(_qc_tail_convergence)
+        `qc_min_speech_sec` 미만) ③(lock 모드, 마지막 비트 제외) 꼬리 미수렴
+        (_qc_tail_convergence — `final_beat=True`면 면제: 뒤에 이어붙일 클립이 없고
+        모션도 자유(_MOTION_FINAL_FREE)라 수렴 실패가 결함이 아님. 6차 런 실측:
+        마지막 비트가 이 검사로 2회 재생성돼 $0.8 낭비)
         ④화면 텍스트(외계어 자막, _qc_text_overlay — 비용상 다른 사유 없을 때만).
         `_trim_to_speech`는 발화 길이 측정용으로만 호출하고, 새로 만든 트림 파일은 즉시
         삭제한다 — 실제 대량 트림은 기존 후처리에서 그대로 수행한다. 어떤 검사도 파이프라인을
@@ -1482,7 +1516,7 @@ class VideoStudio:
             Path(trimmed).unlink(missing_ok=True)
         if speech_sec is not None and speech_sec < self.settings.qc_min_speech_sec:
             reasons.append("short_speech")
-        if lock and dur is not None:
+        if lock and not final_beat and dur is not None:
             tail_reason = self._qc_tail_convergence(clip_path, frame_path, dur)
             if tail_reason is not None:
                 reasons.append(tail_reason)
