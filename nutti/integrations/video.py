@@ -1988,7 +1988,8 @@ class VideoStudio:
                     display_text = seg[:-1] if seg.endswith(".") else seg
                     # drawtext는 여러 줄을 블록 좌측 정렬로만 그린다(줄별 중앙정렬 미지원,
                     # 실측 2026-07-06) — 줄마다 독립 drawtext를 써서 각 줄을 중앙정렬한다.
-                    # 블록 하단을 caption_y_pos(기본 1200px, 2026-07-10 PO)에 고정(위로
+                    # 블록 하단을 caption_y_pos(기본 1040px — Shorts UI 회피, 2026-07-13 PO)에
+                    # 고정(위로
                     # 쌓기)해 줄 수가 늘어도 화면 밖으로 잘리지 않는다(실측: 40px 4줄이
                     # 하단 잘림 — 여전히 유효한 가드, 기준점만 h*0.86→명시 픽셀로 변경).
                     lines = self._wrap_caption(display_text, width=wrap_width).split("\n")

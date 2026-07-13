@@ -1064,7 +1064,7 @@ def test_caption_font_size_and_y_pos_defaults():
 
     settings = Settings(NUTTI_DRY_RUN=True)
     assert settings.caption_font_size == 34
-    assert settings.caption_y_pos == 1200
+    assert settings.caption_y_pos == 1040
 
 
 def _bundled_jalnan_font_path():
