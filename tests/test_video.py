@@ -1107,7 +1107,11 @@ def test_find_caption_font_nonascii_path_copied_to_ascii(tmp_path, monkeypatch):
 
     ffmpeg drawtext(freetype)가 Windows에서 non-ASCII 경로 폰트를 못 열고
     fontconfig 폴백으로 한글 자막이 전부 □로 굽히는 실측 결함(2026-07-13)의 회귀 방지.
+    실제 %TEMP%를 오염시키지 않도록 gettempdir를 tmp_path로 돌린다(리뷰 지적).
     """
+    ascii_tmp = tmp_path / "ascii_tmp"
+    ascii_tmp.mkdir()
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(ascii_tmp))
     kr_dir = tmp_path / "한글 경로"
     kr_dir.mkdir()
     font = kr_dir / "fake.otf"
@@ -1117,6 +1121,22 @@ def test_find_caption_font_nonascii_path_copied_to_ascii(tmp_path, monkeypatch):
     got = studio._find_caption_font()
     assert got is not None and got.isascii()
     assert Path(got).read_bytes() == b"fake-font"
+
+
+def test_asciify_font_path_recopies_updated_font(tmp_path, monkeypatch):
+    """같은 크기의 다른 내용으로 폰트가 바뀌어도 새 내용을 복사한다(스테일 캐시 회귀 방지)."""
+    ascii_tmp = tmp_path / "ascii_tmp"
+    ascii_tmp.mkdir()
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(ascii_tmp))
+    kr_dir = tmp_path / "한글 경로"
+    kr_dir.mkdir()
+    font = kr_dir / "fake.otf"
+    font.write_bytes(b"AAAA")
+    first = video_module._asciify_font_path(str(font))
+    assert Path(first).read_bytes() == b"AAAA"
+    font.write_bytes(b"BBBB")  # 동일 크기, 내용만 교체
+    second = video_module._asciify_font_path(str(font))
+    assert Path(second).read_bytes() == b"BBBB"
 
 
 def test_asciify_font_path_passthrough_ascii(tmp_path):

@@ -116,9 +116,9 @@ def _asciify_font_path(font: str) -> str:
         log.warning("video.caption.font_path_nonascii", path=font)
         return font
     try:
-        src = Path(font)
-        if not dest.is_file() or dest.stat().st_size != src.stat().st_size:
-            shutil.copyfile(src, dest)
+        # 항상 복사한다 — 편당 1회뿐이라 스킵 최적화가 불필요하고, 크기-only 비교는
+        # 같은 크기의 다른 폰트로 교체 시 스테일 캐시를 조용히 남긴다(리뷰 지적).
+        shutil.copyfile(font, dest)
     except OSError:
         log.warning("video.caption.font_copy_failed", path=font)
         return font
