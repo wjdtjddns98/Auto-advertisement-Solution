@@ -95,6 +95,34 @@ _CAPTION_FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
 ]
+
+
+def _asciify_font_path(font: str) -> str:
+    """non-ASCII 경로의 폰트를 ASCII 임시 경로로 복사해 그 경로를 돌려준다.
+
+    ffmpeg drawtext의 폰트 로딩(freetype)은 Windows에서 UTF-8 경로를 ANSI로 열어
+    한글 폴더가 낀 경로의 파일을 못 연다 — 이때 에러 없이 fontconfig 기본 폰트로
+    폴백해 한글 자막이 전부 □(tofu)로 굽힌다(실측 2026-07-13, 리포지토리 루트
+    "광고 자동화 솔루션" 밑의 yg-jalnan.otf). textfile은 avio 경유라 한글 경로여도
+    무관 — 폰트 경로만 우회하면 된다. 복사 실패 시 원 경로 반환(best-effort).
+    """
+    if font.isascii():
+        return font
+    import shutil
+    import tempfile
+
+    dest = Path(tempfile.gettempdir()) / f"nutti_font_{Path(font).name}"
+    if not str(dest).isascii():
+        log.warning("video.caption.font_path_nonascii", path=font)
+        return font
+    try:
+        src = Path(font)
+        if not dest.is_file() or dest.stat().st_size != src.stat().st_size:
+            shutil.copyfile(src, dest)
+    except OSError:
+        log.warning("video.caption.font_copy_failed", path=font)
+        return font
+    return str(dest)
 # 자막을 문장 단위로 순차 표시하기 위한 분리 기준(2026-07-10 PO — 한 줄씩 넘어가는
 # 스타일 요청). 문장 종결부호 뒤 공백에서 나눈다 — ai_text._split_into_beats의 문장
 # 분리 정규식과 동일 패턴(대본이 비트당 한국어 2문장을 강제하므로 보통 2개로 나뉜다).
@@ -1871,7 +1899,7 @@ class VideoStudio:
         cands = [self.settings.caption_font] if self.settings.caption_font else []
         for cand in cands + _CAPTION_FONT_CANDIDATES:
             if cand and Path(cand).is_file():
-                return cand
+                return _asciify_font_path(cand)
         return None
 
     def _burn_captions(

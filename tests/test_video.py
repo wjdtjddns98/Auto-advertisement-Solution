@@ -13,6 +13,8 @@ test_video_veo_fal.py·test_image_kontext.py에 있다. 섹션 구성:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import nutti.integrations.video as video_module
@@ -1098,6 +1100,30 @@ def test_find_caption_font_prefers_first_existing_candidate(tmp_path, monkeypatc
     monkeypatch.setattr(video_module, "_CAPTION_FONT_CANDIDATES", [missing, str(present)])
     studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
     assert studio._find_caption_font() == str(present)
+
+
+def test_find_caption_font_nonascii_path_copied_to_ascii(tmp_path, monkeypatch):
+    """한글이 낀 폰트 경로는 ASCII 임시 경로로 복사해 돌려준다.
+
+    ffmpeg drawtext(freetype)가 Windows에서 non-ASCII 경로 폰트를 못 열고
+    fontconfig 폴백으로 한글 자막이 전부 □로 굽히는 실측 결함(2026-07-13)의 회귀 방지.
+    """
+    kr_dir = tmp_path / "한글 경로"
+    kr_dir.mkdir()
+    font = kr_dir / "fake.otf"
+    font.write_bytes(b"fake-font")
+    monkeypatch.setattr(video_module, "_CAPTION_FONT_CANDIDATES", [str(font)])
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    got = studio._find_caption_font()
+    assert got is not None and got.isascii()
+    assert Path(got).read_bytes() == b"fake-font"
+
+
+def test_asciify_font_path_passthrough_ascii(tmp_path):
+    """ASCII 경로는 복사 없이 그대로 반환한다."""
+    font = tmp_path / "plain.ttf"
+    font.write_bytes(b"fake-font")
+    assert video_module._asciify_font_path(str(font)) == str(font)
 
 
 def _synthetic_speech_pcm(sample_rate: int = 16000) -> bytes:
