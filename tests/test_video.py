@@ -1059,12 +1059,12 @@ def test_stitch_sim_threshold_default():
 
 
 def test_caption_font_size_and_y_pos_defaults():
-    """자막 크기·위치 기본값(2026-07-10 PO — 26px는 작다·1200px로 아래 이동)."""
+    """자막 크기·위치 기본값(크기 34px=2026-07-10 PO, y=960px=2026-07-14 PO 추가 상향)."""
     from nutti.config import Settings
 
     settings = Settings(NUTTI_DRY_RUN=True)
     assert settings.caption_font_size == 34
-    assert settings.caption_y_pos == 1040
+    assert settings.caption_y_pos == 960
 
 
 def _bundled_jalnan_font_path():

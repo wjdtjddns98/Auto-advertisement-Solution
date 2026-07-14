@@ -142,9 +142,10 @@ class Settings(BaseSettings):
     # 죽인다(리뷰 지적) — 설정 로드 시점에 시끄럽게 거부한다(과금 전 fail-fast).
     caption_font_size: int = Field(default=34, ge=1, alias="NUTTI_CAPTION_FONT_SIZE")
     # 자막 하단 기준 y좌표(px, 1280px 높이 기준). 1200px(2026-07-10)은 YouTube Shorts
-    # UI(제목·채널명 오버레이, 하단 ~240px)에 깔리는 실측 문제 — 2026-07-13 PO 지시로
-    # 안전영역 바로 위 1040px로 상향(하단 240px 회피).
-    caption_y_pos: int = Field(default=1040, ge=1, alias="NUTTI_CAPTION_Y_POS")
+    # UI(제목·채널명 오버레이, 하단 ~240px)에 깔리는 실측 문제로 1040px로 올렸으나
+    # (2026-07-13), 프로덕션 편(0SVBKNkGoA4) 육안 확인 결과 여전히 낮다는 PO 판정
+    # (2026-07-14) — 하단 25% 지점인 960px로 추가 상향.
+    caption_y_pos: int = Field(default=960, ge=1, alias="NUTTI_CAPTION_Y_POS")
     # 비트 경계 끊김(클립이 8초 동안 포즈가 drift해 다음 클립과 안 이어짐)을 근본적으로
     # 줄이기 위한 "끝프레임 고정" 모드(2026-06-29 PO 아이디어). True면 image-to-video
     # 대신 first-last-frame-to-video 모델을 써 각 비트 클립의 시작·끝 프레임을 동일한
