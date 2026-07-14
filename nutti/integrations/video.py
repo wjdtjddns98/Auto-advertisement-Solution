@@ -2056,9 +2056,14 @@ class VideoStudio:
         if client is None:
             client = owned = FalKontextClient(self.settings, sleep=self._sleep)
         try:
+            # fallback_prompt: 주제의 신체 어휘가 FLUX 안전 필터를 오탐시키면(2026-07-14
+            # 실측 — "엉덩이·항문낭"/"허리 라인"에 has_nsfw_concepts=True + placeholder)
+            # 같은 프롬프트 재시도는 결정적으로 전부 실패한다. 재시도부터는 주제 문장을
+            # 뺀 프롬프트로 전환한다 — 주제는 배경 연출용 부가 문맥이라 빠져도 무해.
             path = client.generate_frame(
                 self._frame_prompt(script, style),
                 reference_image_path=self.settings.nutti_mascot_image or None,
+                fallback_prompt=self._frame_prompt(script, style, include_topic=False),
             )
         finally:
             if owned is not None:
@@ -2067,13 +2072,16 @@ class VideoStudio:
         return path
 
     @staticmethod
-    def _frame_prompt(script: Script, style: EpisodeStyle) -> str:
+    def _frame_prompt(script: Script, style: EpisodeStyle, *, include_topic: bool = True) -> str:
         """시작 프레임 생성용 장면 프롬프트(마스코트·세로 9:16·금지 요소 명시).
 
         `style`은 호출부(produce)가 한 번 계산해 비트 클립과 공유하는 편별
         의상·장소 — 여기서 독립 계산하지 않는다(프레임-클립 장면 일치 계약).
         주제도 AI 생성 텍스트이므로 `_sanitize_prompt_text`로 정제해 삽입한다
         (작은따옴표 치환 + 길이 제한 — 간접 프롬프트 주입 심층 방어).
+
+        include_topic=False면 주제(Scene context) 문장을 뺀다 — 건강 주제의 신체
+        어휘가 FLUX 안전 필터를 오탐시킬 때의 재시도 폴백용(generate_frame 참조).
         """
         topic = _sanitize_prompt_text(script.topic, _MAX_TOPIC_CHARS)
         # 주제는 AI 생성물 — 금지 리터럴(브랜드명 등)이 섞여 오면 크래시 대신 결정적으로
@@ -2091,12 +2099,13 @@ class VideoStudio:
         # ASCII 작은따옴표(') 금지(주입 방어 검증과 충돌). 한국어로 원하는 그림만 정해도 됨.
         # 리터럴 "9:16"·브랜드명은 화면 자막으로 렌더되므로 넣지 않는다(세로 비율은 Kontext
         # aspect_ratio 파라미터가 담당). 캐릭터는 "진짜 실사 강아지"로 못박아 인형탈 방지.
+        scene_context = f"Scene context: {topic}. " if include_topic else ""
         prompt = (
             "A photorealistic tall vertical portrait-orientation starting frame for a "
             f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}, {style.setting}, "
             "looking straight at the camera with a calm, gentle, friendly face, ready to "
             f"talk directly to the camera. {_CINEMATIC_LOOK} "
-            f"Scene context: {topic}. "
+            f"{scene_context}"
             "Absolutely no text, letters, numbers, words, captions, logos, brand names, or "
             "watermarks anywhere. No people, no humans in costume, no other animals. "
             "No microphone and no interview setup in frame."

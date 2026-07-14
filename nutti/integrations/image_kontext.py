@@ -123,7 +123,11 @@ class FalKontextClient(_HttpClosingMixin):
     _MAX_FRAME_RETRIES = 2
 
     def generate_frame(
-        self, scene_prompt: str, *, reference_image_path: str | None = None
+        self,
+        scene_prompt: str,
+        *,
+        reference_image_path: str | None = None,
+        fallback_prompt: str | None = None,
     ) -> str:
         """시작 프레임 이미지를 생성해 media_dir에 저장하고 로컬 경로를 반환한다.
 
@@ -133,9 +137,14 @@ class FalKontextClient(_HttpClosingMixin):
         reference_image_path가 None이면 마스코트 일관성이 보장되지 않으므로
         VideoRenderError로 즉시 실패한다(NUTTI_MASCOT_IMAGE 미설정 안내).
 
-        Kontext가 간헐적으로 검정/빈 프레임(파일이 비정상적으로 작음)을 돌려주면 영상
-        단계에서 캐릭터가 무에서 제각각 생성되므로, 그런 프레임은 거부하고 재시도한다.
+        Kontext가 검정/빈 프레임(파일이 비정상적으로 작음)을 돌려주면 영상 단계에서
+        캐릭터가 무에서 제각각 생성되므로, 그런 프레임은 거부하고 재시도한다.
         계속 비정상이면 영상(과금) 단계로 넘기지 않고 명확히 실패한다.
+
+        fallback_prompt: 퇴화가 프롬프트에 결정적일 때의 회복 경로(2026-07-14 실측 —
+        건강 주제의 신체 어휘("엉덩이·항문낭", "허리 라인")가 FLUX 안전 필터를 오탐시켜
+        has_nsfw_concepts=True + 10KB 가로 placeholder를 반환, 같은 프롬프트 재시도는
+        전부 같은 이유로 실패). 첫 시도가 퇴화하면 이후 재시도는 이 프롬프트로 전환한다.
         """
         if reference_image_path is None:
             raise VideoRenderError(
@@ -143,7 +152,10 @@ class FalKontextClient(_HttpClosingMixin):
                 "NUTTI_MASCOT_IMAGE 설정 필요"
             )
         for attempt in range(self._MAX_FRAME_RETRIES + 1):
-            request_id = self._submit(scene_prompt, reference_image_path)
+            prompt = scene_prompt if attempt == 0 or not fallback_prompt else fallback_prompt
+            if attempt == 1 and fallback_prompt:
+                log.warning("kontext.frame.fallback_prompt", attempt=attempt)
+            request_id = self._submit(prompt, reference_image_path)
             image_url = self._poll(request_id)
             path = self._download(image_url)
             reason = self._reject_reason(path)
@@ -346,6 +358,11 @@ class FalKontextClient(_HttpClosingMixin):
             sleep=self._sleep,
             max_transient_retries=_MAX_TRANSIENT_RETRIES,
         )
+        # 관측성: FLUX 안전 필터 오탐(has_nsfw_concepts=True)이 퇴화 프레임의 실측 주범
+        # (2026-07-14) — too_small 거부 로그만으로는 원인이 안 보여 여기서 명시한다.
+        nsfw = data.get("has_nsfw_concepts")
+        if isinstance(nsfw, list) and any(nsfw):
+            log.warning("kontext.result.nsfw_flagged")
         images = data.get("images")
         uri: str | None = None
         if isinstance(images, list) and images:

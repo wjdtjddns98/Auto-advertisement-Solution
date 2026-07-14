@@ -222,8 +222,16 @@ class FakeNanoBananaClient:
         self.calls: list[tuple[str, str | None]] = []
         self.close_count = 0
 
-    def generate_frame(self, scene_prompt: str, *, reference_image_path: str | None = None) -> str:
+    def generate_frame(
+        self,
+        scene_prompt: str,
+        *,
+        reference_image_path: str | None = None,
+        fallback_prompt: str | None = None,
+    ) -> str:
         self.calls.append((scene_prompt, reference_image_path))
+        self.fallback_prompts = getattr(self, "fallback_prompts", [])
+        self.fallback_prompts.append(fallback_prompt)
         return self.frame_path
 
     def close(self):
