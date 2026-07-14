@@ -546,6 +546,61 @@ def test_degenerate_landscape_frame_rejected(tmp_path):
     assert len(fake.post_calls) == 3  # 가로 프레임마다 재시도
 
 
+def test_degenerate_retry_switches_to_fallback_prompt(tmp_path):
+    """첫 시도가 퇴화하면 재시도는 fallback_prompt로 제출된다(안전 필터 오탐 회복 경로).
+
+    2026-07-14 실측 회귀 핀: 건강 주제의 신체 어휘가 FLUX 안전 필터를 오탐시키면
+    같은 프롬프트 재시도는 결정적으로 전부 실패한다 — 재시도부터 주제 문장을 뺀
+    프롬프트로 전환해야 회복된다.
+    """
+    fake = FakeKontextHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"}) for _ in range(2)],
+        download_response=_Resp(content=b"X" * 100, headers={"content-type": "image/png"}),
+    )
+    # 1차(퇴화) 후 2차 다운로드는 정상 프레임을 주도록 교체.
+    downloads = [
+        _Resp(content=b"X" * 100, headers={"content-type": "image/png"}),
+        _Resp(content=_BIG_IMG, headers={"content-type": "image/png"}),
+    ]
+    fake.download_response = None
+    fake.get = _patched_get(fake, downloads)
+    path = _client(tmp_path, fake).generate_frame(
+        "위험 어휘 포함 프롬프트",
+        reference_image_path=_frame_file(tmp_path),
+        fallback_prompt="안전 프롬프트",
+    )
+    from pathlib import Path
+
+    assert Path(path).exists()
+    prompts = [body["prompt"] for _url, body in fake.post_calls]
+    assert prompts == ["위험 어휘 포함 프롬프트", "안전 프롬프트"]
+
+
+def test_degenerate_without_fallback_keeps_original_prompt(tmp_path):
+    """fallback_prompt 미지정이면 기존처럼 같은 프롬프트로 재시도한다(계약 유지)."""
+    fake = FakeKontextHttp(
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"}) for _ in range(3)],
+        download_response=_Resp(content=b"X" * 100, headers={"content-type": "image/png"}),
+    )
+    with pytest.raises(VideoRenderError, match="비정상"):
+        _client(tmp_path, fake).generate_frame("p", reference_image_path=_frame_file(tmp_path))
+    assert [body["prompt"] for _url, body in fake.post_calls] == ["p", "p", "p"]
+
+
+def _patched_get(fake, downloads):
+    """다운로드 응답만 큐로 소비하는 get 대체(다른 라우팅은 원본 위임)."""
+    original_get = type(fake).get
+
+    def get(url, *, headers=None, follow_redirects=False):
+        if "queue.fal.run" not in url:
+            fake.download_calls.append(url)
+            fake.download_headers.append(headers)
+            return downloads.pop(0)
+        return original_get(fake, url, headers=headers, follow_redirects=follow_redirects)
+
+    return get
+
+
 def test_portrait_frame_accepted(tmp_path):
     """세로(768x1376) 프레임은 정상 수락된다(해상도 가드 통과)."""
     fake = FakeKontextHttp(

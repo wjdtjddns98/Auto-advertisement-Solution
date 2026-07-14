@@ -222,8 +222,16 @@ class FakeNanoBananaClient:
         self.calls: list[tuple[str, str | None]] = []
         self.close_count = 0
 
-    def generate_frame(self, scene_prompt: str, *, reference_image_path: str | None = None) -> str:
+    def generate_frame(
+        self,
+        scene_prompt: str,
+        *,
+        reference_image_path: str | None = None,
+        fallback_prompt: str | None = None,
+    ) -> str:
         self.calls.append((scene_prompt, reference_image_path))
+        self.fallback_prompts = getattr(self, "fallback_prompts", [])
+        self.fallback_prompts.append(fallback_prompt)
         return self.frame_path
 
     def close(self):
@@ -817,6 +825,11 @@ def test_videostudio_veo_fal_routes_to_veo_fal_path(monkeypatch):
     # FalVeoClient.generate가 호출됐어야 한다.
     assert len(veo_fal.calls) == 1
     assert asset.script_id == script.id
+    # 프레임 생성에 안전 필터 오탐 회복용 폴백 프롬프트(주제 문장 제외)가 배선돼야 한다
+    # (리뷰 지적: 배선이 끊겨도 단위 테스트만으로는 못 잡는 공백 — 여기서 핀).
+    assert nano.fallback_prompts[0] is not None
+    assert "Scene context:" not in nano.fallback_prompts[0]
+    assert "Scene context:" in nano.calls[0][0]  # 1차 프롬프트에는 주제 포함
 
 
 def test_videostudio_veo_fal_endframe_lock_fixes_frames_and_skips_chaining(monkeypatch):

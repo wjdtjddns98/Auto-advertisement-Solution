@@ -1556,6 +1556,20 @@ def test_frame_prompt_includes_episode_style_and_no_microphone():
     assert "No microphone" in prompt  # 마이크 억제 명시
 
 
+def test_frame_prompt_include_topic_false_omits_scene_context():
+    """include_topic=False면 주제(Scene context) 문장이 빠진다 — FLUX 안전 필터 오탐
+    (신체 어휘 주제 → has_nsfw_concepts=True placeholder, 2026-07-14 실측) 회복 폴백용.
+    스타일·금지 문구 등 나머지 구성은 그대로 유지된다.
+    """
+    script = _script(topic="강아지 엉덩이 항문낭 관리 간식")
+    style = pick_episode_style(script.id)
+    full = VideoStudio._frame_prompt(script, style)
+    safe = VideoStudio._frame_prompt(script, style, include_topic=False)
+    assert "Scene context:" in full and script.topic in full
+    assert "Scene context:" not in safe and "항문낭" not in safe
+    assert style.outfit in safe and "Absolutely no text" in safe
+
+
 def test_veo_fal_negative_prompt_default_suppresses_subtitles():
     """자막 억제 negative_prompt는 이제 설정값(veo_fal_negative_prompt)으로 단일화됐고,
     기본값에 핵심 금지어(subtitles·korean text overlay)가 들어 있다."""
