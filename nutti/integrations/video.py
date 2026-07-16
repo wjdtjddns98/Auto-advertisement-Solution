@@ -2048,12 +2048,17 @@ class VideoStudio:
             # 첫 문장을 영상 전체 동안 상단에 크게 표시한다(정보성 쇼츠의 제목 오버레이
             # 관행). enable 없이 굽어 스크롤 중간 합류 시청자도 주제를 즉시 잡는다.
             if self.settings.hook_overlay:
-                hook = self._split_caption_segments(beats[0])[0]
+                # 빈 비트 방어(리뷰 지적): 훅 문장이 없으면 오버레이만 건너뛰고
+                # 하단 자막은 그대로 굽는다.
+                hook_segs = self._split_caption_segments(beats[0])
+                hook = hook_segs[0] if hook_segs else ""
                 hook = hook[:-1] if hook.endswith(".") else hook
                 hsize = int(self.settings.hook_font_size)
                 hwrap = max(6, int(_STITCH_W * 0.9 / hsize))
                 hline_h = round(hsize * 1.35)
-                for j, line in enumerate(self._wrap_caption(hook, width=hwrap).split("\n")):
+                for j, line in enumerate(
+                    self._wrap_caption(hook, width=hwrap).split("\n") if hook else []
+                ):
                     f = self._drawtext_filter(
                         line, font_ff=font_ff, size=hsize,
                         y=str(int(self.settings.hook_y_pos) + j * hline_h),
@@ -2062,6 +2067,10 @@ class VideoStudio:
                     if f is None:
                         return None
                     filters.append(f)
+            if not filters:
+                # 전 비트가 빈 대사라 그릴 자막이 없다 — 빈 -vf로 ffmpeg를 부르지 않고
+                # 무자막 원본 유지로 조기 폴백한다.
+                return None
             cmd = [
                 imageio_ffmpeg.get_ffmpeg_exe(),
                 "-y",

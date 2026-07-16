@@ -667,6 +667,22 @@ def test_burn_captions_hook_overlay_disabled(tmp_path, monkeypatch):
     assert joined.count("drawtext=") == 2  # 비트 자막만
 
 
+def test_burn_captions_empty_beats_fall_back_without_ffmpeg(tmp_path):
+    """전 비트가 빈 대사면 빈 -vf로 ffmpeg를 부르지 않고 None(무자막 폴백)을 돌려준다.
+
+    리뷰 지적(2026-07-16): 종전엔 beats[0]이 빈 문자열이면 훅 오버레이가 IndexError로
+    광역 except에 떨어졌다(결과는 같은 폴백이나 크래시 경유) — 조기 반환으로 정돈.
+    """
+    font = tmp_path / "font.ttf"
+    font.write_bytes(b"fake-font")
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_FONT=str(font)
+    )
+    studio = VideoStudio(settings)
+    assert studio._burn_captions("in.mp4", [""], [7.0]) is None
+    assert not list(tmp_path.glob("caption_*.txt"))  # 임시 파일 누수 없음
+
+
 def test_burn_captions_returns_none_without_font(tmp_path, monkeypatch):
     """폰트를 못 찾으면 자막 없이 None을 돌려 원본 영상이 유지된다(best-effort)."""
     monkeypatch.setattr(video_module, "_CAPTION_FONT_CANDIDATES", [])
