@@ -683,6 +683,38 @@ def test_burn_captions_empty_beats_fall_back_without_ffmpeg(tmp_path):
     assert not list(tmp_path.glob("caption_*.txt"))  # 임시 파일 누수 없음
 
 
+def test_burn_captions_empty_hook_beat_keeps_bottom_captions(tmp_path, monkeypatch):
+    """훅 비트가 빈 대사여도 오버레이만 건너뛰고 하단 자막은 굽는다(리뷰 재검토 핀).
+
+    가드 이전 코드는 beats[0]="" 에서 훅 오버레이 IndexError가 광역 except로 번져
+    둘째 비트의 멀쩡한 자막까지 통째로 버렸다(None 폴백) — 이 테스트는 그 리버트에서
+    실패한다(수정 전: None, 수정 후: 자막 영상 경로).
+    """
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    font = tmp_path / "font.ttf"
+    font.write_bytes(b"fake-font")
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_FONT=str(font)
+    )
+    studio = VideoStudio(settings)
+    out = studio._burn_captions("in.mp4", ["", "둘째 비트 대사"], [7.0, 7.0])
+    assert out is not None and out.endswith(".mp4")
+    joined = " ".join(captured["cmd"])
+    assert joined.count("drawtext=") == 1  # 둘째 비트 자막만(훅·빈 비트 없음)
+
+
 def test_burn_captions_returns_none_without_font(tmp_path, monkeypatch):
     """폰트를 못 찾으면 자막 없이 None을 돌려 원본 영상이 유지된다(best-effort)."""
     monkeypatch.setattr(video_module, "_CAPTION_FONT_CANDIDATES", [])
