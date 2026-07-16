@@ -98,6 +98,45 @@ def test_script_system_prompt_pins_strong_hook():
     assert "2차 훅" in SCRIPT_SYSTEM_PROMPT
 
 
+def test_pick_episode_format_deterministic_and_valid():
+    """편 포맷 로테이션(2026-07-16 PO): 결정적이고, 규칙 dict 키가 로테이션 목록의
+    부분집합이며, 표본에서 전 포맷이 실제로 등장한다."""
+    from nutti.integrations.ai_text import (
+        EPISODE_FORMATS,
+        FORMAT_SCRIPT_RULES,
+        pick_episode_format,
+    )
+
+    assert pick_episode_format("고구마") == pick_episode_format("고구마")
+    assert set(FORMAT_SCRIPT_RULES) <= set(EPISODE_FORMATS)
+    seen = {pick_episode_format(f"주제-{i}") for i in range(300)}
+    assert seen == set(EPISODE_FORMATS)
+
+
+def test_generate_script_injects_format_rule_into_prompt():
+    """포맷 규칙이 있는 편은 유저 프롬프트에 [이번 편 포맷] 블록이 붙고(대본 구조 지시),
+    direct/interview 편은 붙지 않는다 — dry_run이 Script.prompt를 보존하므로 무네트워크 검증."""
+    from nutti.integrations.ai_text import (
+        FORMAT_SCRIPT_RULES,
+        AITextClient,
+        pick_episode_format,
+    )
+    from nutti.config import Settings
+
+    client = AITextClient(Settings(NUTTI_DRY_RUN="true"))
+    quiz_topic = next(
+        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "quiz"
+    )
+    direct_topic = next(
+        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "direct"
+    )
+    quiz_script = client.generate_script(quiz_topic)
+    direct_script = client.generate_script(direct_topic)
+    assert "[이번 편 포맷" in quiz_script.prompt
+    assert FORMAT_SCRIPT_RULES["quiz"] in quiz_script.prompt
+    assert "[이번 편 포맷" not in direct_script.prompt
+
+
 def test_script_system_prompt_bans_brand_in_last_beat():
     """SCRIPT_SYSTEM_PROMPT가 마무리 비트의 브랜드명 언급 금지를 명시한다(PO 지시 핀)."""
     assert "브랜드 이름" in SCRIPT_SYSTEM_PROMPT

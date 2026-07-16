@@ -416,14 +416,15 @@ _EPISODE_PROPS = [
     "a small red beret tilted playfully to one side of its head",
     "a little daisy flower clip tucked into the fur on its head",
 ]
-# 포맷 로테이션(2026-07-16 PO — 포맷 다양화). "direct"=정면 정보전달(현행),
-# "interview"=화면 밖 인터뷰어+핸드헬드 마이크 연출(_MIC) — 2026-06-16에 껐던 구도를
-# KR 쇼츠 "AI 강아지 인터뷰" 유행(2026 실측 트렌드)에 맞춰 1/3 확률 로테이션으로 부활.
-_EPISODE_FORMATS = [
-    "direct",
-    "direct",
-    "interview",
-]
+# 포맷 로테이션(2026-07-16 PO — 포맷 다양화): 목록·선택 로직은 ai_text의
+# EPISODE_FORMATS/pick_episode_format이 단일 소스다 — 대본 구조(quiz/ranking/vlog/vet
+# 톤)와 영상 연출(마이크·수의사 세트)이 같은 포맷을 봐야 하므로 여기서 중복 정의하지
+# 않는다. "interview"=화면 밖 인터뷰어+마이크(_MIC), "vet"=수의사 상황극(아래 가운·
+# 진료실 오버라이드), 그 외("direct"/"quiz"/"ranking"/"vlog")=정면 발화(대본만 다름).
+# 수의사 상황극 전용 의상·장소(2026-07-16 PO). 로테이션 대신 고정 — 콘셉트 유지를 위해
+# 소품도 뽑지 않는다(밀짚모자 쓴 수의사는 콘셉트 붕괴). ASCII 작은따옴표(') 금지.
+_VET_OUTFIT = "a clean white veterinarian coat with a small stethoscope resting around its neck"
+_VET_SETTING = "sitting at the examination desk of a bright, tidy veterinary clinic room"
 # 전 항목 sitting 계열로 통일(2026-07-06 PO) — standing 시작 프레임이 뽑히면 클립 전체가
 # 이족보행 인형탈 느낌이 되고, 모션 지시(_MOTION_HOLD/_MOTION_LIVELY의 "stays seated")와
 # 모순돼 드리프트를 유발한다. 새 장소를 추가할 때도 sitting 자세로 쓸 것.
@@ -438,22 +439,29 @@ _EPISODE_SETTINGS = [
 # ===================== PO 수정 구역 끝 (편별 연출 로테이션) =====================
 
 
-def pick_episode_style(script_id: str) -> EpisodeStyle:
-    """script.id의 CRC32로 의상·장소상황을 결정적으로 고른다(같은 편=같은 스타일).
+def pick_episode_style(script_id: str, topic: str | None = None) -> EpisodeStyle:
+    """script.id의 CRC32로 의상·장소·소품을, 주제 해시로 포맷을 결정적으로 고른다.
 
-    의상과 장소는 서로 다른 salt로 해시해 독립적으로 조합된다 — 같은 salt를 쓰면
+    의상·장소·소품은 서로 다른 salt로 해시해 독립적으로 조합된다 — 같은 salt를 쓰면
     리스트 길이가 같을 때 인덱스가 동기화돼 조합 다양성이 리스트 길이로 줄어든다.
-    CRC32 기반 결정적 선택 패턴(같은 입력 → 항상 같은 결과).
+    포맷만 주제 문자열 기준(ai_text.pick_episode_format)인 이유: 대본 구조가 포맷을
+    따라야 하는데 대본 생성 시점엔 script.id가 아직 없다 — 주제가 유일한 공유 키.
+    topic 미지정(레거시 호출·테스트)이면 script_id를 키로 폴백한다(결정성 유지).
+    "vet" 포맷은 의상·장소를 수의사 세트로 고정하고 소품을 뽑지 않는다(콘셉트 보호).
     """
+    from nutti.integrations.ai_text import pick_episode_format
+
+    fmt = pick_episode_format(topic if topic is not None else script_id)
+    if fmt == "vet":
+        return EpisodeStyle(_VET_OUTFIT, _VET_SETTING, "", fmt)
     outfit_idx = zlib.crc32(f"outfit:{script_id}".encode()) % len(_EPISODE_OUTFITS)
     setting_idx = zlib.crc32(f"setting:{script_id}".encode()) % len(_EPISODE_SETTINGS)
     prop_idx = zlib.crc32(f"prop:{script_id}".encode()) % len(_EPISODE_PROPS)
-    fmt_idx = zlib.crc32(f"format:{script_id}".encode()) % len(_EPISODE_FORMATS)
     return EpisodeStyle(
         _EPISODE_OUTFITS[outfit_idx],
         _EPISODE_SETTINGS[setting_idx],
         _EPISODE_PROPS[prop_idx],
-        _EPISODE_FORMATS[fmt_idx],
+        fmt,
     )
 
 
@@ -801,7 +809,7 @@ class VideoStudio:
         # 편별 스타일(의상·장소)은 여기서 정확히 한 번 계산해 프레임과 비트 클립에
         # 같은 값을 명시적으로 전달한다 — 두 곳에서 독립 계산하면 향후 호출 경로가
         # 갈릴 때 프레임과 클립의 장면이 어긋날 수 있다(리뷰 지적, PR #52).
-        style = pick_episode_style(script.id)
+        style = pick_episode_style(script.id, script.topic)
         frame_path = self._generate_frame(script, style)
         # 실 경로의 총길이는 위 사전 추정 대신 veo_fal이 돌려준 실측값(비트 클립 앞뒤
         # 침묵 트림 반영)으로 덮어쓴다.
