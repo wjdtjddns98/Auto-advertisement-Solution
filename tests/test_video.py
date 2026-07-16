@@ -1465,6 +1465,46 @@ def test_settings_video_backend_default_is_veo_fal():
 # --- 섹션 5: 편별 연출 로테이션(EpisodeStyle) + 연출/목소리 일관성 프롬프트 ---
 
 
+def test_pick_episode_style_includes_prop_and_format():
+    """소품·포맷 로테이션(2026-07-16 PO): 결정적으로 뽑히고 유효 값 범위를 지킨다."""
+    for i in range(40):
+        s = pick_episode_style(f"script-{i}")
+        assert s.prop in video_module._EPISODE_PROPS
+        assert s.fmt in ("direct", "interview")
+    # 결정성: 같은 id는 항상 같은 소품·포맷.
+    assert pick_episode_style("abc").prop == pick_episode_style("abc").prop
+    assert pick_episode_style("abc").fmt == pick_episode_style("abc").fmt
+    # 40편 표본에서 소품 있는 편과 인터뷰 포맷 편이 실제로 등장한다(로테이션 유효성).
+    styles = [pick_episode_style(f"script-{i}") for i in range(40)]
+    assert any(s.prop for s in styles)
+    assert any(s.fmt == "interview" for s in styles)
+    assert any(s.fmt == "direct" for s in styles)
+
+
+def test_build_beat_scene_includes_prop_only_when_set():
+    """소품이 있으면 scene 문장에 'with {prop}'가 붙고, 없으면 붙지 않는다."""
+    b = VeoPromptBuilder()
+    with_prop = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "a small red beret")
+    without_prop = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa")
+    assert "with a small red beret" in b.build_beat("대사", style=with_prop)
+    # _PERSONA에도 ", with"가 있어 의상 문장만 좁혀 확인한다.
+    assert "wears a sporty grey hoodie, sitting on a sofa" in b.build_beat(
+        "대사", style=without_prop
+    )
+
+
+def test_interview_format_wires_mic_into_beats_and_frame():
+    """interview 포맷 편은 비트(마이크+화면 밖 인터뷰어)와 프레임(마이크 포함)이
+    함께 전환되고, direct 편은 종전대로 마이크가 금지된다(FLF 앵커 일치 계약)."""
+    script = _script()
+    interview = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "interview")
+    direct = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "direct")
+    frame_i = VideoStudio._frame_prompt(script, interview)
+    frame_d = VideoStudio._frame_prompt(script, direct)
+    assert "interview microphone" in frame_i
+    assert "No microphone" in frame_d and "interview microphone" not in frame_d
+
+
 def test_pick_episode_style_deterministic():
     """같은 script_id면 항상 같은 스타일이 나온다(편 안에서 프레임·전 비트가 공유)."""
     a = pick_episode_style("abc123")
@@ -1623,7 +1663,12 @@ def test_prompt_templates_and_rotation_lists_have_no_ascii_quote():
         video_module._MASCOT_APPEARANCE,
         video_module._CINEMATIC_LOOK,
     )
-    for text in templates + tuple(video_module._EPISODE_OUTFITS + video_module._EPISODE_SETTINGS):
+    rotations = (
+        video_module._EPISODE_OUTFITS
+        + video_module._EPISODE_SETTINGS
+        + video_module._EPISODE_PROPS
+    )
+    for text in templates + tuple(rotations):
         assert "'" not in text
 
 
@@ -1661,13 +1706,13 @@ def test_build_beat_always_demands_lipsync():
 
 
 def test_frame_prompt_includes_episode_style_and_no_microphone():
-    """프레임 프롬프트에 편별 의상·장소가 들어가고, 인터뷰 마이크 연출은 제거된다.
+    """direct 포맷 프레임 프롬프트에 편별 의상·장소가 들어가고, 마이크는 억제된다.
 
-    2026-06-16 PO 피드백: 인터뷰 마이크 구도 아예 삭제 → 프레임도 정면 발화로,
-    마이크 명시 억제.
+    2026-06-16 PO 피드백(마이크 삭제)은 2026-07-16 포맷 로테이션에서 direct 편의
+    규칙으로 유지된다 — interview 편의 마이크 포함은 별도 테스트가 커버.
     """
     script = _script(topic="강아지 간식")
-    style = pick_episode_style(script.id)
+    style = pick_episode_style(script.id)._replace(fmt="direct")
     prompt = VideoStudio._frame_prompt(script, style)
     assert style.outfit in prompt
     assert style.setting in prompt

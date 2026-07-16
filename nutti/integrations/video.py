@@ -377,20 +377,25 @@ def _validate_visual_prompt(prompt: str, *, expected_quotes: int) -> None:
 
 
 class EpisodeStyle(NamedTuple):
-    """편 단위 연출 스타일(의상·장소상황).
+    """편 단위 연출 스타일(의상·장소상황·소품·포맷).
 
     한 편 안에서는 시작 프레임과 모든 비트 프롬프트가 같은 스타일을 공유해
     시각 일관성을 유지하고, 편이 바뀌면 다른 조합이 나와 채널이 단조롭지 않게 한다.
+    `prop`(빈 문자열=소품 없음)·`fmt`("direct"=정면 정보전달 | "interview"=화면 밖
+    인터뷰어+마이크 연출)는 2026-07-16 PO 지시(영상 다양성) — 기본값이 있어 기존
+    2-필드 생성 코드와 호환된다.
     """
 
     outfit: str
     setting: str
+    prop: str = ""
+    fmt: str = "direct"
 
 
 # ======================= PO 수정 구역 (편별 연출 로테이션) =======================
-# 편마다 마스코트의 "옷"과 "장소·상황"이 바뀐다(2026-06-12 PO 지시 — 매번 다른 옷,
-# 다른 장소·상황에서 인터뷰하는 느낌). 항목을 추가/삭제하면 조합 수가 바뀐다
-# (현재 5×6=30 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
+# 편마다 마스코트의 "옷"·"장소·상황"·"소품"·"포맷"이 바뀐다(2026-06-12 PO 지시 +
+# 2026-07-16 소품·포맷 추가 — 매번 다른 옷·소품·연출). 항목을 추가/삭제하면 조합 수가
+# 바뀐다(현재 의상5×장소6×소품6×포맷3 = 540 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
 # 대사 인용 구분자와 충돌해 주입 방어 검증이 깨진다(U+2019는 허용).
 _EPISODE_OUTFITS = [
     "a tiny yellow raincoat",
@@ -398,6 +403,26 @@ _EPISODE_OUTFITS = [
     "a sporty grey hoodie",
     "a light blue denim jacket",
     "a fluffy red scarf with a matching beanie",
+]
+# 소품 로테이션(2026-07-16 PO — 옷만 바뀌어 단조로움, 모자·머리 위 선글라스 같은 소품
+# 추가). 빈 문자열=소품 없음(2/6 확률 — "조금씩" 추가라 매편 소품은 과함). 규칙:
+# 반드시 머리·귀 위에 얹는 소품만 — 눈·입을 가리면 표정·립싱크가 죽는다(선글라스는
+# 항상 머리 위에 얹은 상태로 명시). ASCII 작은따옴표(') 금지.
+_EPISODE_PROPS = [
+    "",
+    "",
+    "a tiny straw sun hat resting on top of its head",
+    "cute toy sunglasses perched on top of its head, above the eyes, never covering them",
+    "a small red beret tilted playfully to one side of its head",
+    "a little daisy flower clip tucked into the fur on its head",
+]
+# 포맷 로테이션(2026-07-16 PO — 포맷 다양화). "direct"=정면 정보전달(현행),
+# "interview"=화면 밖 인터뷰어+핸드헬드 마이크 연출(_MIC) — 2026-06-16에 껐던 구도를
+# KR 쇼츠 "AI 강아지 인터뷰" 유행(2026 실측 트렌드)에 맞춰 1/3 확률 로테이션으로 부활.
+_EPISODE_FORMATS = [
+    "direct",
+    "direct",
+    "interview",
 ]
 # 전 항목 sitting 계열로 통일(2026-07-06 PO) — standing 시작 프레임이 뽑히면 클립 전체가
 # 이족보행 인형탈 느낌이 되고, 모션 지시(_MOTION_HOLD/_MOTION_LIVELY의 "stays seated")와
@@ -422,7 +447,14 @@ def pick_episode_style(script_id: str) -> EpisodeStyle:
     """
     outfit_idx = zlib.crc32(f"outfit:{script_id}".encode()) % len(_EPISODE_OUTFITS)
     setting_idx = zlib.crc32(f"setting:{script_id}".encode()) % len(_EPISODE_SETTINGS)
-    return EpisodeStyle(_EPISODE_OUTFITS[outfit_idx], _EPISODE_SETTINGS[setting_idx])
+    prop_idx = zlib.crc32(f"prop:{script_id}".encode()) % len(_EPISODE_PROPS)
+    fmt_idx = zlib.crc32(f"format:{script_id}".encode()) % len(_EPISODE_FORMATS)
+    return EpisodeStyle(
+        _EPISODE_OUTFITS[outfit_idx],
+        _EPISODE_SETTINGS[setting_idx],
+        _EPISODE_PROPS[prop_idx],
+        _EPISODE_FORMATS[fmt_idx],
+    )
 
 
 # ============== PO 수정 구역 (마스코트 외형 — 캐릭터 일관성의 핵심) ==============
@@ -655,7 +687,8 @@ class VeoPromptBuilder:
         speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
         scene = ""
         if style is not None:
-            scene = f"The puppy wears {style.outfit}, {style.setting}. "
+            prop = f", with {style.prop}" if style.prop else ""
+            scene = f"The puppy wears {style.outfit}{prop}, {style.setting}. "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
         # 마지막 비트는 진정 강제 없이 귀여운 행동 자유(_MOTION_FINAL_FREE, 2026-07-06 PO) —
         # 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 필요 없다. 중간 비트는 기존 로직 유지.
@@ -843,13 +876,14 @@ class VideoStudio:
         current_frame = frame_path
         try:
             for i, beat in enumerate(beats, start=1):
-                # 정면 1인 발화(off_screen_interviewer=False) — 인터뷰 마이크 연출 제거
-                # (2026-06-16 PO 피드백: 마이크 구도 아예 삭제).
+                # 포맷 로테이션(2026-07-16 PO): "interview" 편은 화면 밖 인터뷰어+마이크
+                # 연출(_MIC), "direct" 편은 정면 1인 발화. (2026-06-16의 마이크 전면 삭제를
+                # KR "AI 강아지 인터뷰" 유행에 맞춰 로테이션으로 부활.)
                 # lock 모드는 끝 프레임이 모델로 고정되므로 모션 제약을 풀어(_MOTION_LIVELY)
                 # 생동감을 준다(2026-06-29 PO). 기본 image-to-video 경로는 _MOTION_HOLD 유지.
                 prompt = builder.build_beat(
                     beat,
-                    off_screen_interviewer=False,
+                    off_screen_interviewer=(style.fmt == "interview"),
                     style=style,
                     motion_release=lock,
                     final_cta=(i == len(beats)),
@@ -2159,15 +2193,28 @@ class VideoStudio:
         # 리터럴 "9:16"·브랜드명은 화면 자막으로 렌더되므로 넣지 않는다(세로 비율은 Kontext
         # aspect_ratio 파라미터가 담당). 캐릭터는 "진짜 실사 강아지"로 못박아 인형탈 방지.
         scene_context = f"Scene context: {topic}. " if include_topic else ""
+        # 소품·포맷(2026-07-16 PO): 프레임은 FLF 끝프레임 고정의 앵커라 비트 클립과
+        # 소품·마이크 유무가 일치해야 경계가 안 튄다 — build_beat의 scene 문장과 동일하게
+        # 조립한다. interview 편은 마이크가 프레임에도 있어야 클립 시작·끝에서 마이크가
+        # 나타났다 사라지는 점프가 없다.
+        prop = f", with {style.prop}" if style.prop else ""
+        if style.fmt == "interview":
+            mic = (
+                "A handheld interview microphone reaches into the frame from off-screen, "
+                "pointed at the puppy; the person holding it stays completely out of frame. "
+            )
+        else:
+            mic = "No microphone and no interview setup in frame. "
         prompt = (
             "A photorealistic tall vertical portrait-orientation starting frame for a "
-            f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}, {style.setting}, "
+            f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}{prop}, "
+            f"{style.setting}, "
             "looking straight at the camera with a calm, gentle, friendly face, ready to "
             f"talk directly to the camera. {_CINEMATIC_LOOK} "
             f"{scene_context}"
             "Absolutely no text, letters, numbers, words, captions, logos, brand names, or "
             "watermarks anywhere. No people, no humans in costume, no other animals. "
-            "No microphone and no interview setup in frame."
+            f"{mic}"
         )
         # 하드가드: 금지 리터럴·작은따옴표 0개(대사 없음) — 과금 전 검증(2026-07-07 PO).
         _validate_visual_prompt(prompt, expected_quotes=0)
