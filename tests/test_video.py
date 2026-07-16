@@ -1475,10 +1475,14 @@ def test_settings_video_backend_default_is_veo_fal():
 
 def test_pick_episode_style_includes_prop_and_format():
     """소품·포맷 로테이션(2026-07-16 PO): 결정적으로 뽑히고 유효 값 범위를 지킨다."""
+    from nutti.integrations.ai_text import EPISODE_FORMATS
+
     for i in range(40):
         s = pick_episode_style(f"script-{i}")
-        assert s.prop in video_module._EPISODE_PROPS
-        assert s.fmt in ("direct", "interview")
+        # vet 편은 소품 없이 수의사 세트 고정이라 로테이션 리스트 밖의 값이 정상.
+        if s.fmt != "vet":
+            assert s.prop in video_module._EPISODE_PROPS
+        assert s.fmt in EPISODE_FORMATS
     # 결정성: 같은 id는 항상 같은 소품·포맷.
     assert pick_episode_style("abc").prop == pick_episode_style("abc").prop
     assert pick_episode_style("abc").fmt == pick_episode_style("abc").fmt
@@ -1487,6 +1491,33 @@ def test_pick_episode_style_includes_prop_and_format():
     assert any(s.prop for s in styles)
     assert any(s.fmt == "interview" for s in styles)
     assert any(s.fmt == "direct" for s in styles)
+
+
+def test_pick_episode_style_format_follows_topic_not_script_id():
+    """포맷은 주제 해시를 따른다 — 대본 생성(주제만 존재) 시점과 영상 연출 시점이
+    같은 포맷을 봐야 하는 단일 소스 계약(2026-07-16)."""
+    a = pick_episode_style("id-1", "강아지 고구마 간식 적정량")
+    b = pick_episode_style("id-2", "강아지 고구마 간식 적정량")
+    assert a.fmt == b.fmt  # id가 달라도 주제가 같으면 포맷 동일
+    # topic 미지정 레거시 호출은 script_id 폴백으로 여전히 결정적.
+    assert pick_episode_style("id-1").fmt == pick_episode_style("id-1").fmt
+
+
+def test_vet_format_forces_clinic_set_without_prop():
+    """vet 포맷 편은 수의사 가운·진료실로 고정되고 소품을 뽑지 않는다(콘셉트 보호)."""
+    from nutti.integrations.ai_text import pick_episode_format
+
+    vet_topic = next(
+        f"주제-{i}" for i in range(200) if pick_episode_format(f"주제-{i}") == "vet"
+    )
+    s = pick_episode_style("any-id", vet_topic)
+    assert s.fmt == "vet"
+    assert s.outfit == video_module._VET_OUTFIT
+    assert s.setting == video_module._VET_SETTING
+    assert s.prop == ""
+    # 프레임 프롬프트에도 그대로 실린다(FLF 앵커 일치).
+    prompt = VideoStudio._frame_prompt(_script(), s)
+    assert "veterinarian coat" in prompt and "veterinary clinic" in prompt
 
 
 def test_build_beat_scene_includes_prop_only_when_set():
