@@ -559,10 +559,14 @@ class VeoPromptBuilder:
     # 강제를 제거 — 매 비트 끝마다 에너지가 죽어 페이드아웃처럼 보이는 직접 원인이었다.
     # 끝 포즈 수렴은 FLF 모델이 물리적으로 담당하므로 프롬프트 진정 지시는 불필요한
     # 이중 방어였다(수렴 실패는 QC의 tail_not_converged가 잡는다).
+    # 2026-07-16 PO("캐릭터가 너무 정적이라 밋밋함"): 중간 비트의 제스처 어휘를
+    # _MOTION_FINAL_FREE에서 이미 검증된 수준(앞발 흔들기·귀 쫑긋·꼬리 흔들기·상체
+    # 리액션)으로 확대. 화면 이탈·기립·끝 페이드 가드와 FLF 끝 포즈 수렴은 그대로 유지.
     _MOTION_LIVELY = (
         "The puppy stays seated and centered in frame the whole time but moves naturally "
-        "and expressively as it talks — gentle head tilts, ear and body movements, "
-        "blinking, and lively little gestures that bring energy to the shot. It never "
+        "and expressively as it talks — happy head tilts, little paw waves, excited ear "
+        "wiggles, a joyful tail wag, leaning slightly toward the camera, and lively "
+        "expressive reactions that bring real energy and charm to the shot. It never "
         "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
         "leaves the frame. Keep this natural lively energy all the way to the end of the "
         "clip — do not wind down, slow down, go still, or freeze near the end. The clip "
