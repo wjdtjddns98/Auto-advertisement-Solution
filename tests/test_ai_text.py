@@ -91,6 +91,11 @@ def test_script_system_prompt_pins_strong_hook():
     assert "첫 1초" in SCRIPT_SYSTEM_PROMPT
     assert "스크롤" in SCRIPT_SYSTEM_PROMPT
     assert "밋밋한" in SCRIPT_SYSTEM_PROMPT and "금지" in SCRIPT_SYSTEM_PROMPT
+    # 2026-07-16 KR 쇼츠 트렌드 반영(PO 지시) 핀: 훅 첫 문장 2초 컷 + 패턴 다양화 +
+    # 15초 지점 2차 훅. 지워지면 실패(리버트 가드).
+    assert "15자 이내" in SCRIPT_SYSTEM_PROMPT
+    assert "고정하지 말고" in SCRIPT_SYSTEM_PROMPT
+    assert "2차 훅" in SCRIPT_SYSTEM_PROMPT
 
 
 def test_script_system_prompt_bans_brand_in_last_beat():
