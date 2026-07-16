@@ -146,6 +146,15 @@ class Settings(BaseSettings):
     # (2026-07-13), 프로덕션 편(0SVBKNkGoA4) 육안 확인 결과 여전히 낮다는 PO 판정
     # (2026-07-14) — 하단 25% 지점인 960px로 추가 상향.
     caption_y_pos: int = Field(default=960, ge=1, alias="NUTTI_CAPTION_Y_POS")
+    # 상단 훅 텍스트 오버레이(2026-07-16 PO — KR 쇼츠 트렌드: 시청의 85%가 무음 시작이라
+    # 훅은 음성이 아닌 화면 텍스트로 꽂아야 함). 훅 비트(①) 첫 문장을 영상 전체 동안
+    # 화면 상단에 크게 굽는다. 자막(_burn_captions)과 같은 best-effort 계약.
+    hook_overlay: bool = Field(default=True, alias="NUTTI_HOOK_OVERLAY")
+    # 훅 오버레이 글자 크기(px, 720px 폭 기준). 하단 자막(34px)보다 크게 — 제목 역할.
+    hook_font_size: int = Field(default=48, ge=1, alias="NUTTI_HOOK_FONT_SIZE")
+    # 훅 오버레이 첫 줄 상단 y(px, 1280px 높이 기준). Shorts 상단 UI(검색·카메라 아이콘,
+    # ~150px)를 피해 그 아래에 둔다.
+    hook_y_pos: int = Field(default=200, ge=1, alias="NUTTI_HOOK_Y_POS")
     # 비트 경계 끊김(클립이 8초 동안 포즈가 drift해 다음 클립과 안 이어짐)을 근본적으로
     # 줄이기 위한 "끝프레임 고정" 모드(2026-06-29 PO 아이디어). True면 image-to-video
     # 대신 first-last-frame-to-video 모델을 써 각 비트 클립의 시작·끝 프레임을 동일한

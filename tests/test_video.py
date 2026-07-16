@@ -118,6 +118,8 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     # 끝 진정(wind-down) 강제는 제거하고 끝까지 에너지 유지를 지시한다(2026-07-10 PO).
     assert "final two to three seconds" not in lively
     assert "do not wind down" in lively
+    # 첫 순간부터 움직임 시작 — 정지 인트로 금지(첫 1초 비주얼 훅, 2026-07-16 PO).
+    assert "no still, frozen, or slow warm-up intro" in lively
     assert "completely frozen and motionless" not in lively
     assert "no fade-out" in lively and "no freeze" in lively
     # 기본(static)은 기존 _MOTION_HOLD 유지(하위호환).
@@ -516,7 +518,8 @@ def test_burn_captions_builds_timed_drawtext(tmp_path, monkeypatch):
     )
     assert out is not None and out.endswith(".mp4")
     joined = " ".join(captured["cmd"])
-    assert joined.count("drawtext=") == 2
+    # 비트 자막 2개 + 상단 훅 오버레이 1개(hook_overlay 기본 True, 2026-07-16).
+    assert joined.count("drawtext=") == 3
     # 전환 시점 = 첫 클립 길이 - 디졸브/2 = 7.0 - 0.125 = 6.875초.
     assert "between(t,0.000,6.875)" in joined
     assert "between(t,6.875," in joined
@@ -585,14 +588,131 @@ def test_burn_captions_shows_sentences_sequentially(tmp_path, monkeypatch):
     out = studio._burn_captions("in.mp4", [beat1, "둘째 비트"], [8.0, 7.0])
     assert out is not None
     joined = " ".join(captured["cmd"])
-    # 첫 비트 두 문장 + 둘째 비트 1줄 = drawtext 3개.
-    assert joined.count("drawtext=") == 3
+    # 첫 비트 두 문장 + 둘째 비트 1줄 + 상단 훅 오버레이 1줄 = drawtext 4개.
+    assert joined.count("drawtext=") == 4
     assert "between(t,0.000,8.000)" not in joined  # 문장1이 비트1 전체를 차지하지 않음
     # 첫 문장(9자) : 둘째 문장(11자) 비율로 8초를 분할 — 경계 = 8*9/20 = 3.600초.
     assert "between(t,0.000,3.600)" in joined
     assert "between(t,3.600,8.000)" in joined
     # 표시 텍스트는 끝 온점을 뗀다(2026-07-10 PO) — 원문(분리 기준)엔 있어도 렌더엔 없다.
-    assert captured["texts"] == ["핵심은 양이에요", "체중 맞춰 급여해요", "둘째 비트"]
+    # 마지막 항목은 상단 훅 오버레이(훅 비트 첫 문장 재사용, 2026-07-16).
+    assert captured["texts"] == [
+        "핵심은 양이에요", "체중 맞춰 급여해요", "둘째 비트", "핵심은 양이에요",
+    ]
+
+
+def test_burn_captions_hook_overlay_pinned_top_whole_video(tmp_path, monkeypatch):
+    """상단 훅 오버레이(2026-07-16 PO): 훅 비트 첫 문장이 hook_font_size 크기로
+    enable(표시 구간) 없이 — 즉 영상 전체 동안 — 상단 y에 굽힌다."""
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    font = tmp_path / "font.ttf"
+    font.write_bytes(b"fake-font")
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path),
+        NUTTI_CAPTION_FONT=str(font),
+        NUTTI_HOOK_FONT_SIZE="48",
+        NUTTI_HOOK_Y_POS="200",
+    )
+    studio = VideoStudio(settings)
+    out = studio._burn_captions("in.mp4", ["훅 한 방이에요. 둘째 문장.", "둘째 비트"], [7.0, 7.0])
+    assert out is not None
+    vf = captured["cmd"][captured["cmd"].index("-vf") + 1]
+    # between(t,...) 내부 쉼표 때문에 ","로 못 쪼갠다 — drawtext 단위로 나눈다.
+    chunks = vf.split("drawtext=")[1:]
+    hook_chunks = [c for c in chunks if "enable=" not in c]
+    # 훅 오버레이만 enable 없이 전체 표시된다(자막은 전부 between 창을 가짐).
+    assert len(hook_chunks) == 1
+    assert "fontsize=48" in hook_chunks[0]
+    assert "y=200" in hook_chunks[0]
+
+
+def test_burn_captions_hook_overlay_disabled(tmp_path, monkeypatch):
+    """NUTTI_HOOK_OVERLAY=false면 훅 오버레이 없이 비트 자막만 굽는다."""
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    font = tmp_path / "font.ttf"
+    font.write_bytes(b"fake-font")
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path),
+        NUTTI_CAPTION_FONT=str(font),
+        NUTTI_HOOK_OVERLAY="false",
+    )
+    studio = VideoStudio(settings)
+    out = studio._burn_captions("in.mp4", ["첫 비트 대사", "둘째 비트 대사"], [7.0, 7.0])
+    assert out is not None
+    joined = " ".join(captured["cmd"])
+    assert joined.count("drawtext=") == 2  # 비트 자막만
+
+
+def test_burn_captions_empty_beats_fall_back_without_ffmpeg(tmp_path):
+    """전 비트가 빈 대사면 빈 -vf로 ffmpeg를 부르지 않고 None(무자막 폴백)을 돌려준다.
+
+    리뷰 지적(2026-07-16): 종전엔 beats[0]이 빈 문자열이면 훅 오버레이가 IndexError로
+    광역 except에 떨어졌다(결과는 같은 폴백이나 크래시 경유) — 조기 반환으로 정돈.
+    """
+    font = tmp_path / "font.ttf"
+    font.write_bytes(b"fake-font")
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_FONT=str(font)
+    )
+    studio = VideoStudio(settings)
+    assert studio._burn_captions("in.mp4", [""], [7.0]) is None
+    assert not list(tmp_path.glob("caption_*.txt"))  # 임시 파일 누수 없음
+
+
+def test_burn_captions_empty_hook_beat_keeps_bottom_captions(tmp_path, monkeypatch):
+    """훅 비트가 빈 대사여도 오버레이만 건너뛰고 하단 자막은 굽는다(리뷰 재검토 핀).
+
+    가드 이전 코드는 beats[0]="" 에서 훅 오버레이 IndexError가 광역 except로 번져
+    둘째 비트의 멀쩡한 자막까지 통째로 버렸다(None 폴백) — 이 테스트는 그 리버트에서
+    실패한다(수정 전: None, 수정 후: 자막 영상 경로).
+    """
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    font = tmp_path / "font.ttf"
+    font.write_bytes(b"fake-font")
+    settings = _live_settings_with_key(
+        NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_FONT=str(font)
+    )
+    studio = VideoStudio(settings)
+    out = studio._burn_captions("in.mp4", ["", "둘째 비트 대사"], [7.0, 7.0])
+    assert out is not None and out.endswith(".mp4")
+    joined = " ".join(captured["cmd"])
+    assert joined.count("drawtext=") == 1  # 둘째 비트 자막만(훅·빈 비트 없음)
 
 
 def test_burn_captions_returns_none_without_font(tmp_path, monkeypatch):

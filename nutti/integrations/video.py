@@ -566,7 +566,9 @@ class VeoPromptBuilder:
         "The puppy stays seated and centered in frame the whole time but moves naturally "
         "and expressively as it talks — happy head tilts, little paw waves, excited ear "
         "wiggles, a joyful tail wag, leaning slightly toward the camera, and lively "
-        "expressive reactions that bring real energy and charm to the shot. It never "
+        "expressive reactions that bring real energy and charm to the shot. It is already "
+        "in lively motion from the very first moments of the clip — it starts talking and "
+        "moving right away, with no still, frozen, or slow warm-up intro. It never "
         "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
         "leaves the frame. Keep this natural lively energy all the way to the end of the "
         "clip — do not wind down, slow down, go still, or freeze near the end. The clip "
@@ -1898,6 +1900,40 @@ class VideoStudio:
         segs = [s.strip() for s in _CAPTION_SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
         return segs or ([text.strip()] if text.strip() else [])
 
+    def _drawtext_filter(
+        self,
+        line: str,
+        *,
+        font_ff: str,
+        size: int,
+        y: str,
+        media_dir: Path,
+        txt_files: list[Path],
+        enable: str | None = None,
+    ) -> str | None:
+        """한 줄짜리 drawtext 필터 문자열을 만든다(대사 textfile 생성 포함).
+
+        하단 자막과 상단 훅 오버레이가 공유한다. `enable`이 None이면 영상 전체에
+        표시된다. 폰트/텍스트 파일 경로에 작은따옴표가 있으면 None(자막 포기 신호 —
+        호출부가 무자막 원본으로 폴백).
+        """
+        tf = media_dir / f"caption_{uuid4().hex[:8]}.txt"
+        # newline='\n' 필수 — Windows 텍스트 모드가 \n을 \r\n으로 바꾸면
+        # drawtext가 CR을 빈 줄로 렌더해 줄 간격이 두 배로 벌어진다(실측).
+        tf.write_text(line, encoding="utf-8", newline="\n")
+        txt_files.append(tf)
+        tf_ff = str(tf).replace("\\", "/").replace(":", r"\:")
+        if "'" in tf_ff or "'" in font_ff:
+            log.warning("video.caption.path_quote")
+            return None
+        suffix = f":enable='{enable}'" if enable else ""
+        return (
+            f"drawtext=fontfile='{font_ff}':textfile='{tf_ff}':"
+            f"fontsize={size}:fontcolor=white:"
+            f"borderw={max(2, round(size / 10))}:bordercolor=black:"
+            f"x=(w-text_w)/2:y={y}{suffix}"
+        )
+
     def _find_caption_font(self) -> str | None:
         """자막 폰트 경로를 찾는다: 설정값 우선, 없으면 OS 기본 후보 순회. 없으면 None."""
         cands = [self.settings.caption_font] if self.settings.caption_font else []
@@ -1998,24 +2034,43 @@ class VideoStudio:
                     # 하단 잘림 — 여전히 유효한 가드, 기준점만 h*0.86→명시 픽셀로 변경).
                     lines = self._wrap_caption(display_text, width=wrap_width).split("\n")
                     for j, line in enumerate(lines):
-                        tf = media_dir / f"caption_{uuid4().hex[:8]}.txt"
-                        # newline='\n' 필수 — Windows 텍스트 모드가 \n을 \r\n으로 바꾸면
-                        # drawtext가 CR을 빈 줄로 렌더해 줄 간격이 두 배로 벌어진다(실측).
-                        tf.write_text(line, encoding="utf-8", newline="\n")
-                        txt_files.append(tf)
-                        tf_ff = str(tf).replace("\\", "/").replace(":", r"\:")
-                        if "'" in tf_ff or "'" in font_ff:
-                            log.warning("video.caption.path_quote")
-                            return None
                         y = f"{self.settings.caption_y_pos}-{(len(lines) - j) * line_h}"
-                        filters.append(
-                            f"drawtext=fontfile='{font_ff}':textfile='{tf_ff}':"
-                            f"fontsize={size}:fontcolor=white:"
-                            f"borderw={max(2, round(size / 10))}:bordercolor=black:"
-                            f"x=(w-text_w)/2:y={y}:"
-                            f"enable='between(t,{seg_start:.3f},{seg_end:.3f})'"
+                        f = self._drawtext_filter(
+                            line, font_ff=font_ff, size=size, y=y,
+                            media_dir=media_dir, txt_files=txt_files,
+                            enable=f"between(t,{seg_start:.3f},{seg_end:.3f})",
                         )
+                        if f is None:
+                            return None
+                        filters.append(f)
                     seg_start = seg_end
+            # 상단 훅 오버레이(2026-07-16 PO — KR 쇼츠 무음 시청 대응): 훅 비트(①)
+            # 첫 문장을 영상 전체 동안 상단에 크게 표시한다(정보성 쇼츠의 제목 오버레이
+            # 관행). enable 없이 굽어 스크롤 중간 합류 시청자도 주제를 즉시 잡는다.
+            if self.settings.hook_overlay:
+                # 빈 비트 방어(리뷰 지적): 훅 문장이 없으면 오버레이만 건너뛰고
+                # 하단 자막은 그대로 굽는다.
+                hook_segs = self._split_caption_segments(beats[0])
+                hook = hook_segs[0] if hook_segs else ""
+                hook = hook[:-1] if hook.endswith(".") else hook
+                hsize = int(self.settings.hook_font_size)
+                hwrap = max(6, int(_STITCH_W * 0.9 / hsize))
+                hline_h = round(hsize * 1.35)
+                for j, line in enumerate(
+                    self._wrap_caption(hook, width=hwrap).split("\n") if hook else []
+                ):
+                    f = self._drawtext_filter(
+                        line, font_ff=font_ff, size=hsize,
+                        y=str(int(self.settings.hook_y_pos) + j * hline_h),
+                        media_dir=media_dir, txt_files=txt_files,
+                    )
+                    if f is None:
+                        return None
+                    filters.append(f)
+            if not filters:
+                # 전 비트가 빈 대사라 그릴 자막이 없다 — 빈 -vf로 ffmpeg를 부르지 않고
+                # 무자막 원본 유지로 조기 폴백한다.
+                return None
             cmd = [
                 imageio_ffmpeg.get_ffmpeg_exe(),
                 "-y",
