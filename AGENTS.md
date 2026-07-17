@@ -57,7 +57,6 @@ N8n 스케줄러가 `nutti run`(또는 파이썬 함수)을 호출하고, 실제
 ### External
 - `anthropic` — Claude(대본·메타데이터·팩트체크·분석)
 - `pydantic` / `pydantic-settings` — 모델·환경설정
-- `httpx` — HTTP 클라이언트 / `tenacity` — 재시도 / `structlog` — 로깅
-- `APScheduler` — 스케줄링 / `typer` — CLI
+- `httpx` — HTTP 클라이언트 / `structlog` — 로깅 / `typer` — CLI
 
 <!-- MANUAL: 수동 메모는 이 줄 아래에 추가하면 재생성 시 보존됩니다 -->

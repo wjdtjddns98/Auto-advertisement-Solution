@@ -160,7 +160,7 @@ def test_orchestrator_records_to_ledger(tmp_path):
     )
     ledger = CostLedger(settings.cost_ledger_path)
     orch = Orchestrator(
-        settings, telegram=AutoApproveGate(), discord=AutoApproveGate(), ledger=ledger
+        settings, telegram=AutoApproveGate(), ledger=ledger
     )
     orch.run("강아지 닭가슴살 간식 적정량")
     recs = ledger.records()

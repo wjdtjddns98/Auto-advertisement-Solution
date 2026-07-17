@@ -12,11 +12,10 @@ N8n 스케줄러는 매 사이클을 별도 프로세스(`nutti run ...`)로 호
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
 
 from nutti.logging import get_logger
+from nutti.storage import atomic_write_json
 
 log = get_logger(__name__)
 
@@ -42,20 +41,7 @@ class PipelineState:
         return data if isinstance(data, dict) else {}
 
     def _save(self, data: dict) -> None:
-        # 원자적 쓰기(tmp 작성 후 os.replace) — 크래시·동시 실행 시 파일이
-        # 잘리거나 0바이트로 남지 않도록. JsonFileReviewStore와 동일한 패턴.
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        text = json.dumps(data, ensure_ascii=False, indent=2)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-            os.replace(tmp, self.path)
-        except Exception:
-            # 실패 시 임시 파일을 남기지 않는다.
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+        atomic_write_json(self.path, data)
 
     # --- 피드백(성과 분석 → 다음 대본 개선) ---
 

@@ -73,7 +73,6 @@ class Orchestrator:
         settings: Settings | None = None,
         *,
         telegram: ReviewGate | None = None,
-        discord: ReviewGate | None = None,
         max_factcheck_retries: int = 1,
         state: PipelineState | None = None,
         ledger: CostLedger | None = None,
@@ -93,10 +92,8 @@ class Orchestrator:
         # 팩트체크 실패 시 issues를 피드백으로 대본을 재생성하는 최대 횟수.
         self.max_factcheck_retries = max_factcheck_retries
         # 검수 게이트 주입 가능(테스트 시 AutoApproveGate). 텔레그램 원툴(2026-06-18 PO):
-        # 메타데이터 검수도 기본 텔레그램으로 통일한다. discord는 선택적 — 주입할 때만
-        # 메타데이터 검수를 디스코드로 돌린다(기본 None=미사용, DiscordGate 코드는 보존).
+        # 메타데이터 검수까지 전 단계 텔레그램으로 통일(Discord 게이트는 2026-07-17 제거).
         self.telegram: ReviewGate = telegram or TelegramGate(self.settings)
-        self.discord: ReviewGate | None = discord
 
     def resolve_inputs(self, topic: str | None = None, feedback: str = "") -> tuple[str, str]:
         """실행 입력을 확정한다(피드백 자동 연결 + 주제 자동 생성).
@@ -178,11 +175,11 @@ class Orchestrator:
         # 3단계: 메타데이터
         run.current_stage = Stage.METADATA
         run.metadata = self.ai.generate_metadata(run.script, self.settings.calculator_url)
-        # 메타데이터 검수: discord 주입 시 그쪽, 아니면 텔레그램(원툴 기본).
-        self._gate(self.discord or self.telegram, Stage.METADATA, "메타데이터 검수", run.metadata.title)
+        # 메타데이터 검수도 텔레그램(원툴).
+        self._gate(self.telegram, Stage.METADATA, "메타데이터 검수", run.metadata.title)
 
         # 4단계: 업로드 — 유튜브는 자동 업로드. 인스타는 수동 업로드로 전환(2026-06-18 PO 결정):
-        # 자동 게시(publisher.upload_instagram, 코드는 보존) 대신 최종 영상 + 캡션을 텔레그램으로
+        # 자동 게시 대신(관련 코드는 2026-07-17 제거) 최종 영상 + 캡션을 텔레그램으로
         # 보내 사람이 직접 올린다. REELS 포맷일 때만 인스타용 핸드오프를 수행한다.
         run.current_stage = Stage.UPLOAD
         run.uploads.append(self.publisher.upload_youtube(run.video, run.metadata))

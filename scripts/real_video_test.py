@@ -35,7 +35,7 @@ SCRIPT = Script(
 
 def main() -> None:
     s = Settings()
-    print(f"[설정] dry_run={s.dry_run}  backend={s.video_backend}  "
+    print(f"[설정] dry_run={s.dry_run}  "
           f"fal={'O' if s.fal_key else 'X'}")
     if s.dry_run:
         raise SystemExit("dry_run=True 상태 - .env에서 NUTTI_DRY_RUN=false로 바꿔야 실제 생성됩니다.")

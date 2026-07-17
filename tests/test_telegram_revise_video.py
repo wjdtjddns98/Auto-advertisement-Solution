@@ -484,7 +484,6 @@ def _isolate_state(tmp_path, monkeypatch):
 
 def test_orchestrator_revise_updates_script_body(tmp_path, monkeypatch):
     """SCRIPT 단계 REVISE + revised_content → script.body가 수정 내용으로 교체된다."""
-    from nutti.review.gates import AutoApproveGate
 
     revised_text = "수정된 최종 대본입니다."
     script_gate = _ReviseGate(revised_text)
@@ -492,7 +491,6 @@ def test_orchestrator_revise_updates_script_body(tmp_path, monkeypatch):
     orch = Orchestrator(
         _dry_settings(),
         telegram=script_gate,
-        discord=AutoApproveGate(),
     )
 
     # update_script 호출 캡처.
@@ -511,7 +509,6 @@ def test_orchestrator_revise_updates_script_body(tmp_path, monkeypatch):
 
 def test_orchestrator_revise_without_revised_content_raises(monkeypatch):
     """REVISE인데 revised_content가 None(텍스트 미입력)이면 GateRejected를 던진다."""
-    from nutti.review.gates import AutoApproveGate
 
     class _ReviseNoContent:
         def request(self, review: ReviewRequest) -> ReviewDecision:
@@ -521,7 +518,6 @@ def test_orchestrator_revise_without_revised_content_raises(monkeypatch):
     orch = Orchestrator(
         _dry_settings(),
         telegram=_ReviseNoContent(),
-        discord=AutoApproveGate(),
     )
 
     with pytest.raises(GateRejected) as exc:
@@ -532,12 +528,10 @@ def test_orchestrator_revise_without_revised_content_raises(monkeypatch):
 
 def test_orchestrator_video_revise_raises_gate_rejected(monkeypatch):
     """VIDEO 단계 REVISE는 GateRejected(Stage.VIDEO, REVISE)를 발생시킨다."""
-    from nutti.review.gates import AutoApproveGate
 
     orch = Orchestrator(
         _dry_settings(),
         telegram=_ReviseVideoGate(),
-        discord=AutoApproveGate(),
     )
     # SCRIPT 단계는 통과하도록 패치.
     def _stage_aware(review: ReviewRequest) -> ReviewDecision:

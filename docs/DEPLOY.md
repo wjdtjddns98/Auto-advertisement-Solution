@@ -87,9 +87,6 @@ FAL_KEY=your_fal_key
 GOOGLE_SHEETS_ID=your_sheet_id
 GOOGLE_SERVICE_ACCOUNT_JSON=/app/secrets/sa.json
 
-# ── Discord (메타데이터 검수) ─────────────────────────────────────────────────
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
-
 # ── YouTube ──────────────────────────────────────────────────────────────────
 YOUTUBE_CLIENT_ID=your_youtube_client_id
 YOUTUBE_CLIENT_SECRET=your_youtube_client_secret

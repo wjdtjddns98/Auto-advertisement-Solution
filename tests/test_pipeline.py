@@ -33,7 +33,6 @@ def test_full_run_dry_run():
     orch = Orchestrator(
         _dry_settings(),
         telegram=AutoApproveGate(),
-        discord=AutoApproveGate(),
     )
     run = orch.run("강아지 닭가슴살 간식 적정량")
 
@@ -50,7 +49,6 @@ def test_reels_youtube_auto_and_instagram_manual_handoff(monkeypatch):
     orch = Orchestrator(
         _dry_settings(),
         telegram=AutoApproveGate(),
-        discord=AutoApproveGate(),
     )
     handoff_calls: list[str] = []
     monkeypatch.setattr(
@@ -69,7 +67,6 @@ def test_shorts_does_not_trigger_instagram_handoff(monkeypatch):
     orch = Orchestrator(
         _dry_settings(),
         telegram=AutoApproveGate(),
-        discord=AutoApproveGate(),
     )
     handoff_calls: list[str] = []
     monkeypatch.setattr(
@@ -182,7 +179,6 @@ def test_run_completes_recording_when_handoff_fails(monkeypatch):
     orch = Orchestrator(
         _dry_settings(),
         telegram=AutoApproveGate(),
-        discord=AutoApproveGate(),
     )
 
     def _boom(_run):
@@ -201,7 +197,7 @@ def test_run_completes_recording_when_handoff_fails(monkeypatch):
 def test_analysis_feedback_loop(tmp_path):
     state = _tmp_state(tmp_path)
     orch = Orchestrator(
-        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+        _dry_settings(), telegram=AutoApproveGate(), state=state
     )
     # run은 업로드를 대기 큐에 넣는다(즉시 분석하지 않음).
     orch.run("강아지 간식")
@@ -221,7 +217,7 @@ def test_collect_defers_until_upload_matures(tmp_path):
 
     state = _tmp_state(tmp_path)
     orch = Orchestrator(
-        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+        _dry_settings(), telegram=AutoApproveGate(), state=state
     )
     orch.settings.dry_run = False  # collect만 라이브로 판정(미숙성이라 실제 조회는 안 됨)
     orch.settings.analytics_min_age_hours = 48
@@ -254,7 +250,7 @@ def _live_collect_orch(tmp_path):
     """라이브 모드 collect 테스트용 (orch, state) — 숙성 임계 48h."""
     state = _tmp_state(tmp_path)
     orch = Orchestrator(
-        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+        _dry_settings(), telegram=AutoApproveGate(), state=state
     )
     orch.settings.dry_run = False
     orch.settings.analytics_min_age_hours = 48
@@ -306,7 +302,7 @@ def test_collect_dry_preserves_live_items(tmp_path):
 
     state = _tmp_state(tmp_path)
     orch = Orchestrator(
-        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+        _dry_settings(), telegram=AutoApproveGate(), state=state
     )
     now = datetime.now(timezone.utc)
     state.add_pending_upload("youtube", "RealVideoId", "u", now.isoformat(), dry_run=False)
@@ -371,7 +367,7 @@ def test_resolve_inputs_auto_loads_saved_feedback(tmp_path):
     state = _tmp_state(tmp_path)
     state.save_feedback("Q&A 포맷 지속률 우수 → 비중 확대")
     orch = Orchestrator(
-        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+        _dry_settings(), telegram=AutoApproveGate(), state=state
     )
     topic, feedback = orch.resolve_inputs("명시 주제", "")
     assert topic == "명시 주제"
@@ -383,7 +379,7 @@ def test_resolve_inputs_explicit_feedback_wins(tmp_path):
     state = _tmp_state(tmp_path)
     state.save_feedback("저장된 피드백")
     orch = Orchestrator(
-        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+        _dry_settings(), telegram=AutoApproveGate(), state=state
     )
     _, feedback = orch.resolve_inputs("주제", "명시 피드백")
     assert feedback == "명시 피드백"
@@ -393,7 +389,7 @@ def test_resolve_inputs_auto_generates_topic_when_omitted(tmp_path):
     """주제 미지정 시 자동 생성하고, 최근 주제에 기록한다."""
     state = _tmp_state(tmp_path)
     orch = Orchestrator(
-        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+        _dry_settings(), telegram=AutoApproveGate(), state=state
     )
     topic, _ = orch.resolve_inputs(None, "")
     assert topic  # 비어있지 않은 자동 생성 주제
@@ -404,7 +400,7 @@ def test_resolve_inputs_auto_topic_avoids_recent(tmp_path):
     """연속 자동 생성 시 직전 주제와 겹치지 않는다(중복 회피)."""
     state = _tmp_state(tmp_path)
     orch = Orchestrator(
-        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+        _dry_settings(), telegram=AutoApproveGate(), state=state
     )
     first, _ = orch.resolve_inputs(None, "")
     second, _ = orch.resolve_inputs(None, "")
@@ -415,7 +411,7 @@ def test_feedback_loop_closes_end_to_end(tmp_path):
     """한 사이클의 분석이 다음 사이클 resolve_inputs의 feedback으로 자동 연결된다."""
     state = _tmp_state(tmp_path)
     orch = Orchestrator(
-        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+        _dry_settings(), telegram=AutoApproveGate(), state=state
     )
     orch.run("강아지 간식")
     analysis = orch.collect_ready_feedback()
@@ -428,7 +424,7 @@ def test_collect_ready_feedback_persists_nonempty_skips_empty(tmp_path, monkeypa
     """비어있지 않은 분석은 저장하고, 빈 분석은 기존 피드백을 덮어쓰지 않는다."""
     state = _tmp_state(tmp_path)
     orch = Orchestrator(
-        _dry_settings(), telegram=AutoApproveGate(), discord=AutoApproveGate(), state=state
+        _dry_settings(), telegram=AutoApproveGate(), state=state
     )
 
     # 비어있지 않은 분석 → 저장됨(dry_run이라 큐의 업로드가 즉시 숙성 처리).
@@ -463,10 +459,10 @@ class _TrackingGate:
         return ReviewDecision.APPROVED
 
 
-def test_metadata_review_defaults_to_telegram_when_no_discord():
-    """텔레그램 원툴: discord 미주입(기본)이면 메타데이터 검수도 텔레그램으로 간다."""
+def test_metadata_review_goes_to_telegram():
+    """텔레그램 원툴: 메타데이터 검수도 텔레그램 게이트로 간다."""
     tg = _TrackingGate()
-    orch = Orchestrator(_dry_settings(), telegram=tg)  # discord 생략 → self.discord=None
+    orch = Orchestrator(_dry_settings(), telegram=tg)
 
     orch.run("강아지 간식")
 
@@ -476,20 +472,8 @@ def test_metadata_review_defaults_to_telegram_when_no_discord():
     assert tg.stages.count(Stage.METADATA) == 1
 
 
-def test_metadata_review_uses_discord_when_injected():
-    """discord를 주입하면 메타데이터 검수는 디스코드로, 텔레그램엔 메타데이터가 가지 않는다."""
-    tg = _TrackingGate()
-    dc = _TrackingGate()
-    orch = Orchestrator(_dry_settings(), telegram=tg, discord=dc)
-
-    orch.run("강아지 간식")
-
-    assert dc.stages == [Stage.METADATA]
-    assert Stage.METADATA not in tg.stages
-
-
 def test_gate_rejection_stops_pipeline():
-    orch = Orchestrator(_dry_settings(), telegram=_RejectGate(), discord=AutoApproveGate())
+    orch = Orchestrator(_dry_settings(), telegram=_RejectGate())
     try:
         orch.run("부적절한 주제")
         assert False, "검수 거절 시 GateRejected가 발생해야 한다"
@@ -504,7 +488,6 @@ def _approving_orch(max_retries: int = 1) -> Orchestrator:
     return Orchestrator(
         _dry_settings(),
         telegram=AutoApproveGate(),
-        discord=AutoApproveGate(),
         max_factcheck_retries=max_retries,
     )
 

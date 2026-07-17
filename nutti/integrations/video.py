@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import NamedTuple
 from uuid import uuid4
 
-from nutti.config import Settings
+from nutti.config import Settings, _usable_key
 from nutti.logging import get_logger
 from nutti.models import Script, VideoAsset
 
@@ -145,33 +145,8 @@ def _sanitize_prompt_text(text: str, max_chars: int) -> str:
     return text.replace("'", "’").strip()[:max_chars]
 
 
-def _usable_key(value: str | None) -> bool:
-    """API 키 값이 실제로 쓸 수 있는지(비어 있지 않고 주석이 아님) 판정한다.
-
-    pydantic-settings는 `.env`의 인라인 주석을 분리하지 않으므로,
-    `KEY=   # 설명`처럼 빈 값 뒤에 주석이 붙으면 키 값이 `'# 설명'`이라는
-    truthy 문자열로 파싱된다. 단순 truthiness 검사는 이런 더미 값을 진짜 키로
-    오인해 fast-fail 가드를 우회시키므로, strip 후 주석(`#` 시작)을 배제한다.
-    """
-    if not value:
-        return False
-    stripped = value.strip()
-    return bool(stripped) and not stripped.startswith("#")
-
-
-def _close_http(http) -> None:
-    """httpx 호환 클라이언트를 안전하게 닫는다(close가 있으면 호출).
-
-    주입된 fake에는 close가 없을 수 있으므로 getattr로 방어한다.
-    """
-    if http is not None:
-        close = getattr(http, "close", None)
-        if callable(close):
-            close()
-
-
 def _close_owned(client) -> None:
-    """VideoStudio가 자체 생성한 연동 클라이언트를 안전하게 닫는다.
+    """자체 생성한 연동/HTTP 클라이언트를 안전하게 닫는다.
 
     close()를 가진 실 클라이언트는 그걸 호출하고, close가 없는 대체 구현
     (테스트 monkeypatch가 반환하는 fake 등)은 조용히 건너뛴다.
@@ -192,25 +167,19 @@ def _frame_mad(a: bytes, b: bytes) -> float:
 
 
 class _HttpClosingMixin:
-    """지연 생성한 `httpx.Client`(self._http)를 닫는 close/컨텍스트 매니저 제공.
+    """지연 생성한 `httpx.Client`(self._http)를 닫는 close() 제공.
 
     각 클라이언트는 self._http에 httpx.Client를 지연 캐싱하는데, 닫지 않으면
     장기 실행 스케줄러에서 TCP 연결 풀/파일 디스크립터가 누적된다. 이 믹스인은
-    `close()`(멱등)와 `with` 지원을 더해 누수를 막는다. 주입받은 클라이언트도
+    멱등 `close()`를 더해 누수를 막는다. 주입받은 클라이언트도
     소유권이 호출부로 넘어온 것으로 보고 닫는다(호출부는 자체 생성분만 닫음).
     """
 
     _http = None
 
     def close(self) -> None:
-        _close_http(self._http)
+        _close_owned(self._http)
         self._http = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
 
 
 class VideoRenderError(RuntimeError):
@@ -652,20 +621,6 @@ class VeoPromptBuilder:
     )
     # ========================= PO 수정 구역 끝 (영상 연출) =========================
 
-    def build(
-        self,
-        script: Script,
-        *,
-        off_screen_interviewer: bool = True,
-        style: EpisodeStyle | None = None,
-    ) -> str:
-        """대본에서 단일컷 Veo 프롬프트를 만든다(하위호환·단일 비트 폴백).
-
-        본문이 비면 주제로 폴백(빈 인용 방지). 멀티비트 경로는 `build_beat`를 쓴다.
-        """
-        text = script.body.strip() or script.topic
-        return self.build_beat(text, off_screen_interviewer=off_screen_interviewer, style=style)
-
     def build_beat(
         self,
         dialogue_text: str,
@@ -747,7 +702,7 @@ class VideoStudio:
         # 주입이 없으면 각 실 경로(non-dry_run)에서 지연 생성한다.
         self.settings = settings
         self._nano_client = nano_client
-        # fal.ai Veo 3.1 백엔드(video_backend="veo_fal")용 주입 클라이언트.
+        # fal.ai Veo 3.1 백엔드(veo_fal)용 주입 클라이언트.
         # 미주입 시 _produce_clips_veo_fal에서 지연 생성하고 finally에서 1회 닫는다.
         self._veo_fal_client = veo_fal_client
         # 폴링 대기용 sleep 주입(기본 time.sleep). 테스트에서 가짜 시계로 대체.
@@ -785,13 +740,13 @@ class VideoStudio:
 
         veo_fal 경로: 대본 비트(`script.beats`)가 N개면 같은 시작 프레임에서 비트마다
         8초 클립을 만들어 ffmpeg로 이어붙인다. 비트가 없으면 body 단일컷(8초)으로 폴백한다.
-        실 경로의 정확한 길이는 _produce_clips가 돌려준 값(트림 실측)으로 덮어쓰고,
+        실 경로의 정확한 길이는 _produce_clips_veo_fal이 돌려준 값(트림 실측)으로 덮어쓰고,
         아래 duration은 dry_run·사전 추정용 계산이다(비트당 8초 가정).
         """
         # 실 경로면 시작 전에 필수 키를 검증(미설정 시 빠르게 실패).
         self.validate_config()
         beats = self._beats(script)
-        # 비트당 8초 클립을 만들어 스티칭한다(실측 길이는 _produce_clips가 덮어쓴다).
+        # 비트당 8초 클립을 만들어 스티칭한다(실측 길이는 _produce_clips_veo_fal이 덮어쓴다).
         duration = _CLIP_SEC * len(beats)
 
         if self.settings.dry_run:
@@ -813,7 +768,7 @@ class VideoStudio:
         frame_path = self._generate_frame(script, style)
         # 실 경로의 총길이는 위 사전 추정 대신 veo_fal이 돌려준 실측값(비트 클립 앞뒤
         # 침묵 트림 반영)으로 덮어쓴다.
-        video_path, duration = self._produce_clips(frame_path, beats, style)
+        video_path, duration = self._produce_clips_veo_fal(frame_path, beats, style)
         return VideoAsset(
             script_id=script.id,
             frame_image_path=frame_path,
@@ -832,17 +787,6 @@ class VideoStudio:
         if beats:
             return beats
         return [script.body.strip() or script.topic]
-
-    def _produce_clips(
-        self, frame_path: str, beats: list[str], style: EpisodeStyle
-    ) -> tuple[str, float]:
-        """비트별 클립을 생성해 ffmpeg로 이어붙인 (최종 경로, 실측 총길이초)를 반환한다.
-
-        단일 백엔드 veo_fal: fal.ai Veo 3.1 네이티브 음성 경로로 비트마다 같은 시작
-        프레임에서 8초 클립을 만들고, 편별 스타일(의상·장소)을 각 비트 프롬프트에 반영한다.
-        앞뒤 침묵을 트림한 실측 총길이초를 함께 돌려준다.
-        """
-        return self._produce_clips_veo_fal(frame_path, beats, style)
 
     def _produce_clips_veo_fal(
         self, frame_path: str, beats: list[str], style: EpisodeStyle

@@ -5,13 +5,13 @@
 
 ## Purpose
 사람-검수 게이트. 파이프라인은 `ReviewGate` 인터페이스(`request(review) -> ReviewDecision`)
-에만 의존하고, 실제 채널(텔레그램/디스코드)이나 자동 승인(테스트)은 구현체를 갈아끼운다.
-검수①·②는 텔레그램, 검수③은 디스코드를 사용한다.
+에만 의존하고, 실제 채널(텔레그램)이나 자동 승인(테스트)은 구현체를 갈아끼운다.
+검수①·②·③ 모두 텔레그램 단일 채널이다(Discord 게이트는 2026-07-17 제거).
 
 ## Key Files
 | File | Description |
 |------|-------------|
-| `gates.py` | `ReviewGate`(Protocol), `AutoApproveGate`(dry_run/테스트), `TelegramGate`(인라인 버튼+롱폴), `DiscordGate`, `_decision_from_callback`, `_callback_origin_chat` |
+| `gates.py` | `ReviewGate`(Protocol), `AutoApproveGate`(dry_run/테스트), `TelegramGate`(인라인 버튼+롱폴), `_decision_from_callback`, `_callback_origin_chat` |
 
 ## For AI Agents
 

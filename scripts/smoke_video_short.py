@@ -66,7 +66,7 @@ def main() -> None:
     media.mkdir(parents=True, exist_ok=True)
 
     print(
-        f"[설정] dry_run={s.dry_run}  backend={s.video_backend}  "
+        f"[설정] dry_run={s.dry_run}  "
         f"fal={'O' if s.fal_key else 'X'}  endframe_lock={s.veo_fal_endframe_lock}  "
         f"tail_trim={s.veo_fal_clip_tail_trim_sec}s  seed={s.veo_fal_seed}"
     )
