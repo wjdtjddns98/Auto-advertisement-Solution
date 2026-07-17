@@ -17,9 +17,6 @@ def test_settings_defaults_isolated_from_env():
     """
     s = Settings()
     assert s.dry_run is True, "dry_run 기본값이 True여야 한다(env_file 누수 없음)"
-    assert s.video_backend == "veo_fal", (
-        "video_backend 기본값이 'veo_fal'이어야 한다(env_file 누수 없음)"
-    )
     assert s.fal_key == "", "fal_key 기본값이 빈 문자열이어야 한다"
     assert s.anthropic_api_key == "", "anthropic_api_key 기본값이 빈 문자열이어야 한다"
 
@@ -38,24 +35,6 @@ def test_settings_explicit_kwargs_override_env_isolation():
     s = Settings(**{"NUTTI_DRY_RUN": False, "FAL_KEY": "my-key"})
     assert s.dry_run is False
     assert s.fal_key == "my-key"
-
-
-def test_settings_veo_fal_backend_explicit_kwargs_works():
-    """pydantic-settings init-source 우선순위(veo_fal 백엔드)를 검증한다.
-
-    명시적 NUTTI_VIDEO_BACKEND='veo_fal'·FAL_KEY override는 격리 픽스처 유무와
-    관계없이 적용된다 — 라이브 경로 테스트 헬퍼 계약 문서화.
-    """
-    s = Settings(
-        **{
-            "NUTTI_DRY_RUN": False,
-            "NUTTI_VIDEO_BACKEND": "veo_fal",
-            "FAL_KEY": "test-fal-key",
-        }
-    )
-    assert s.video_backend == "veo_fal"
-    assert s.dry_run is False
-    assert s.fal_key == "test-fal-key"
 
 
 def test_all_settings_aliases_in_isolation_list():

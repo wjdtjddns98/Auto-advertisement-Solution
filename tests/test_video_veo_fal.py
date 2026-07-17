@@ -45,7 +45,6 @@ def _veo_fal_settings(**overrides) -> Settings:
         "NUTTI_DRY_RUN": False,
         "GEMINI_API_KEY": "test-gemini-key",
         "FAL_KEY": "test-fal-key",
-        "NUTTI_VIDEO_BACKEND": "veo_fal",
         "NUTTI_VEO_FAL_POLL_INTERVAL_SEC": 1.0,
         "NUTTI_VEO_FAL_TIMEOUT_SEC": 30.0,
     }
@@ -791,7 +790,7 @@ def test_fal_veo_client_missing_fal_key_creates_no_client():
 def test_videostudio_veo_fal_dry_run_no_external_call():
     """dry_run=True이면 veo_fal 백엔드가 아무 외부 호출 없이 결정적 더미 자산을 반환한다."""
     veo_fal = FakeFalVeoClient()
-    settings = _dry_settings(NUTTI_VIDEO_BACKEND="veo_fal")
+    settings = _dry_settings()
     studio = VideoStudio(settings, veo_fal_client=veo_fal)
     asset = studio.produce(_script())
     # dry_run에서는 fake 클라이언트가 호출되지 않는다.
@@ -802,7 +801,7 @@ def test_videostudio_veo_fal_dry_run_no_external_call():
 
 def test_videostudio_veo_fal_dry_run_duration_is_clip_sec_times_beats():
     """dry_run에서 veo_fal duration은 _CLIP_SEC * len(beats)다(8×N 계산)."""
-    settings = _dry_settings(NUTTI_VIDEO_BACKEND="veo_fal")
+    settings = _dry_settings()
     studio = VideoStudio(settings)
     script = _script(beats=["b1", "b2", "b3"])
     asset = studio.produce(script)
@@ -811,13 +810,13 @@ def test_videostudio_veo_fal_dry_run_duration_is_clip_sec_times_beats():
 
 
 def test_videostudio_veo_fal_routes_to_veo_fal_path(monkeypatch):
-    """video_backend='veo_fal'이면 _produce_clips가 FalVeoClient 경로로 분기한다."""
+    """VideoStudio.produce가 FalVeoClient(veo_fal) 경로로 라우팅된다."""
     veo_fal = FakeFalVeoClient(video_path="data/fake/veo_fal.mp4")
     nano = FakeNanoBananaClient(frame_path="data/fake/frame.jpg")
 
     monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
-    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
+    settings = _veo_fal_settings()
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
     script = _script(body="간식 소개", beats=["비트1"])
     asset = studio.produce(script)
@@ -848,7 +847,7 @@ def test_videostudio_veo_fal_endframe_lock_fixes_frames_and_skips_chaining(monke
     monkeypatch.setattr(VideoStudio, "_chain_frame", _no_chain)
 
     settings = _veo_fal_settings(
-        NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_ENDFRAME_LOCK="true"
+        NUTTI_VEO_FAL_ENDFRAME_LOCK="true"
     )
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
     studio.produce(_script(beats=["b1", "b2", "b3"]))
@@ -876,7 +875,7 @@ def test_videostudio_veo_fal_same_seed_across_beats(monkeypatch):
     nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
     monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
-    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
+    settings = _veo_fal_settings()
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
     studio.produce(_script(beats=["b1", "b2", "b3"]))
 
@@ -891,7 +890,7 @@ def test_videostudio_veo_fal_explicit_seed_from_settings(monkeypatch):
     nano = FakeNanoBananaClient(frame_path="data/fake/shared_frame.jpg")
     monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
-    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_SEED="777")
+    settings = _veo_fal_settings(NUTTI_VEO_FAL_SEED="777")
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
     studio.produce(_script(beats=["b1", "b2"]))
 
@@ -920,7 +919,7 @@ def test_videostudio_veo_fal_each_beat_uses_same_frame(monkeypatch):
 
     # 체이닝 폴백은 image-to-video 경로(lock=False) 전용 동작이라 명시적으로 끈다(기본 True).
     settings = _veo_fal_settings(
-        NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_ENDFRAME_LOCK="false"
+        NUTTI_VEO_FAL_ENDFRAME_LOCK="false"
     )
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
     script = _script(beats=["b1", "b2", "b3"])
@@ -948,7 +947,7 @@ def test_videostudio_veo_fal_chains_tail_frame_to_next_beat(monkeypatch):
 
     # 체이닝은 image-to-video 경로(lock=False) 전용 동작이라 명시적으로 끈다(기본 True).
     settings = _veo_fal_settings(
-        NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_VEO_FAL_ENDFRAME_LOCK="false"
+        NUTTI_VEO_FAL_ENDFRAME_LOCK="false"
     )
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
     script = _script(beats=["b1", "b2", "b3"])
@@ -984,7 +983,7 @@ def test_produce_veo_fal_cleans_up_completed_clips_on_midloop_failure(tmp_path):
             pass
 
     nano = FakeNanoBananaClient(frame_path="data/fake/frame.jpg")
-    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal", NUTTI_MEDIA_DIR=str(tmp_path))
+    settings = _veo_fal_settings(NUTTI_MEDIA_DIR=str(tmp_path))
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=_LeakyFalVeo())
     script = _script(beats=["b1", "b2"])
     with pytest.raises(VideoRenderError):
@@ -1000,7 +999,7 @@ def test_videostudio_veo_fal_duration_is_clip_sec_times_beats(monkeypatch):
 
     monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durations=None: clips[0])
 
-    settings = _veo_fal_settings(NUTTI_VIDEO_BACKEND="veo_fal")
+    settings = _veo_fal_settings()
     studio = VideoStudio(settings, nano_client=nano, veo_fal_client=veo_fal)
     script = _script(beats=["b1", "b2", "b3"])
     asset = studio.produce(script)
@@ -1016,14 +1015,14 @@ def test_videostudio_veo_fal_validate_config_does_not_require_gemini_key():
     이미지 생성을 Gemini(NanoBanana)에서 fal Kontext로 옮기면서 veo_fal 파이프라인은
     Gemini 키가 완전히 불필요해졌다(결제처 fal 단일화). FAL_KEY만 있으면 검증을 통과해야 한다.
     """
-    settings = _live_settings(NUTTI_VIDEO_BACKEND="veo_fal", GEMINI_API_KEY="", FAL_KEY="fk")
+    settings = _live_settings(GEMINI_API_KEY="", FAL_KEY="fk")
     studio = VideoStudio(settings)
     studio.validate_config()  # GEMINI 없이도 예외 없이 통과해야 한다
 
 
 def test_videostudio_veo_fal_validate_config_missing_fal_key_raises():
     """veo_fal + dry_run=False + FAL_KEY 빈 값 → ValueError."""
-    settings = _live_settings(NUTTI_VIDEO_BACKEND="veo_fal", GEMINI_API_KEY="gk", FAL_KEY="")
+    settings = _live_settings(GEMINI_API_KEY="gk", FAL_KEY="")
     studio = VideoStudio(settings)
     with pytest.raises(ValueError, match="FAL_KEY"):
         studio.validate_config()
@@ -1031,7 +1030,7 @@ def test_videostudio_veo_fal_validate_config_missing_fal_key_raises():
 
 def test_videostudio_veo_fal_validate_config_all_injected_skips_key_check():
     """nano_client + veo_fal_client 모두 주입 → 키 검사 없이 통과."""
-    settings = _live_settings(NUTTI_VIDEO_BACKEND="veo_fal", GEMINI_API_KEY="", FAL_KEY="")
+    settings = _live_settings(GEMINI_API_KEY="", FAL_KEY="")
     studio = VideoStudio(
         settings,
         nano_client=FakeNanoBananaClient(),
@@ -1096,7 +1095,6 @@ def test_cost_veo_fal_lite_unit_price():
     """veo_fal lite 모델 → $0.05/초 단가."""
     settings = Settings(
         NUTTI_DRY_RUN=False,
-        NUTTI_VIDEO_BACKEND="veo_fal",
         NUTTI_VEO_FAL_MODEL="fal-ai/veo3.1/lite/image-to-video",
     )
     run = _make_run_with_video(8.0, settings)
@@ -1114,7 +1112,6 @@ def test_cost_veo_fal_fast_unit_price():
     """veo_fal fast 모델 → $0.15/초 단가."""
     settings = Settings(
         NUTTI_DRY_RUN=False,
-        NUTTI_VIDEO_BACKEND="veo_fal",
         NUTTI_VEO_FAL_MODEL="fal-ai/veo3.1/fast/image-to-video",
     )
     run = _make_run_with_video(8.0, settings)
@@ -1131,7 +1128,6 @@ def test_cost_veo_fal_standard_unit_price():
     """veo_fal standard 모델 → $0.40/초 단가."""
     settings = Settings(
         NUTTI_DRY_RUN=False,
-        NUTTI_VIDEO_BACKEND="veo_fal",
         NUTTI_VEO_FAL_MODEL="fal-ai/veo3.1/standard/image-to-video",
     )
     run = _make_run_with_video(10.0, settings)
@@ -1148,7 +1144,6 @@ def test_cost_veo_fal_lite_4_beats_24sec():
     """veo_fal lite, 4비트(24초) → $0.05 × 24 = $1.20."""
     settings = Settings(
         NUTTI_DRY_RUN=False,
-        NUTTI_VIDEO_BACKEND="veo_fal",
         NUTTI_VEO_FAL_MODEL="fal-ai/veo3.1/lite/image-to-video",
     )
     run = _make_run_with_video(24.0, settings)
@@ -1163,7 +1158,6 @@ def test_cost_veo_fal_dry_run_flag_preserved():
     """dry_run=True인 settings에서 estimate_run_cost는 dry_run=True를 반환한다."""
     settings = Settings(
         NUTTI_DRY_RUN=True,
-        NUTTI_VIDEO_BACKEND="veo_fal",
         NUTTI_VEO_FAL_MODEL="fal-ai/veo3.1/lite/image-to-video",
     )
     run = _make_run_with_video(8.0, settings)

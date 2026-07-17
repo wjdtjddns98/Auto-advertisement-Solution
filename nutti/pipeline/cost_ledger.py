@@ -12,13 +12,12 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from nutti.logging import get_logger
 from nutti.models import PipelineRun, _utcnow
+from nutti.storage import atomic_write_json
 
 log = get_logger(__name__)
 
@@ -42,18 +41,7 @@ class CostLedger:
         return data if isinstance(data, list) else []
 
     def _save(self, records: list[dict]) -> None:
-        # 원자적 쓰기(tmp 작성 후 os.replace) — 크래시·동시 실행 시 파일 손상 방지.
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        text = json.dumps(records, ensure_ascii=False, indent=2)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-            os.replace(tmp, self.path)
-        except Exception:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+        atomic_write_json(self.path, records)
 
     def record(self, run: PipelineRun) -> None:
         """완주한 실행의 비용을 원장에 한 줄 추가한다(run.cost 없으면 무시)."""

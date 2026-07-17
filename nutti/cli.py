@@ -40,7 +40,9 @@ def run(
     topic: Optional[str] = typer.Argument(
         None, help="대본 주제(생략 시 직전 성과·최근 주제를 반영해 자동 생성)"
     ),
-    reels: bool = typer.Option(False, "--reels", help="인스타 릴스도 함께 업로드"),
+    reels: bool = typer.Option(
+        False, "--reels", help="인스타 릴스용 영상·캡션을 텔레그램으로 핸드오프(수동 업로드)"
+    ),
     feedback: str = typer.Option(
         "", "--feedback", help="이전 사이클 개선 포인트(생략 시 직전 분석을 자동 사용)"
     ),

@@ -13,6 +13,20 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _usable_key(value: str | None) -> bool:
+    """API 키 값이 실제로 쓸 수 있는지(비어 있지 않고 주석이 아님) 판정한다.
+
+    pydantic-settings는 `.env`의 인라인 주석을 분리하지 않으므로,
+    `KEY=   # 설명`처럼 빈 값 뒤에 주석이 붙으면 키 값이 `'# 설명'`이라는
+    truthy 문자열로 파싱된다. 단순 truthiness 검사는 이런 더미 값을 진짜 키로
+    오인해 fast-fail 가드를 우회시키므로, strip 후 주석(`#` 시작)을 배제한다.
+    """
+    if not value:
+        return False
+    stripped = value.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -53,11 +67,8 @@ class Settings(BaseSettings):
     # 생성된 프레임/영상을 저장하는 로컬 디렉터리(fal 산출물은 일정 시간 후 삭제되므로 즉시 저장).
     nutti_media_dir: str = Field(default="data/media", alias="NUTTI_MEDIA_DIR")
 
-    # 영상 백엔드: veo_fal(단일) — fal.ai 경유 Veo 3.1, 네이티브 한국어 음성 + 종량제.
-    # 과거의 veo(Gemini API)·kling 백엔드는 2026-06-16 리팩토링에서 제거됐다.
-    video_backend: Literal["veo_fal"] = Field(
-        default="veo_fal", alias="NUTTI_VIDEO_BACKEND"
-    )
+    # 영상 백엔드는 veo_fal 단일이다(과거 veo/kling 백엔드·NUTTI_VIDEO_BACKEND 선택지는
+    # 2026-06/07 리팩토링에서 제거).
     # fal.ai 단일 키 — 프레임(Kontext)·영상(Veo) 모두 FAL_KEY 하나로 처리. fal.ai 대시보드 발급.
     fal_key: str = Field(default="", alias="FAL_KEY")
 
@@ -75,7 +86,7 @@ class Settings(BaseSettings):
         default=120.0, alias="NUTTI_KONTEXT_TIMEOUT_SEC"
     )
 
-    # ---- fal.ai Veo 3.1 백엔드(video_backend="veo_fal") ----
+    # ---- fal.ai Veo 3.1 백엔드(veo_fal) ----
     # Veo 3.1을 fal.ai 종량제로 호스팅해 네이티브 한국어 음성·마스코트 일관성을 유지한다.
     # Lite 화질로 싸게 검증하고, Fast로 승격할 때는 모델명만 바꾼다(PO 승인 후).
     veo_fal_model: str = Field(
@@ -215,10 +226,9 @@ class Settings(BaseSettings):
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
     google_service_account_json: str = Field(default="", alias="GOOGLE_SERVICE_ACCOUNT_JSON")
 
-    # 검수
+    # 검수 (텔레그램 단일 채널 — Discord 게이트는 2026-07-17 미완성 스캐폴딩 정리로 제거)
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
-    discord_webhook_url: str = Field(default="", alias="DISCORD_WEBHOOK_URL")
     # 검수 대기 동작
     review_timeout_sec: int = Field(default=3600, alias="NUTTI_REVIEW_TIMEOUT_SEC")
     review_poll_interval_sec: float = Field(default=3.0, alias="NUTTI_REVIEW_POLL_INTERVAL_SEC")

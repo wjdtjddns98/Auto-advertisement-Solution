@@ -20,7 +20,7 @@ Settings(pydantic-settings BaseSettings)가 `env_file='.env'`로 그 값을 읽�
 2. OS 환경변수(셸 export 등)에 남아 있을 수 있는 Nutti/외부 API 키들을 삭제한다.
 3. `get_settings` lru_cache를 클리어해 캐시된 라이브 Settings가 재사용되지 않도록 한다.
 
-결과: override 없는 `Settings(...)`는 코드 기본값(dry_run=True, video_backend='veo_fal')
+결과: override 없는 `Settings(...)`는 코드 기본값(dry_run=True)
 으로 확정적으로 잡힌다. 각 테스트가 명시적으로 넘기는 kwargs는 생성자 인자(init)가
 env_file보다 우선이므로 격리 후에도 그대로 적용된다.
 """
@@ -39,7 +39,6 @@ class NetworkAccessBlockedError(RuntimeError):
 # !! 규약: config.py에 Settings 필드를 추가할 때 해당 alias를 이 목록에도 반드시 동시에 추가 !!
 _NUTTI_ENV_VARS: tuple[str, ...] = (
     "NUTTI_DRY_RUN",
-    "NUTTI_VIDEO_BACKEND",
     "NUTTI_ENV",
     "NUTTI_LOG_LEVEL",
     "NUTTI_SCRIPT_MODEL",
