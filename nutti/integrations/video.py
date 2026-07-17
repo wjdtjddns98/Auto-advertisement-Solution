@@ -19,13 +19,14 @@ HTTP 상태·전송·JSON 파싱·디스크 쓰기 실패 전부 포함(오케�
 
 from __future__ import annotations
 
+import re
 import time
 import zlib
 from pathlib import Path
 from typing import NamedTuple
 from uuid import uuid4
 
-from nutti.config import Settings
+from nutti.config import Settings, _usable_key
 from nutti.logging import get_logger
 from nutti.models import Script, VideoAsset
 
@@ -60,6 +61,72 @@ _TRIM_RESUME = -20.0
 _TRIM_LOOKBACK = 4  # 직전 발화 레벨 참조 윈도 개수(=1초)
 _TRIM_MIN_SPEECH = 2.5  # 발화 시작 후 이 초 이전의 딥은 무시(훅 중 멈춤 오검출 방지)
 _TRIM_PAD = 0.15  # 발화 끝 뒤 남길 여유(초) — 끝음절 보존
+
+# 경계 유사도 스티칭(_find_similarity_cuts) 파라미터(2026-07-07 PO 지시). 고정 지점
+# 트림 대신 경계 근처 프레임의 이미지 유사도로 자연스러운 컷 지점을 찾는다.
+_SIM_FRAME_STEP = 0.1  # 후보 프레임 간격(초)
+_SIM_GAP = 0.15  # 발화 끝/시작에서 탐색을 띄우는 여유(초) — 입모양 겹침 회피
+_SIM_A_WINDOW = 1.5  # A(왼쪽 클립) 후보 구간 최대 폭(초, speech_end_a 기준)
+_SIM_MIN_B_WINDOW = 0.2  # 이 미만이면 B 후보를 t=0 고정 단일 프레임으로 수렴
+# 유사도 매칭에 성공한 경계에 쓰는 마이크로 디졸브(초). 유사 프레임 간에는 긴 디졸브가
+# 오히려 "멈춤+페이드아웃"으로 보인다(2026-07-10 PO — 비트 끊김 체감의 직접 원인) —
+# 사실상 하드컷이되, 오디오 acrossfade 클릭 방지를 위해 0이 아닌 2~3프레임 값을 쓴다.
+_SIM_CUT_DISSOLVE = 0.08
+_SIM_W, _SIM_H = 64, 114  # 유사도 비교용 저해상도 그레이스케일 프레임 크기(9:16 축소)
+
+# 스티칭 정규화 해상도(9:16 쇼츠). 모든 입력을 이 크기로 맞춰 xfade/concat의 크기 불일치
+# 실패를 방지하고, 교차 펀치인 크롭의 기준 좌표계가 된다.
+# ponytail: 720x1280 고정(fal Veo Lite 실측) — 모델 해상도를 올리면 이 상수도 함께 올릴 것.
+_STITCH_W = 720
+_STITCH_H = 1280
+
+# 자막 굽기용 한글 폰트 후보(앞에서부터 존재하는 첫 파일 사용). Windows 맑은고딕 →
+# Debian/Ubuntu Noto CJK(fonts-noto-cjk, Dockerfile에 포함) → 나눔고딕 순.
+_CAPTION_FONT_CANDIDATES = [
+    # 로컬 전용 폰트(2026-07-10 PO 지시 — '여기어때 잘난체', 상업용 무료, noonnu.cc
+    # 배포. 영상 렌더 사용은 라이선스상 허용이나 "폰트 파일 배포"는 금지라 이 저장소가
+    # public이라 커밋하지 않는다 — .gitignore의 assets/fonts/ 참조). 이 머신에 파일이
+    # 있으면(로컬 배치) 최우선 사용, 없으면(CI·새 클론·Docker) 아래 폴백으로 넘어간다.
+    # 경로는 이 파일(video.py) 기준 상대경로로 계산해 리포지토리 어디서 실행해도 찾는다.
+    str(Path(__file__).resolve().parents[2] / "assets" / "fonts" / "yg-jalnan.otf"),
+    "C:/Windows/Fonts/malgunbd.ttf",
+    "C:/Windows/Fonts/malgun.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
+]
+
+
+def _asciify_font_path(font: str) -> str:
+    """non-ASCII 경로의 폰트를 ASCII 임시 경로로 복사해 그 경로를 돌려준다.
+
+    ffmpeg drawtext의 폰트 로딩(freetype)은 Windows에서 UTF-8 경로를 ANSI로 열어
+    한글 폴더가 낀 경로의 파일을 못 연다 — 이때 에러 없이 fontconfig 기본 폰트로
+    폴백해 한글 자막이 전부 □(tofu)로 굽힌다(실측 2026-07-13, 리포지토리 루트
+    "광고 자동화 솔루션" 밑의 yg-jalnan.otf). textfile은 avio 경유라 한글 경로여도
+    무관 — 폰트 경로만 우회하면 된다. 복사 실패 시 원 경로 반환(best-effort).
+    """
+    if font.isascii():
+        return font
+    import shutil
+    import tempfile
+
+    dest = Path(tempfile.gettempdir()) / f"nutti_font_{Path(font).name}"
+    if not str(dest).isascii():
+        log.warning("video.caption.font_path_nonascii", path=font)
+        return font
+    try:
+        # 항상 복사한다 — 편당 1회뿐이라 스킵 최적화가 불필요하고, 크기-only 비교는
+        # 같은 크기의 다른 폰트로 교체 시 스테일 캐시를 조용히 남긴다(리뷰 지적).
+        shutil.copyfile(font, dest)
+    except OSError:
+        log.warning("video.caption.font_copy_failed", path=font)
+        return font
+    return str(dest)
+# 자막을 문장 단위로 순차 표시하기 위한 분리 기준(2026-07-10 PO — 한 줄씩 넘어가는
+# 스타일 요청). 문장 종결부호 뒤 공백에서 나눈다 — ai_text._split_into_beats의 문장
+# 분리 정규식과 동일 패턴(대본이 비트당 한국어 2문장을 강제하므로 보통 2개로 나뉜다).
+_CAPTION_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。…])\s+")
 # 화면 자막(깨진 한글 텍스트) 억제용 negative_prompt는 이제 설정값
 # `Settings.veo_fal_negative_prompt`로 단일화되어 FalVeoClient._submit이 fal에 직접
 # 보낸다(2026-06-18). 프롬프트 본문의 "no on-screen text" 지시와 이중 방어를 이룬다.
@@ -78,33 +145,8 @@ def _sanitize_prompt_text(text: str, max_chars: int) -> str:
     return text.replace("'", "’").strip()[:max_chars]
 
 
-def _usable_key(value: str | None) -> bool:
-    """API 키 값이 실제로 쓸 수 있는지(비어 있지 않고 주석이 아님) 판정한다.
-
-    pydantic-settings는 `.env`의 인라인 주석을 분리하지 않으므로,
-    `KEY=   # 설명`처럼 빈 값 뒤에 주석이 붙으면 키 값이 `'# 설명'`이라는
-    truthy 문자열로 파싱된다. 단순 truthiness 검사는 이런 더미 값을 진짜 키로
-    오인해 fast-fail 가드를 우회시키므로, strip 후 주석(`#` 시작)을 배제한다.
-    """
-    if not value:
-        return False
-    stripped = value.strip()
-    return bool(stripped) and not stripped.startswith("#")
-
-
-def _close_http(http) -> None:
-    """httpx 호환 클라이언트를 안전하게 닫는다(close가 있으면 호출).
-
-    주입된 fake에는 close가 없을 수 있으므로 getattr로 방어한다.
-    """
-    if http is not None:
-        close = getattr(http, "close", None)
-        if callable(close):
-            close()
-
-
 def _close_owned(client) -> None:
-    """VideoStudio가 자체 생성한 연동 클라이언트를 안전하게 닫는다.
+    """자체 생성한 연동/HTTP 클라이언트를 안전하게 닫는다.
 
     close()를 가진 실 클라이언트는 그걸 호출하고, close가 없는 대체 구현
     (테스트 monkeypatch가 반환하는 fake 등)은 조용히 건너뛴다.
@@ -116,26 +158,28 @@ def _close_owned(client) -> None:
         close()
 
 
+def _frame_mad(a: bytes, b: bytes) -> float:
+    """두 그레이스케일 raw 프레임의 평균절대차(MAD, 픽셀당 0~255)를 계산한다.
+
+    `_find_similarity_cuts`가 경계 후보 프레임 쌍 중 가장 비슷한 쌍을 고르는 데 쓴다.
+    """
+    return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+
+
 class _HttpClosingMixin:
-    """지연 생성한 `httpx.Client`(self._http)를 닫는 close/컨텍스트 매니저 제공.
+    """지연 생성한 `httpx.Client`(self._http)를 닫는 close() 제공.
 
     각 클라이언트는 self._http에 httpx.Client를 지연 캐싱하는데, 닫지 않으면
     장기 실행 스케줄러에서 TCP 연결 풀/파일 디스크립터가 누적된다. 이 믹스인은
-    `close()`(멱등)와 `with` 지원을 더해 누수를 막는다. 주입받은 클라이언트도
+    멱등 `close()`를 더해 누수를 막는다. 주입받은 클라이언트도
     소유권이 호출부로 넘어온 것으로 보고 닫는다(호출부는 자체 생성분만 닫음).
     """
 
     _http = None
 
     def close(self) -> None:
-        _close_http(self._http)
+        _close_owned(self._http)
         self._http = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
 
 
 class VideoRenderError(RuntimeError):
@@ -272,51 +316,122 @@ def _guess_image_mime(path: str) -> str:
     return "image/jpeg"
 
 
+# ================= 영상 프롬프트 하드가드(2026-07-07 PO 지시) =================
+# 대본 파서와 같은 원리 — "프롬프트 관례"로만 지키던 규칙을 과금 전에 코드로 강제한다.
+# 실측 렌더 사고 리터럴: "tripod"→화면에 삼각대 렌더(2026-06-29), "Nutti"/"9:16"→화면
+# 자막으로 렌더(2026-06-16). PO 수정 구역(의상·장소·연출 템플릿)을 고치다 실수로
+# 들어가면 테스트 전에 여기서 잡힌다. 사고 단어가 새로 실측되면 목록에 추가.
+_PROMPT_BANNED_LITERALS = ["tripod", "nutti", "누띠", "누티", "9:16"]
+
+
+def _validate_visual_prompt(prompt: str, *, expected_quotes: int) -> None:
+    """조립 완료된 Veo/Kontext 프롬프트의 하드룰 검증 — 위반 시 과금 전에 시끄럽게 실패.
+
+    expected_quotes: ASCII 작은따옴표(') 기대 개수 — 비트 프롬프트는 대사 인용 한 쌍(2),
+    프레임 프롬프트는 0. 어긋나면 인용 탈출 주입 방어의 전제가 깨진 것이다.
+    """
+    low = prompt.lower()
+    for word in _PROMPT_BANNED_LITERALS:
+        if word in low:
+            raise ValueError(
+                f"영상 프롬프트 하드룰 위반: 금지 리터럴 '{word}' 포함 — 화면 렌더 사고"
+                " 실측 단어입니다. PO 수정 구역(의상·장소·연출) 문구를 확인하세요."
+            )
+    quotes = prompt.count("'")
+    if quotes != expected_quotes:
+        raise ValueError(
+            f"영상 프롬프트 하드룰 위반: 작은따옴표 {quotes}개(기대 {expected_quotes}) — "
+            "템플릿/의상/장소 문구의 ASCII 작은따옴표(주입 방어 충돌)를 제거하세요."
+        )
+
+
 class EpisodeStyle(NamedTuple):
-    """편 단위 연출 스타일(의상·장소상황).
+    """편 단위 연출 스타일(의상·장소상황·소품·포맷).
 
     한 편 안에서는 시작 프레임과 모든 비트 프롬프트가 같은 스타일을 공유해
     시각 일관성을 유지하고, 편이 바뀌면 다른 조합이 나와 채널이 단조롭지 않게 한다.
+    `prop`(빈 문자열=소품 없음)·`fmt`("direct"=정면 정보전달 | "interview"=화면 밖
+    인터뷰어+마이크 연출)는 2026-07-16 PO 지시(영상 다양성) — 기본값이 있어 기존
+    2-필드 생성 코드와 호환된다.
     """
 
     outfit: str
     setting: str
+    prop: str = ""
+    fmt: str = "direct"
 
 
 # ======================= PO 수정 구역 (편별 연출 로테이션) =======================
-# 편마다 마스코트의 "옷"과 "장소·상황"이 바뀐다(2026-06-12 PO 지시 — 매번 다른 옷,
-# 다른 장소·상황에서 인터뷰하는 느낌). 항목을 추가/삭제하면 조합 수가 바뀐다
-# (현재 6×6=36 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
+# 편마다 마스코트의 "옷"·"장소·상황"·"소품"·"포맷"이 바뀐다(2026-06-12 PO 지시 +
+# 2026-07-16 소품·포맷 추가 — 매번 다른 옷·소품·연출). 항목을 추가/삭제하면 조합 수가
+# 바뀐다(현재 의상5×장소6×소품6×포맷3 = 540 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
 # 대사 인용 구분자와 충돌해 주입 방어 검증이 깨진다(U+2019는 허용).
 _EPISODE_OUTFITS = [
     "a tiny yellow raincoat",
     "a cozy cream knitted sweater",
-    "a crisp little navy suit with a red bow tie",
     "a sporty grey hoodie",
     "a light blue denim jacket",
     "a fluffy red scarf with a matching beanie",
 ]
+# 소품 로테이션(2026-07-16 PO — 옷만 바뀌어 단조로움, 모자·머리 위 선글라스 같은 소품
+# 추가). 빈 문자열=소품 없음(2/6 확률 — "조금씩" 추가라 매편 소품은 과함). 규칙:
+# 반드시 머리·귀 위에 얹는 소품만 — 눈·입을 가리면 표정·립싱크가 죽는다(선글라스는
+# 항상 머리 위에 얹은 상태로 명시). ASCII 작은따옴표(') 금지.
+_EPISODE_PROPS = [
+    "",
+    "",
+    "a tiny straw sun hat resting on top of its head",
+    "cute toy sunglasses perched on top of its head, above the eyes, never covering them",
+    "a small red beret tilted playfully to one side of its head",
+    "a little daisy flower clip tucked into the fur on its head",
+]
+# 포맷 로테이션(2026-07-16 PO — 포맷 다양화): 목록·선택 로직은 ai_text의
+# EPISODE_FORMATS/pick_episode_format이 단일 소스다 — 대본 구조(quiz/ranking/vlog/vet
+# 톤)와 영상 연출(마이크·수의사 세트)이 같은 포맷을 봐야 하므로 여기서 중복 정의하지
+# 않는다. "interview"=화면 밖 인터뷰어+마이크(_MIC), "vet"=수의사 상황극(아래 가운·
+# 진료실 오버라이드), 그 외("direct"/"quiz"/"ranking"/"vlog")=정면 발화(대본만 다름).
+# 수의사 상황극 전용 의상·장소(2026-07-16 PO). 로테이션 대신 고정 — 콘셉트 유지를 위해
+# 소품도 뽑지 않는다(밀짚모자 쓴 수의사는 콘셉트 붕괴). ASCII 작은따옴표(') 금지.
+_VET_OUTFIT = "a clean white veterinarian coat with a small stethoscope resting around its neck"
+_VET_SETTING = "sitting at the examination desk of a bright, tidy veterinary clinic room"
+# 전 항목 sitting 계열로 통일(2026-07-06 PO) — standing 시작 프레임이 뽑히면 클립 전체가
+# 이족보행 인형탈 느낌이 되고, 모션 지시(_MOTION_HOLD/_MOTION_LIVELY의 "stays seated")와
+# 모순돼 드리프트를 유발한다. 새 장소를 추가할 때도 sitting 자세로 쓸 것.
 _EPISODE_SETTINGS = [
-    "standing on a busy city sidewalk like a street interview",
+    "sitting on a busy city sidewalk like a street interview",
     "sitting on a cozy living room sofa under warm lamps",
     "sitting on a park bench on a sunny afternoon",
-    "standing at a bright modern kitchen counter",
-    "standing in front of a cute pet shop entrance",
+    "sitting on a bright modern kitchen floor",
+    "sitting in front of a cute pet shop entrance",
     "sitting at a tidy home office desk like a news anchor",
 ]
 # ===================== PO 수정 구역 끝 (편별 연출 로테이션) =====================
 
 
-def pick_episode_style(script_id: str) -> EpisodeStyle:
-    """script.id의 CRC32로 의상·장소상황을 결정적으로 고른다(같은 편=같은 스타일).
+def pick_episode_style(script_id: str, topic: str | None = None) -> EpisodeStyle:
+    """script.id의 CRC32로 의상·장소·소품을, 주제 해시로 포맷을 결정적으로 고른다.
 
-    의상과 장소는 서로 다른 salt로 해시해 독립적으로 조합된다 — 같은 salt를 쓰면
+    의상·장소·소품은 서로 다른 salt로 해시해 독립적으로 조합된다 — 같은 salt를 쓰면
     리스트 길이가 같을 때 인덱스가 동기화돼 조합 다양성이 리스트 길이로 줄어든다.
-    CRC32 기반 결정적 선택 패턴(같은 입력 → 항상 같은 결과).
+    포맷만 주제 문자열 기준(ai_text.pick_episode_format)인 이유: 대본 구조가 포맷을
+    따라야 하는데 대본 생성 시점엔 script.id가 아직 없다 — 주제가 유일한 공유 키.
+    topic 미지정(레거시 호출·테스트)이면 script_id를 키로 폴백한다(결정성 유지).
+    "vet" 포맷은 의상·장소를 수의사 세트로 고정하고 소품을 뽑지 않는다(콘셉트 보호).
     """
+    from nutti.integrations.ai_text import pick_episode_format
+
+    fmt = pick_episode_format(topic if topic is not None else script_id)
+    if fmt == "vet":
+        return EpisodeStyle(_VET_OUTFIT, _VET_SETTING, "", fmt)
     outfit_idx = zlib.crc32(f"outfit:{script_id}".encode()) % len(_EPISODE_OUTFITS)
     setting_idx = zlib.crc32(f"setting:{script_id}".encode()) % len(_EPISODE_SETTINGS)
-    return EpisodeStyle(_EPISODE_OUTFITS[outfit_idx], _EPISODE_SETTINGS[setting_idx])
+    prop_idx = zlib.crc32(f"prop:{script_id}".encode()) % len(_EPISODE_PROPS)
+    return EpisodeStyle(
+        _EPISODE_OUTFITS[outfit_idx],
+        _EPISODE_SETTINGS[setting_idx],
+        _EPISODE_PROPS[prop_idx],
+        fmt,
+    )
 
 
 # ============== PO 수정 구역 (마스코트 외형 — 캐릭터 일관성의 핵심) ==============
@@ -395,7 +510,14 @@ class VeoPromptBuilder:
         "one specific recognizable person with a fixed vocal fingerprint): a bright, "
         "cute Little girl Korean voice, sounding about 6 years old, slightly high-pitched, "
         "cheeky and energetic, with a warm soft timbre and a consistent speaking rhythm at "
-        "a lively natural pace. Keep the identical timbre, pitch, accent, and speaking speed "
+        "a lively natural pace. "
+        # 발음 교정(2026-07-06 PO 실측: 쉬운 단어도 발음이 뭉개짐 — 아이 페르소나의
+        # 혀 짧은 딕션 재현이 유력 원인). 톤은 아이답게 유지하되 발음만 성인급 정확도로.
+        "Her Korean PRONUNCIATION however is flawlessly clear and precise: perfect "
+        "standard Korean diction, every syllable fully and accurately articulated, "
+        "never slurred, never mumbled, never babyish or lisping — like a professional "
+        "child voice actor whose enunciation is adult-level crisp and correct. "
+        "Keep the identical timbre, pitch, accent, and speaking speed "
         "in every clip. Keep this exact same voice even on excited, exclamatory, or "
         "call-to-action lines: do not raise the pitch, do not get louder, do not turn into "
         "an excited announcer or a promotional voice-over, and never switch to a different "
@@ -440,22 +562,47 @@ class VeoPromptBuilder:
     # 끝프레임 고정(lock) 모드 전용 모션 지시(2026-06-29 PO: "모션홀드 풀어 생동감").
     # first-last-frame 모델이 시작·끝 프레임을 동일 마스코트 프레임으로 강제하므로, 중간에
     # 자유롭게 움직여도 클립은 항상 같은 끝 포즈로 수렴한다 — 정적인 _MOTION_HOLD 대신
-    # 앉은 채 자연스러운 제스처를 허용해 생기를 준다. 단 화면 이탈·기립·눕기는 막아(막판
-    # 이상행동 방지) 끝을 차분한 앉은 자세로 마무리하게 하고, 끝 페이드는 금지한다
-    # (negative_prompt의 "lying down/walking out/camera movement" 억제와 이중 방어).
+    # 앉은 채 자연스러운 제스처를 허용해 생기를 준다. 단 화면 이탈·기립·눕기는 막고
+    # 끝 페이드는 금지한다(negative_prompt 억제와 이중 방어).
+    # 2026-07-10 PO("비트별로 페이드아웃되는 기분"): 종전의 "끝 2~3초 진정(wind-down)"
+    # 강제를 제거 — 매 비트 끝마다 에너지가 죽어 페이드아웃처럼 보이는 직접 원인이었다.
+    # 끝 포즈 수렴은 FLF 모델이 물리적으로 담당하므로 프롬프트 진정 지시는 불필요한
+    # 이중 방어였다(수렴 실패는 QC의 tail_not_converged가 잡는다).
+    # 2026-07-16 PO("캐릭터가 너무 정적이라 밋밋함"): 중간 비트의 제스처 어휘를
+    # _MOTION_FINAL_FREE에서 이미 검증된 수준(앞발 흔들기·귀 쫑긋·꼬리 흔들기·상체
+    # 리액션)으로 확대. 화면 이탈·기립·끝 페이드 가드와 FLF 끝 포즈 수렴은 그대로 유지.
     _MOTION_LIVELY = (
         "The puppy stays seated and centered in frame the whole time but moves naturally "
-        "and expressively as it talks — gentle head tilts, ear and body movements, "
-        "blinking, and lively little gestures that bring energy to the shot. It never "
+        "and expressively as it talks — happy head tilts, little paw waves, excited ear "
+        "wiggles, a joyful tail wag, leaning slightly toward the camera, and lively "
+        "expressive reactions that bring real energy and charm to the shot. It is already "
+        "in lively motion from the very first moments of the clip — it starts talking and "
+        "moving right away, with no still, frozen, or slow warm-up intro. It never "
         "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
-        "leaves the frame. Ending rule: in the final two to three seconds the puppy gently "
-        "settles into a calm, steady, upright seated pose facing forward, winding down its "
-        "gestures while keeping only subtle natural life — soft breathing and an occasional "
-        "slow blink. No big gestures, no shifting, turning, ducking, or leaning at the end. "
-        "It must NOT hard-freeze into a perfectly static, lifeless frame; keep this faint "
-        "living motion all the way through. The clip ends on a calm, clean, fully-lit, "
-        "razor-sharp frame — no fade-out, no dimming, no blur, no warping, no morphing, no "
-        "freeze, and no glitch at the end."
+        "leaves the frame. Keep this natural lively energy all the way to the end of the "
+        "clip — do not wind down, slow down, go still, or freeze near the end. The clip "
+        "ends on a clean, fully-lit, razor-sharp frame — no fade-out, no dimming, no blur, "
+        "no warping, no morphing, no freeze, and no glitch at the end."
+    )
+    # 마지막 비트(CTA) 전용 모션 — 진정(wind-down) 강제 없이 귀여운 행동을 자유롭게
+    # 허용한다(2026-07-06 PO: "마지막 비트는 제한 걸지 말고 귀여운 행동 하게 냅둬").
+    # 마지막 비트는 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 불필요 — 화면 이탈·끝
+    # 페이드/글리치 같은 깨짐 방지 최소 가드만 남긴다.
+    _MOTION_FINAL_FREE = (
+        "The puppy stays seated and centered in frame but is free to be playful and "
+        "adorable as it talks — happy head tilts, little paw waves, excited ear wiggles, "
+        "a joyful tail wag, cute expressive reactions. Let its natural charm show; no "
+        "forced calm-down at the end. It never leaves the frame. The clip ends on a "
+        "clean, fully-lit, sharp frame — no fade-out, no dimming, no blur, no warping, "
+        "and no glitch at the end."
+    )
+    # 립싱크 강제 — 간헐적으로 입을 안 움직이며 내레이션처럼 나오는 클립 방지
+    # (2026-07-06 PO 실측). 모든 비트 프롬프트에 포함.
+    _LIPSYNC = (
+        "The puppy visibly speaks every word on camera: its mouth clearly opens and moves "
+        "in sync with the spoken Korean line from the first word to the last. The voice is "
+        "never detached narration or voice-over — it always comes from the puppy talking "
+        "on screen with matching mouth movements."
     )
     _NEGATIVE = (
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
@@ -473,20 +620,6 @@ class VeoPromptBuilder:
         "this call to action."
     )
     # ========================= PO 수정 구역 끝 (영상 연출) =========================
-
-    def build(
-        self,
-        script: Script,
-        *,
-        off_screen_interviewer: bool = True,
-        style: EpisodeStyle | None = None,
-    ) -> str:
-        """대본에서 단일컷 Veo 프롬프트를 만든다(하위호환·단일 비트 폴백).
-
-        본문이 비면 주제로 폴백(빈 인용 방지). 멀티비트 경로는 `build_beat`를 쓴다.
-        """
-        text = script.body.strip() or script.topic
-        return self.build_beat(text, off_screen_interviewer=off_screen_interviewer, style=style)
 
     def build_beat(
         self,
@@ -517,15 +650,24 @@ class VeoPromptBuilder:
         speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
         scene = ""
         if style is not None:
-            scene = f"The puppy wears {style.outfit}, {style.setting}. "
+            prop = f", with {style.prop}" if style.prop else ""
+            scene = f"The puppy wears {style.outfit}{prop}, {style.setting}. "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
-        motion = self._MOTION_LIVELY if motion_release else self._MOTION_HOLD
+        # 마지막 비트는 진정 강제 없이 귀여운 행동 자유(_MOTION_FINAL_FREE, 2026-07-06 PO) —
+        # 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 필요 없다. 중간 비트는 기존 로직 유지.
+        if motion_release and final_cta:
+            motion = self._MOTION_FINAL_FREE
+        elif motion_release:
+            motion = self._MOTION_LIVELY
+        else:
+            motion = self._MOTION_HOLD
         cta = f"{self._CTA_VOICE_ANCHOR} " if final_cta else ""
-        return (
+        prompt = (
             f"A photorealistic shot of {self._PERSONA}, {speaking}, "
             f"saying (as spoken audio only, no on-screen text): '{dialogue}'. "
             f"{scene}{mic}"
             f"{self._VOICE} {cta}"
+            f"{self._LIPSYNC} "
             f"{self._CAMERA} "
             f"{motion} "
             f"{self._CONTINUITY} "
@@ -533,6 +675,11 @@ class VeoPromptBuilder:
             "Format: tall vertical portrait orientation, single continuous 8-second shot. "
             f"{self._NEGATIVE}"
         )
+        # 하드가드: 금지 리터럴·인용 구분자 한 쌍 — 과금 전 검증(2026-07-07 PO).
+        # 대사(quoted)는 검사에서 제외한다: 음성으로 발화될 뿐 화면 렌더 사고와 무관하고,
+        # 대사 속 브랜드명·발음 리스크는 대본 파서(ai_text.validate_script_body) 담당.
+        _validate_visual_prompt(prompt.replace(dialogue, ""), expected_quotes=2)
+        return prompt
 
 
 # NanoBananaClient(Gemini 이미지 생성)는 2026-06 PO 결정으로 FalKontextClient로 교체됨.
@@ -549,16 +696,21 @@ class VideoStudio:
         nano_client=None,
         veo_fal_client=None,
         sleep=None,
+        text_judge=None,
     ):
         # 실연동 클라이언트는 주입 가능하게 받는다(테스트에서 fake 주입 → 네트워크 불요).
         # 주입이 없으면 각 실 경로(non-dry_run)에서 지연 생성한다.
         self.settings = settings
         self._nano_client = nano_client
-        # fal.ai Veo 3.1 백엔드(video_backend="veo_fal")용 주입 클라이언트.
+        # fal.ai Veo 3.1 백엔드(veo_fal)용 주입 클라이언트.
         # 미주입 시 _produce_clips_veo_fal에서 지연 생성하고 finally에서 1회 닫는다.
         self._veo_fal_client = veo_fal_client
         # 폴링 대기용 sleep 주입(기본 time.sleep). 테스트에서 가짜 시계로 대체.
         self._sleep = sleep
+        # 화면 텍스트 QC 판정자 주입(테스트용): callable(list[프레임 PNG 경로]) ->
+        # True(텍스트 있음)|False(없음)|None(판단 보류). 미주입 시 실 경로에서
+        # AITextClient.judge_frames_have_text로 지연 생성한다(_judge_frames_text).
+        self._text_judge = text_judge
 
     def validate_config(self) -> None:
         """실 경로 진입 전 필수 API 키가 쓸 수 있는 값인지 한 번에 점검한다.
@@ -588,13 +740,13 @@ class VideoStudio:
 
         veo_fal 경로: 대본 비트(`script.beats`)가 N개면 같은 시작 프레임에서 비트마다
         8초 클립을 만들어 ffmpeg로 이어붙인다. 비트가 없으면 body 단일컷(8초)으로 폴백한다.
-        실 경로의 정확한 길이는 _produce_clips가 돌려준 값(트림 실측)으로 덮어쓰고,
+        실 경로의 정확한 길이는 _produce_clips_veo_fal이 돌려준 값(트림 실측)으로 덮어쓰고,
         아래 duration은 dry_run·사전 추정용 계산이다(비트당 8초 가정).
         """
         # 실 경로면 시작 전에 필수 키를 검증(미설정 시 빠르게 실패).
         self.validate_config()
         beats = self._beats(script)
-        # 비트당 8초 클립을 만들어 스티칭한다(실측 길이는 _produce_clips가 덮어쓴다).
+        # 비트당 8초 클립을 만들어 스티칭한다(실측 길이는 _produce_clips_veo_fal이 덮어쓴다).
         duration = _CLIP_SEC * len(beats)
 
         if self.settings.dry_run:
@@ -612,11 +764,11 @@ class VideoStudio:
         # 편별 스타일(의상·장소)은 여기서 정확히 한 번 계산해 프레임과 비트 클립에
         # 같은 값을 명시적으로 전달한다 — 두 곳에서 독립 계산하면 향후 호출 경로가
         # 갈릴 때 프레임과 클립의 장면이 어긋날 수 있다(리뷰 지적, PR #52).
-        style = pick_episode_style(script.id)
+        style = pick_episode_style(script.id, script.topic)
         frame_path = self._generate_frame(script, style)
         # 실 경로의 총길이는 위 사전 추정 대신 veo_fal이 돌려준 실측값(비트 클립 앞뒤
         # 침묵 트림 반영)으로 덮어쓴다.
-        video_path, duration = self._produce_clips(frame_path, beats, style)
+        video_path, duration = self._produce_clips_veo_fal(frame_path, beats, style)
         return VideoAsset(
             script_id=script.id,
             frame_image_path=frame_path,
@@ -635,17 +787,6 @@ class VideoStudio:
         if beats:
             return beats
         return [script.body.strip() or script.topic]
-
-    def _produce_clips(
-        self, frame_path: str, beats: list[str], style: EpisodeStyle
-    ) -> tuple[str, float]:
-        """비트별 클립을 생성해 ffmpeg로 이어붙인 (최종 경로, 실측 총길이초)를 반환한다.
-
-        단일 백엔드 veo_fal: fal.ai Veo 3.1 네이티브 음성 경로로 비트마다 같은 시작
-        프레임에서 8초 클립을 만들고, 편별 스타일(의상·장소)을 각 비트 프롬프트에 반영한다.
-        앞뒤 침묵을 트림한 실측 총길이초를 함께 돌려준다.
-        """
-        return self._produce_clips_veo_fal(frame_path, beats, style)
 
     def _produce_clips_veo_fal(
         self, frame_path: str, beats: list[str], style: EpisodeStyle
@@ -687,33 +828,50 @@ class VideoStudio:
         current_frame = frame_path
         try:
             for i, beat in enumerate(beats, start=1):
-                # 정면 1인 발화(off_screen_interviewer=False) — 인터뷰 마이크 연출 제거
-                # (2026-06-16 PO 피드백: 마이크 구도 아예 삭제).
+                # 포맷 로테이션(2026-07-16 PO): "interview" 편은 화면 밖 인터뷰어+마이크
+                # 연출(_MIC), "direct" 편은 정면 1인 발화. (2026-06-16의 마이크 전면 삭제를
+                # KR "AI 강아지 인터뷰" 유행에 맞춰 로테이션으로 부활.)
                 # lock 모드는 끝 프레임이 모델로 고정되므로 모션 제약을 풀어(_MOTION_LIVELY)
                 # 생동감을 준다(2026-06-29 PO). 기본 image-to-video 경로는 _MOTION_HOLD 유지.
                 prompt = builder.build_beat(
                     beat,
-                    off_screen_interviewer=False,
+                    off_screen_interviewer=(style.fmt == "interview"),
                     style=style,
                     motion_release=lock,
                     final_cta=(i == len(beats)),
                 )
-                if lock:
-                    # 시작·끝 모두 마스코트 프레임으로 고정(끝프레임 고정 모드).
-                    clip_path = client.generate(
-                        frame_path, prompt, last_frame_path=frame_path, seed=video_seed
+                # 생성 + 끝 잉여 고정 트림(글리치 온상 제거, 8초→약7초, 2026-06-29 PO).
+                # QC 재생성이 같은 단계를 다시 밟도록 헬퍼로 묶었다.
+                clip_path = self._generate_and_trim_clip(
+                    client, prompt, current_frame, frame_path, lock, video_seed
+                )
+                # 클립 QC 레이어(2026-07-07 PO): 중간 프리즈·블랙·무발화·꼬리 미수렴을
+                # 잡아 그 비트만 재생성한다. 상한(qc_max_retries) 초과 시 현행 트림·마스킹
+                # 폴백으로 그대로 수용한다 — 여기서 예외/실패로 파이프라인을 죽이지 않는다.
+                # 마지막 비트는 꼬리 수렴 검사 면제(final_beat) — 뒤에 이어붙일 클립이
+                # 없고 모션도 자유(_MOTION_FINAL_FREE)라 수렴 실패가 결함이 아니다.
+                # 6차 런 실측: 마지막 비트가 tail_not_converged로 2회 재생성($0.8 낭비).
+                final_beat = i == len(beats)
+                reasons = self._qc_check_beat(clip_path, frame_path, lock, final_beat=final_beat)
+                attempt = 0
+                while reasons and attempt < self.settings.qc_max_retries:
+                    attempt += 1
+                    log.info(
+                        "video.veo_fal.qc.retry", beat=i, attempt=attempt, reasons=reasons
                     )
-                else:
-                    clip_path = client.generate(current_frame, prompt, seed=video_seed)
-                # 끝 잉여 구간(글리치·이상동작 온상) 강제 제거: 8초→약7초(2026-06-29 PO).
-                # 트림 성공 시 원본 8초 클립은 즉시 삭제(잔존 방지). 이후 체이닝 끝프레임
-                # 추출·무음 트림은 모두 트림된 클립 기준 — 글리치 구간이 다음 단계에도 안 샌다.
-                tail = self.settings.veo_fal_clip_tail_trim_sec
-                if tail > 0:
-                    cut = self._trim_tail_fixed(clip_path, tail)
-                    if cut != clip_path:
-                        Path(clip_path).unlink(missing_ok=True)
-                        clip_path = cut
+                    Path(clip_path).unlink(missing_ok=True)
+                    # 재생성 seed는 오프셋을 준다 — 같은 seed+같은 프롬프트 재제출은 같은
+                    # 결함(텍스트 오버레이 등)을 그대로 재현할 수 있어 재시도가 무효가 된다.
+                    # 음색 seed 일관성보다 결함 제거가 우선(2026-07-10, 텍스트 QC와 함께).
+                    retry_seed = (video_seed + attempt) % (2**31)
+                    clip_path = self._generate_and_trim_clip(
+                        client, prompt, current_frame, frame_path, lock, retry_seed
+                    )
+                    reasons = self._qc_check_beat(
+                        clip_path, frame_path, lock, final_beat=final_beat
+                    )
+                if reasons:
+                    log.info("video.veo_fal.qc.fallback", beat=i, reasons=reasons)
                 log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
                 clips.append(clip_path)
                 # 가드된 체이닝(기본 모드만): 다음 비트가 있으면 이 클립의 끝 안정 프레임을
@@ -756,12 +914,118 @@ class VideoStudio:
             trimmed.append(path)
             durations.append(sec)
             total += sec if sec is not None else _CLIP_SEC
-        # 트림으로 새로 만든 임시 파일(veo_fal_trim_*.mp4)은 스티칭 후 정리한다 — 원본
-        # 비트 클립은 기존 정책대로 유지하고, 단일 비트라 _stitch가 그대로 돌려준 파일
-        # (final)은 삭제 대상에서 제외한다(반환 파일 삭제 방지). 스티칭 실패 시에도 정리.
+
+        # 경계 유사도 스티칭(2026-07-07 PO): 고정 지점 트림 대신 경계 근처 프레임 쌍의
+        # 이미지 유사도로 가장 자연스러운 컷 지점을 찾는다. A(왼쪽 클립)는 tail-trim만
+        # 된 원본 clips[i]에서 발화 끝(durations[i]) 이후를 탐색한다 — 이미 발화 끝으로
+        # 잘린 trimmed[i]는 탐색할 여유가 거의 없다. B(오른쪽 클립)의 발화 시작은 별도로
+        # 검출하지 않는다 — 현재 트림은 앞을 자르지 않으므로(_trim_to_speech의 start_t=0
+        # 정책) B는 항상 t=0 근방에서 시작하고, endframe_lock 모드에서는 그 t=0 프레임이
+        # 모든 클립이 공유하는 마스코트 고정 프레임이라 A의 수렴 프레임과 자연히 유사하다.
+        # speech_start_b=0.0을 넘겨 B 후보를 t=0 단일 프레임으로 수렴시킨다(스펙의
+        # "0.2s 미만 → 0.0 고정" 분기).
+        n_clips = len(clips)
+        head_start = [0.0] * n_clips
+        tail_end: list[float | None] = list(durations)
+        tail_from_sim = [False] * n_clips
+        head_from_sim = [False] * n_clips
+        dissolve_base = float(getattr(self.settings, "veo_fal_crossfade_sec", 0.0) or 0.0)
+        boundary_dissolves = [dissolve_base] * max(0, n_clips - 1)
+        any_custom = False
+        threshold = float(getattr(self.settings, "stitch_sim_threshold", 0.0) or 0.0)
+        if threshold > 0:
+            for i in range(n_clips - 1):
+                speech_end_a = durations[i]
+                if speech_end_a is None:
+                    continue  # 발화 끝 미상 — 유사도 탐색 불가, 기존 트림 유지
+                try:
+                    result = self._find_similarity_cuts(
+                        clips[i], clips[i + 1], speech_end_a, 0.0, threshold=threshold
+                    )
+                except Exception:
+                    result = None
+                if result is None:
+                    # 관측 로그: 이 경계는 매칭 시도조차 못 해 기본 디졸브로 폴백된다 —
+                    # 라이브 런에서 "왜 이 경계만 페이드처럼 보이나"를 추적하는 신호.
+                    log.info("stitch.sim_search_miss", boundary=i)
+                    continue  # ffmpeg 실패·프레임 부족 등 — best-effort 폴백(기존 트림 유지)
+                cut_a, cut_b, diff = result
+                if diff <= threshold:
+                    tail_end[i] = cut_a
+                    tail_from_sim[i] = True
+                    head_start[i + 1] = cut_b
+                    head_from_sim[i + 1] = True
+                    # 관측 로그: 발화 끝에서 컷까지의 잔여 초 — 설틀 꼬리가 실제로
+                    # 잘리는지 라이브 런 로그로 확인하는 유일한 신호(2026-07-10).
+                    log.info(
+                        "stitch.sim_cut",
+                        boundary=i,
+                        tail_sec=round(cut_a - speech_end_a, 2),
+                        diff=round(diff, 1),
+                    )
+                    # 유사 프레임끼리는 디졸브 대신 사실상 하드컷(마이크로 디졸브)으로
+                    # 붙인다 — 거의 같은 두 정지 프레임을 0.35초 디졸브하면 그 구간이
+                    # "멈춤+페이드아웃"으로 보이는 것이 비트 끊김 체감의 직접 원인
+                    # (2026-07-10 PO). 스트레이트 컷은 연속 동작으로 읽힌다. 오디오
+                    # acrossfade 클릭 방지를 위해 0이 아닌 마이크로 값(0.08s)을 쓴다.
+                    boundary_dissolves[i] = min(dissolve_base, _SIM_CUT_DISSOLVE)
+                    any_custom = True
+                else:
+                    log.warning("stitch.boundary_mismatch", diff=diff, pair=(i, i + 1))
+                    boundary_dissolves[i] = dissolve_base * 2
+                    any_custom = True
+
+        # 유사도 컷이 결정된 클립만 clips[k](원본)에서 [head_start, tail_end)로 다시
+        # 잘라낸다 — trimmed[k]는 그대로 두고 새 파일로 교체해 미개입 클립은 기존
+        # _trim_to_speech 산출물을 그대로 재사용한다(threshold<=0이면 아예 무개입).
+        final_trimmed = list(trimmed)
+        final_durations: list[float | None] = list(durations)
+        sim_cut_files: list[str] = []
+        for k in range(n_clips):
+            if not (tail_from_sim[k] or head_from_sim[k]):
+                continue
+            if durations[k] is None:
+                continue  # 발화 끝 미상 클립은 병합 컷을 보류하고 기존 트림 유지
+            end_k = tail_end[k] if tail_from_sim[k] else durations[k]
+            start_k = head_start[k] if head_from_sim[k] else 0.0
+            cut_path = self._cut_clip_range(clips[k], start_k, end_k)
+            if cut_path is None:
+                continue  # 컷 실패 — 기존 트림 유지(best-effort)
+            final_trimmed[k] = cut_path
+            final_durations[k] = end_k - start_k
+            sim_cut_files.append(cut_path)
+
+        # 트림으로 새로 만든 임시 파일(veo_fal_trim_*.mp4/veo_fal_simcut_*.mp4)은 스티칭
+        # 후 정리한다 — 원본 비트 클립은 기존 정책대로 유지하고, 단일 비트라 _stitch가
+        # 그대로 돌려준 파일(final)은 삭제 대상에서 제외한다(반환 파일 삭제 방지).
+        # 스티칭 실패 시에도 정리.
         final = None
         try:
-            final = self._stitch(trimmed, durations)
+            if any_custom:
+                final = self._stitch(
+                    final_trimmed, final_durations, boundary_dissolves=boundary_dissolves
+                )
+            else:
+                final = self._stitch(final_trimmed, final_durations)
+            # 자막 굽기(2026-07-06 PO): 비트별 대사를 하단 한글 자막으로. best-effort —
+            # 실패/폰트 없음이면 무자막 원본 유지. 성공 시 자막 전 스티칭 산출물(중간물)은
+            # 삭제하되, 단일 비트처럼 _stitch가 입력을 그대로 돌려준 경우는 남긴다.
+            if self.settings.caption_burn:
+                captioned = self._burn_captions(
+                    final, beats, final_durations,
+                    dissolve=getattr(self, "_last_stitch_dissolve", 0.0),
+                    boundary_dissolves=getattr(self, "_last_boundary_dissolves", None),
+                )
+                if captioned is not None:
+                    if final not in final_trimmed and final not in clips:
+                        try:
+                            # missing_ok는 '없음'만 삼킨다 — Windows에서 ffmpeg 핸들
+                            # 지연 해제로 PermissionError가 나면 성공한 자막 영상을
+                            # 버리게 되므로 OSError 전체를 방어한다(리뷰 지적).
+                            Path(final).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    final = captioned
             # total은 트림 클립 길이의 단순 합 = 디졸브 전 상한값이다. _stitch가 경계
             # 디졸브를 적용하면 실제 산출물은 (비트수-1)*crossfade_sec 만큼 짧다(0.25초
             # 기본이면 3비트당 0.5초). 여기서 산술 보정하지 않는 이유: 호출부는 _stitch가
@@ -773,6 +1037,12 @@ class VideoStudio:
         finally:
             for orig, t in zip(clips, trimmed):
                 if t != orig and t != final:
+                    try:
+                        Path(t).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            for t in sim_cut_files:
+                if t != final:
                     try:
                         Path(t).unlink(missing_ok=True)
                     except OSError:
@@ -968,7 +1238,438 @@ class VideoStudio:
             # 트림은 품질 개선용 best-effort — 어떤 실패도 원본 클립으로 폴백한다.
             return clip, None
 
-    def _stitch(self, clips: list[str], durations: list[float | None] | None = None) -> str:
+    def _probe_duration_sec(self, clip: str) -> float | None:
+        """ffmpeg -i의 stderr에서 `Duration:` 라인을 파싱해 초 단위 길이를 반환한다.
+
+        `_trim_tail_fixed`의 동일 파싱 로직과 같은 정규식을 쓰되, 유사도 스티칭 전용
+        경로(best-effort — 실패 시 None)로 별도 둔다.
+        """
+        import re
+        import subprocess
+
+        import imageio_ffmpeg
+
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        probe = subprocess.run([ff, "-hide_banner", "-i", clip], capture_output=True)
+        err = (probe.stderr or b"").decode("utf-8", "replace")
+        dm = re.search(r"Duration:\s*(\d+):(\d+):([0-9.]+)", err)
+        if dm is None:
+            return None
+        return int(dm.group(1)) * 3600 + int(dm.group(2)) * 60 + float(dm.group(3))
+
+    def _extract_gray_frames(self, clip: str, start: float, duration: float) -> list[bytes]:
+        """clip의 [start, start+duration) 구간에서 `_SIM_FRAME_STEP` 간격 저해상도
+        그레이스케일 프레임을 한 번의 ffmpeg 호출로 뽑아 raw 바이트 리스트로 반환한다.
+
+        프레임마다 subprocess를 띄우지 않고, `fps` 필터로 구간 전체를 한 번에 뽑은 뒤
+        파이썬에서 프레임 크기(`_SIM_W`×`_SIM_H`)로 잘라 나눈다. 실패 시 빈 리스트.
+        """
+        import subprocess
+
+        import imageio_ffmpeg
+
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        fps = 1.0 / _SIM_FRAME_STEP
+        cmd = [
+            ff, "-hide_banner", "-ss", f"{start:.3f}", "-i", clip,
+            "-t", f"{max(duration, _SIM_FRAME_STEP / 2):.3f}",
+            "-vf", f"fps={fps:.3f},scale={_SIM_W}:{_SIM_H},format=gray",
+            "-f", "rawvideo", "-",
+        ]
+        res = subprocess.run(cmd, capture_output=True)
+        raw = res.stdout or b""
+        frame_size = _SIM_W * _SIM_H
+        if len(raw) < frame_size:
+            return []
+        n = len(raw) // frame_size
+        return [raw[k * frame_size:(k + 1) * frame_size] for k in range(n)]
+
+    def _find_similarity_cuts(
+        self,
+        clip_a: str,
+        clip_b: str,
+        speech_end_a: float,
+        speech_start_b: float,
+        threshold: float | None = None,
+    ) -> tuple[float, float, float] | None:
+        """경계 A(꼬리)·B(머리) 후보 구간에서 이어붙일 프레임 쌍의 컷 지점을 찾는다.
+
+        끝프레임 고정(endframe_lock) 모드는 모든 클립이 같은 마스코트 프레임으로 수렴
+        하므로, A의 발화 끝 직후 구간과 B의 발화 시작 직전 구간에는 실제로 유사한 프레임
+        쌍이 존재한다. `_SIM_FRAME_STEP` 간격 그레이스케일 프레임 쌍의 평균절대차(MAD,
+        0~255)를 계산한다.
+
+        선택 규칙(2026-07-10 PO "매 비트 끝 페이드아웃"): `threshold`가 주어지면 MAD가
+        임계 이하인 **가장 이른** A 프레임에서 컷한다 — 최솟값(가장 유사=가장 정지된
+        프레임)을 고르면 발화 후 강아지가 고정 끝프레임으로 수렴하며 모션이 죽어가는
+        설틀(진정) 꼬리(실측 0.5~1초)를 매 비트 끝에 도로 포함시켜 페이드아웃처럼
+        보인다. 임계를 만족하는 프레임이 없으면 전 쌍 최솟값으로 폴백한다(호출부가
+        임계 초과=불일치로 판정해 디졸브 2배 마스킹). threshold=None이면 종전 그대로
+        전 쌍 최솟값.
+
+        클램프 모드: 대사가 클립 끝까지 차 발화 끝 이후 창이 없으면 클립 마지막
+        3프레임으로 창을 옮기고 **가장 늦은** 임계 이하 프레임을 채택한다(대사 잘림
+        최소화 — 창 자체가 대사 구간 위에 있기 때문. FLF 고정 끝프레임이라 마지막
+        프레임이 B 시작과 유사).
+
+        반환은 (A 컷 시각초, B 컷 시각초, 채택 쌍 MAD)이고, ffmpeg 실패·프레임 부족·
+        길이 확인 실패 등 어떤 이유로든 탐색이 불가하면 None을 돌려준다(호출부가 기존
+        트림으로 best-effort 폴백).
+        """
+        try:
+            a_start = speech_end_a + _SIM_GAP
+            a_dur = self._probe_duration_sec(clip_a)
+            if a_dur is None:
+                return None
+            a_end = min(speech_end_a + _SIM_A_WINDOW, a_dur)
+            # 대사가 클립 끝까지 꽉 차면(무음 미검출 → speech_end≈dur) 발화 끝 이후
+            # 탐색 창이 소멸한다 — 6차 런 실측: 경계 0·1이 이걸로 매칭을 포기하고 0.35s
+            # 디졸브 폴백(페이드 체감), 창이 생긴 경계 2만 하드컷(PO 호평). 포기 대신
+            # 클립 마지막 3프레임으로 창을 클램프한다: FLF 고정 끝프레임이라 마지막
+            # 프레임은 B 시작(같은 마스코트 프레임)과 유사할 확률이 높다. 이 모드에선
+            # 대사 잘림을 최소화해야 하므로 "가장 이른"이 아니라 "가장 늦은" 프레임을
+            # 채택한다(아래 clamped 역순 순회).
+            clamped = False
+            if a_end - a_start < _SIM_FRAME_STEP:
+                clamped = True
+                a_start = max(0.0, a_dur - 3 * _SIM_FRAME_STEP)
+                a_end = a_dur
+                if a_end - a_start < _SIM_FRAME_STEP:
+                    return None
+            a_frames = self._extract_gray_frames(clip_a, a_start, a_end - a_start)
+            if not a_frames:
+                return None
+
+            b_window = max(0.0, speech_start_b - _SIM_GAP)
+            if b_window < _SIM_MIN_B_WINDOW:
+                b_frames = self._extract_gray_frames(clip_b, 0.0, _SIM_FRAME_STEP / 2)
+                b_frames = b_frames[:1]
+            else:
+                b_frames = self._extract_gray_frames(clip_b, 0.0, b_window)
+            if not b_frames:
+                return None
+            b_offsets = [k * _SIM_FRAME_STEP for k in range(len(b_frames))]
+
+            best: tuple[float, float, float] | None = None
+            # 기본: 시간순(가장 이른 컷 — 설틀 꼬리 제거). 클램프 모드: 역순(가장 늦은
+            # 컷 — 창이 대사 위라 뒤로 갈수록 대사가 덜 잘린다).
+            order = reversed(list(enumerate(a_frames))) if clamped else enumerate(a_frames)
+            for i, fa in order:
+                cut_a = a_start + i * _SIM_FRAME_STEP
+                # 이 A 프레임의 최적 B 짝을 찾고, 임계 이하면 즉시 채택.
+                row_best: tuple[float, float, float] | None = None
+                for j, fb in enumerate(b_frames):
+                    diff = _frame_mad(fa, fb)
+                    if row_best is None or diff < row_best[2]:
+                        row_best = (cut_a, b_offsets[j], diff)
+                if row_best is None:
+                    continue
+                if threshold is not None and threshold > 0 and row_best[2] <= threshold:
+                    return row_best
+                if best is None or row_best[2] < best[2]:
+                    best = row_best
+            return best
+        except Exception:
+            # 유사도 탐색은 best-effort — 어떤 실패도 None(기존 트림 유지)으로 안전 처리.
+            return None
+
+    def _cut_clip_range(self, clip: str, start: float, end: float) -> str | None:
+        """clip의 [start, end) 구간만 남긴 새 클립을 만들어 경로를 반환한다(실패 시 None).
+
+        유사도 스티칭이 결정한 경계 컷 지점을 실제로 잘라내는 재인코딩. `_trim_tail_fixed`
+        와 동일한 보편 호환 코덱/픽셀포맷 처방(yuv420p + High 프로파일)을 쓴다.
+        """
+        dur = end - start
+        if dur < 0.3:
+            return None
+        import subprocess
+
+        import imageio_ffmpeg
+
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        out = str(Path(self.settings.nutti_media_dir) / f"veo_fal_simcut_{uuid4().hex[:8]}.mp4")
+        try:
+            cut = subprocess.run(
+                [ff, "-y", "-hide_banner", "-ss", f"{start:.3f}", "-i", clip,
+                 "-t", f"{dur:.3f}", "-c:v", "libx264", "-profile:v", "high",
+                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-c:a", "aac", out],
+                capture_output=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if cut.returncode != 0 or not Path(out).exists():
+            return None
+        return out
+
+    def _extract_gray_frame_from_image(self, path: str) -> bytes | None:
+        """이미지 파일 1장을 유사도 비교용 저해상도 그레이스케일 raw 바이트로 뽑는다.
+
+        `_extract_gray_frames`의 이미지 단발 버전 — 꼬리 수렴 판정의 기준 프레임
+        (고정 마스코트 프레임)을 뽑는 데 쓴다. 어떤 실패(ffmpeg 오류·짧은 출력)든 None을
+        돌려 QC가 판단을 보류하도록 한다(best-effort, 파이프라인 비차단).
+        """
+        import subprocess
+
+        import imageio_ffmpeg
+
+        try:
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+            res = subprocess.run(
+                [ff, "-hide_banner", "-i", path, "-vf",
+                 f"scale={_SIM_W}:{_SIM_H},format=gray",
+                 "-f", "rawvideo", "-frames:v", "1", "-"],
+                capture_output=True,
+                timeout=15,
+            )
+            raw = res.stdout or b""
+            frame_size = _SIM_W * _SIM_H
+            if len(raw) < frame_size:
+                return None
+            return raw[:frame_size]
+        except Exception:
+            return None
+
+    def _qc_freeze_black(self, clip_path: str, dur: float) -> list[str]:
+        """클립에서 중간 프리즈/블랙프레임 구간을 검출해 사유 리스트를 반환한다.
+
+        ffmpeg freezedetect·blackdetect를 한 번에 돌려 stderr의 freeze/black 구간을
+        파싱한다. 끝프레임 고정 모드는 클립이 같은 정적 마스코트 프레임에서 시작·종료하므로
+        가장자리(`qc_edge_ignore_sec` 이내) 프리즈/블랙은 의도된 것 — 그 구간에 걸친 창은
+        무시하고, 클립 중간에서 시작·종료하는 창만 결함으로 센다. 파싱/서브프로세스 실패는
+        빈 리스트로 폴백한다(best-effort, 절대 파이프라인을 막지 않음).
+        """
+        import re
+        import subprocess
+
+        import imageio_ffmpeg
+
+        try:
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+            edge = self.settings.qc_edge_ignore_sec
+            vf = (
+                f"freezedetect=n=-60dB:d={self.settings.qc_freeze_min_sec},"
+                f"blackdetect=d={self.settings.qc_black_min_sec}:pic_th=0.98"
+            )
+            res = subprocess.run(
+                [ff, "-hide_banner", "-i", clip_path, "-vf", vf, "-f", "null", "-"],
+                capture_output=True,
+            )
+            err = (res.stderr or b"").decode("utf-8", "replace")
+
+            def has_mid(starts: list[str], ends: list[str]) -> bool:
+                for k, s in enumerate(starts):
+                    st = float(s)
+                    if k < len(ends):
+                        # 양끝 다 있는 창: 클립 중간에서 시작·종료해야 결함(가장자리 정적
+                        # 프레임은 정상).
+                        if st > edge and float(ends[k]) < dur - edge:
+                            return True
+                    # 종료 라인 없음 = 회복 없이 EOF까지 지속. 끝 가장자리 전에 시작했으면
+                    # 무조건 결함 — 중간~끝 내내 얼어붙은 최악 케이스(QC가 잡아야 할 바로
+                    # 그 상황)를 en=dur로 면제하던 버그를 막는다(리뷰 지적, HIGH).
+                    elif st < dur - edge:
+                        return True
+                return False
+
+            reasons: list[str] = []
+            if has_mid(
+                re.findall(r"freeze_start:\s*([0-9.]+)", err),
+                re.findall(r"freeze_end:\s*([0-9.]+)", err),
+            ):
+                reasons.append("mid_freeze")
+            if has_mid(
+                re.findall(r"black_start:\s*([0-9.]+)", err),
+                re.findall(r"black_end:\s*([0-9.]+)", err),
+            ):
+                reasons.append("black_frame")
+            return reasons
+        except Exception:
+            return []
+
+    def _qc_tail_convergence(self, clip_path: str, frame_path: str, dur: float) -> str | None:
+        """클립 꼬리가 고정 마스코트 프레임으로 수렴하지 못했으면 사유를, 아니면 None을 반환.
+
+        끝프레임 고정 모드에서만 의미가 있다(모든 클립이 같은 프레임으로 수렴해야 함).
+        마지막 `qc_tail_window_sec`초를 샘플링해, 마지막 프레임이 기준(고정) 프레임에서
+        여전히 멀고(`mad_ref`) **동시에** 아직 눈에 띄게 변하는 중(`mad_delta`)일 때만
+        "tail_not_converged"를 낸다 — 기준에 가깝거나, 다른 포즈지만 안정된 클립은 오검출
+        하지 않는다(두 조건 AND). 샘플 부족·기준 추출 실패·바이트 길이 불일치·기타 실패는
+        None(판단 보류)으로 돌려 파이프라인을 막지 않는다.
+        """
+        try:
+            start = max(0.0, dur - self.settings.qc_tail_window_sec)
+            tail = self._extract_gray_frames(clip_path, start, dur - start)
+            ref = self._extract_gray_frame_from_image(frame_path)
+            if len(tail) < 2 or ref is None:
+                return None
+            last = tail[-1]
+            second = tail[-2]
+            if len(last) != len(ref) or len(second) != len(last):
+                return None
+            mad_ref = _frame_mad(last, ref)
+            mad_delta = _frame_mad(second, last)
+            if (
+                mad_ref > self.settings.qc_tail_converge_mad_max
+                and mad_delta > self.settings.qc_tail_delta_max
+            ):
+                return "tail_not_converged"
+            return None
+        except Exception:
+            return None
+
+    def _qc_check_beat(
+        self, clip_path: str, frame_path: str, lock: bool, *, final_beat: bool = False
+    ) -> list[str]:
+        """한 비트 클립의 QC 사유 리스트를 모아 반환한다(빈 리스트 = 통과).
+
+        검사: ①중간 프리즈/블랙(_qc_freeze_black) ②무발화(트림 실측 발화 길이가
+        `qc_min_speech_sec` 미만) ③(lock 모드, 마지막 비트 제외) 꼬리 미수렴
+        (_qc_tail_convergence — `final_beat=True`면 면제: 뒤에 이어붙일 클립이 없고
+        모션도 자유(_MOTION_FINAL_FREE)라 수렴 실패가 결함이 아님. 6차 런 실측:
+        마지막 비트가 이 검사로 2회 재생성돼 $0.8 낭비)
+        ④화면 텍스트(외계어 자막, _qc_text_overlay — 비용상 다른 사유 없을 때만).
+        `_trim_to_speech`는 발화 길이 측정용으로만 호출하고, 새로 만든 트림 파일은 즉시
+        삭제한다 — 실제 대량 트림은 기존 후처리에서 그대로 수행한다. 어떤 검사도 파이프라인을
+        막지 않도록 best-effort로 동작한다(qc_enabled=False면 즉시 빈 리스트).
+        """
+        if not self.settings.qc_enabled:
+            return []
+        reasons: list[str] = []
+        try:
+            dur = self._probe_duration_sec(clip_path)
+        except Exception:
+            dur = None
+        if dur is not None:
+            reasons.extend(self._qc_freeze_black(clip_path, dur))
+        trimmed, speech_sec = self._trim_to_speech(clip_path)
+        if trimmed != clip_path:
+            Path(trimmed).unlink(missing_ok=True)
+        if speech_sec is not None and speech_sec < self.settings.qc_min_speech_sec:
+            reasons.append("short_speech")
+        if lock and not final_beat and dur is not None:
+            tail_reason = self._qc_tail_convergence(clip_path, frame_path, dur)
+            if tail_reason is not None:
+                reasons.append(tail_reason)
+        # ④ 화면 텍스트(외계어 자막) — Claude 비전 판정이라 가장 비싸므로, 다른 사유로
+        # 이미 재생성이 확정된 클립은 건너뛴다(재생성본이 다음 QC 라운드에서 다시 검사됨).
+        if not reasons and dur is not None:
+            text_reason = self._qc_text_overlay(clip_path, dur)
+            if text_reason is not None:
+                reasons.append(text_reason)
+        return reasons
+
+    # 텍스트 QC용 프레임 샘플 수. Veo 가짜 자막은 자막 특성상 수 초간 지속되므로
+    # 7초 클립 기준 ~1.2초 간격 샘플이면 놓치지 않는다(순간 플래시성은 범위 밖).
+    _QC_TEXT_FRAMES = 6
+
+    def _qc_text_overlay(self, clip_path: str, dur: float) -> str | None:
+        """클립 프레임에 렌더된 글자(Veo 외계어 자막)가 보이면 "text_overlay"를 반환한다.
+
+        프롬프트 3겹 방어(본문 금지문·_NEGATIVE·negative_prompt)로도 확률적으로 뚫리는
+        Veo의 임의 화면 자막(실측: "칙하 아대되?" 등 깨진 한글)을 하드룰 원칙대로
+        생성물 검사로 잡는다 — 검출 시 호출부의 기존 QC 재생성 루프가 그 비트만 다시
+        만든다. 컬러 프레임 샘플 → Claude 비전 판정(주입 가능). 샘플 추출 실패·판정
+        실패/보류는 None(통과) — 어떤 실패도 파이프라인을 막지 않는다(best-effort).
+        """
+        if not self.settings.qc_text_enabled:
+            return None
+        frames = self._extract_color_frames(clip_path, dur)
+        if not frames:
+            return None
+        try:
+            verdict = self._judge_frames_text(frames)
+        finally:
+            for f in frames:
+                try:
+                    Path(f).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        if verdict is True:
+            log.warning("video.qc.text_overlay", clip=str(clip_path))
+            return "text_overlay"
+        return None
+
+    def _extract_color_frames(self, clip_path: str, dur: float) -> list[str]:
+        """클립에서 텍스트 판정용 컬러 프레임 PNG를 균등 간격으로 뽑는다(best-effort).
+
+        판정 페이로드를 줄이려고 폭 360px로 축소한다 — 자막류 텍스트는 이 크기에서도
+        충분히 판독된다(진단 실측). 실패 시 빈 리스트(호출부가 검사 보류).
+        """
+        if dur <= 0:
+            return []
+        import subprocess
+
+        try:
+            import imageio_ffmpeg
+
+            out_dir = Path(self.settings.nutti_media_dir)
+            pattern = out_dir / f"qc_text_{uuid4().hex[:8]}_%02d.png"
+            n = self._QC_TEXT_FRAMES
+            res = subprocess.run(
+                [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", clip_path,
+                 "-vf", f"fps={n}/{dur:.3f},scale=360:-2",
+                 "-frames:v", str(n), str(pattern)],
+                capture_output=True,
+                timeout=60,
+            )
+            frames = sorted(str(p) for p in out_dir.glob(pattern.name.replace("%02d", "*")))
+            if res.returncode != 0:
+                for f in frames:
+                    Path(f).unlink(missing_ok=True)
+                return []
+            return frames
+        except Exception:
+            return []
+
+    def _judge_frames_text(self, frame_paths: list[str]) -> bool | None:
+        """프레임들에 렌더된 글자가 있는지 판정한다(주입 우선, 기본 Claude 비전).
+
+        dry_run이면 항상 보류(None) — 외부 호출 없는 결정적 시뮬레이션 계약 유지.
+        판정자 오류도 None(보류)으로 삼킨다 — QC가 클립 생산을 죽이면 안 된다.
+        """
+        if self._text_judge is not None:
+            return self._text_judge(frame_paths)
+        if self.settings.dry_run:
+            return None
+        try:
+            from nutti.integrations.ai_text import AITextClient
+
+            return AITextClient(self.settings).judge_frames_have_text(frame_paths)
+        except Exception:
+            log.warning("video.qc.text_judge_failed")
+            return None
+
+    def _generate_and_trim_clip(
+        self, client, prompt: str, current_frame: str, frame_path: str,
+        lock: bool, seed: int | None,
+    ) -> str:
+        """비트 클립 1개를 생성하고 끝 잉여 고정 트림까지 마친 경로를 반환한다.
+
+        QC 재생성이 같은 단계를 다시 밟을 수 있도록 "생성 + tail-trim"을 헬퍼로 묶었다.
+        끝 잉여 구간(글리치·이상동작 온상)은 트림 후 원본을 즉시 삭제한다(잔존 방지).
+        """
+        if lock:
+            # 시작·끝 모두 마스코트 프레임으로 고정(끝프레임 고정 모드).
+            clip_path = client.generate(
+                frame_path, prompt, last_frame_path=frame_path, seed=seed
+            )
+        else:
+            clip_path = client.generate(current_frame, prompt, seed=seed)
+        tail = self.settings.veo_fal_clip_tail_trim_sec
+        if tail > 0:
+            cut = self._trim_tail_fixed(clip_path, tail)
+            if cut != clip_path:
+                Path(clip_path).unlink(missing_ok=True)
+                clip_path = cut
+        return clip_path
+
+    def _stitch(
+        self,
+        clips: list[str],
+        durations: list[float | None] | None = None,
+        *,
+        boundary_dissolves: list[float] | None = None,
+    ) -> str:
         """여러 8초 클립을 ffmpeg로 이어붙여 하나의 MP4로 만든다.
 
         `settings.veo_fal_crossfade_sec`>0 이고 모든 클립 길이를 알면 비트 경계에 짧은
@@ -979,17 +1680,60 @@ class VideoStudio:
         VideoRenderError 계약으로 변환하며, 입력 경로가 박힐 수 있는 stderr 원문은 노출하지
         않고 예외 타입명만 남긴다(redaction).
         """
+        # 실제 적용된 디졸브 길이를 기록한다 — 자막 타이밍(_burn_captions)이 concat
+        # 폴백(디졸브 0)과 디졸브 경로를 구분해야 경계 오차가 누적되지 않는다(리뷰 지적:
+        # 폴백인데 디졸브 가정 시 경계 k에서 k×디졸브만큼 자막이 앞서간다).
+        # 경계별 값(_last_boundary_dissolves)도 함께 기록한다 — 유사도 매칭 경계는
+        # 마이크로 컷(0.08s), 미스매치 경계는 2배라 경계마다 달라(2026-07-10) 자막
+        # 전환 시점이 대표값 하나로는 어긋난다.
+        self._last_stitch_dissolve = 0.0
+        self._last_boundary_dissolves: list[float] | None = None
         if len(clips) == 1:
             return clips[0]
         dissolve = float(getattr(self.settings, "veo_fal_crossfade_sec", 0.0) or 0.0)
         if dissolve > 0 and durations is not None and len(durations) == len(clips):
-            faded = self._stitch_dissolve(clips, durations, dissolve)
+            faded = self._stitch_dissolve(
+                clips, durations, dissolve, boundary_dissolves=boundary_dissolves
+            )
             if faded is not None:
+                self._last_stitch_dissolve = dissolve
+                n = len(clips)
+                self._last_boundary_dissolves = (
+                    list(boundary_dissolves)
+                    if boundary_dissolves is not None and len(boundary_dissolves) == n - 1
+                    else [dissolve] * (n - 1)
+                )
                 return faded
         return self._concat(clips)
 
+    def _input_norm(self, i: int) -> str:
+        """스티칭 입력 i의 정규화 필터 체인(픽셀포맷·fps·SAR·해상도 + 교차 펀치인).
+
+        모든 입력을 _STITCH_W×_STITCH_H로 통일해 xfade/concat 크기 불일치를 막는다.
+        punch_in_scale>1이면 짝수 비트(0·2… — 훅 포함)를 확대 후 원 해상도로 크롭해
+        컷마다 화면 크기가 교차되게 한다 — 동일 구도 점프컷을 의도된 편집으로 위장하고
+        시각 리듬을 만든다(2026-07-06 PO). 크롭 세로 기준은 상단 1/3(얼굴 보존).
+        """
+        # setsar=1은 체인 마지막에 — 펀치인 scale의 짝수 반올림이 미세 비율 오차(<0.1%,
+        # 비가시)를 만들어 SAR이 1:1이 아니게 기록되는 것을 방지한다(실측 2026-07-06).
+        base = f"[{i}:v]format=yuv420p,fps=30"
+        s = float(getattr(self.settings, "veo_fal_punch_in_scale", 0.0) or 0.0)
+        if s > 1.0 and i % 2 == 0:
+            w2 = int(_STITCH_W * s) // 2 * 2
+            h2 = int(_STITCH_H * s) // 2 * 2
+            return (
+                f"{base},scale={w2}:{h2},"
+                f"crop={_STITCH_W}:{_STITCH_H}:(iw-{_STITCH_W})/2:(ih-{_STITCH_H})/3,setsar=1"
+            )
+        return f"{base},scale={_STITCH_W}:{_STITCH_H},setsar=1"
+
     def _stitch_dissolve(
-        self, clips: list[str], durations: list[float | None], dissolve: float
+        self,
+        clips: list[str],
+        durations: list[float | None],
+        dissolve: float,
+        *,
+        boundary_dissolves: list[float] | None = None,
     ) -> str | None:
         """클립 경계에 짧은 디졸브(xfade+acrossfade)를 줘 이어붙인다(best-effort).
 
@@ -997,11 +1741,24 @@ class VideoStudio:
         하나라도 길이를 모르거나 너무 짧으면 None을 돌려 호출부가 concat으로 폴백한다.
         디졸브 ffmpeg 실패(필터 비호환·타임아웃 등)도 None으로 안전 폴백. xfade는 입력
         해상도/fps/SAR가 같아야 하므로 각 비디오를 fps/format/SAR로 정규화한 뒤 체이닝한다.
+
+        `boundary_dissolves`(경계별 길이, len=len(clips)-1)를 주면 경계마다 다른 디졸브를
+        쓴다 — 유사도 매칭 경계는 마이크로 컷(_SIM_CUT_DISSOLVE), 불일치 경계는 2배
+        (2026-07-07/07-10 PO). None(기본)이면 전 경계가 `dissolve`를 쓴다(기존 동작
+        그대로). 자막 타이밍은 _stitch가 기록하는 경계별 실적용 값
+        (`_last_boundary_dissolves`)으로 동기화된다.
         """
+        n = len(clips)
+        per_boundary = list(boundary_dissolves) if boundary_dissolves is not None else None
+        if per_boundary is None or len(per_boundary) != n - 1:
+            per_boundary = [dissolve] * (n - 1)
         dur: list[float] = []
-        for d in durations:
-            # 디졸브보다 충분히 길어야 offset=길이-디졸브가 양수로 성립한다.
-            if d is None or d <= dissolve + 0.1:
+        for idx, d in enumerate(durations):
+            # 이 클립과 맞닿은 경계들(왼쪽·오른쪽) 중 더 큰 디졸브 길이 기준으로 충분한
+            # 길이인지 검사한다 — 한쪽 경계가 2배로 늘어나도 offset이 음수가 되면 안 된다.
+            neighbors = per_boundary[max(0, idx - 1):idx + 1]
+            needed = max(neighbors) if neighbors else dissolve
+            if d is None or d <= needed + 0.1:
                 return None
             dur.append(float(d))
         import subprocess
@@ -1012,25 +1769,26 @@ class VideoStudio:
         inputs: list[str] = []
         for clip in clips:
             inputs += ["-i", clip]
-        n = len(clips)
-        parts: list[str] = [f"[{i}:v]format=yuv420p,fps=30,setsar=1[v{i}]" for i in range(n)]
-        # 비디오 xfade 체인: 클립 k 합류 시 offset = 직전 출력길이 - 디졸브.
+        parts: list[str] = [f"{self._input_norm(i)}[v{i}]" for i in range(n)]
+        # 비디오 xfade 체인: 클립 k 합류 시 offset = 직전 출력길이 - 그 경계의 디졸브.
         vlabel = "v0"
         cum = dur[0]
         for k in range(1, n):
-            offset = cum - dissolve
+            d_k = per_boundary[k - 1]
+            offset = cum - d_k
             out = f"vx{k}"
             parts.append(
                 f"[{vlabel}][v{k}]xfade=transition=fade:"
-                f"duration={dissolve:.3f}:offset={offset:.3f}[{out}]"
+                f"duration={d_k:.3f}:offset={offset:.3f}[{out}]"
             )
             vlabel = out
-            cum = cum + dur[k] - dissolve
+            cum = cum + dur[k] - d_k
         # 오디오 acrossfade 체인: 경계에서 자동으로 끝-시작을 겹쳐 페이드(offset 불요).
         alabel = "0:a"
         for k in range(1, n):
+            d_k = per_boundary[k - 1]
             out = f"ax{k}"
-            parts.append(f"[{alabel}][{k}:a]acrossfade=d={dissolve:.3f}[{out}]")
+            parts.append(f"[{alabel}][{k}:a]acrossfade=d={d_k:.3f}[{out}]")
             alabel = out
         cmd = [
             imageio_ffmpeg.get_ffmpeg_exe(),
@@ -1070,8 +1828,9 @@ class VideoStudio:
             inputs += ["-i", clip]
         n = len(clips)
         # concat 필터는 모든 입력의 픽셀포맷/SAR/fps가 같아야 한다 — fal 클립이 섞이면
-        # (yuv444p/yuv420p 혼재) 실패하므로 입력마다 yuv420p·30fps·SAR=1로 정규화한다.
-        parts: list[str] = [f"[{i}:v]format=yuv420p,fps=30,setsar=1[cv{i}]" for i in range(n)]
+        # (yuv444p/yuv420p 혼재) 실패하므로 입력마다 yuv420p·30fps·SAR=1로 정규화한다
+        # (교차 펀치인 포함 — 디졸브 폴백 경로에서도 화면 크기 교차가 유지되게).
+        parts: list[str] = [f"{self._input_norm(i)}[cv{i}]" for i in range(n)]
         streams = "".join(f"[cv{i}][{i}:a]" for i in range(n))
         parts.append(f"{streams}concat=n={n}:v=1:a=1[v][a]")
         cmd = [
@@ -1097,6 +1856,234 @@ class VideoStudio:
         log.info("video.stitched", path=str(out_path), clips=len(clips))
         return str(out_path)
 
+    @staticmethod
+    def _wrap_caption(text: str, width: int = 16) -> str:
+        """대사를 자막용으로 공백 기준 줄바꿈한다(drawtext는 자동 줄바꿈이 없다).
+
+        한 줄이 width자를 넘지 않게 단어 단위로 끊는다(단어 자체가 width보다 길면
+        그 단어는 한 줄로 그대로 둔다 — 한국어 대사에서 사실상 발생하지 않음).
+        """
+        lines: list[str] = []
+        cur = ""
+        for word in text.split():
+            cand = f"{cur} {word}".strip()
+            if cur and len(cand) > width:
+                lines.append(cur)
+                cur = word
+            else:
+                cur = cand
+        if cur:
+            lines.append(cur)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _split_caption_segments(text: str) -> list[str]:
+        """자막을 문장 단위 세그먼트로 분리한다 — 세그먼트별로 한 줄씩 순차 표시된다.
+
+        문장 종결부호(.!?。…) 뒤 공백 기준. 구두점이 없어 분리가 안 되면 전체 텍스트를
+        단일 세그먼트로 반환해 종전 동작(비트 전체 동시 표시)과 동일하게 폴백한다.
+        """
+        segs = [s.strip() for s in _CAPTION_SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
+        return segs or ([text.strip()] if text.strip() else [])
+
+    def _drawtext_filter(
+        self,
+        line: str,
+        *,
+        font_ff: str,
+        size: int,
+        y: str,
+        media_dir: Path,
+        txt_files: list[Path],
+        enable: str | None = None,
+    ) -> str | None:
+        """한 줄짜리 drawtext 필터 문자열을 만든다(대사 textfile 생성 포함).
+
+        하단 자막과 상단 훅 오버레이가 공유한다. `enable`이 None이면 영상 전체에
+        표시된다. 폰트/텍스트 파일 경로에 작은따옴표가 있으면 None(자막 포기 신호 —
+        호출부가 무자막 원본으로 폴백).
+        """
+        tf = media_dir / f"caption_{uuid4().hex[:8]}.txt"
+        # newline='\n' 필수 — Windows 텍스트 모드가 \n을 \r\n으로 바꾸면
+        # drawtext가 CR을 빈 줄로 렌더해 줄 간격이 두 배로 벌어진다(실측).
+        tf.write_text(line, encoding="utf-8", newline="\n")
+        txt_files.append(tf)
+        tf_ff = str(tf).replace("\\", "/").replace(":", r"\:")
+        if "'" in tf_ff or "'" in font_ff:
+            log.warning("video.caption.path_quote")
+            return None
+        suffix = f":enable='{enable}'" if enable else ""
+        return (
+            f"drawtext=fontfile='{font_ff}':textfile='{tf_ff}':"
+            f"fontsize={size}:fontcolor=white:"
+            f"borderw={max(2, round(size / 10))}:bordercolor=black:"
+            f"x=(w-text_w)/2:y={y}{suffix}"
+        )
+
+    def _find_caption_font(self) -> str | None:
+        """자막 폰트 경로를 찾는다: 설정값 우선, 없으면 OS 기본 후보 순회. 없으면 None."""
+        cands = [self.settings.caption_font] if self.settings.caption_font else []
+        for cand in cands + _CAPTION_FONT_CANDIDATES:
+            if cand and Path(cand).is_file():
+                return _asciify_font_path(cand)
+        return None
+
+    def _burn_captions(
+        self,
+        video: str,
+        beats: list[str],
+        durations: list[float | None],
+        dissolve: float = 0.0,
+        boundary_dissolves: list[float] | None = None,
+    ) -> str | None:
+        """비트별 대사를 하단 한글 자막으로 굽는다(best-effort — 실패 시 None, 원본 유지).
+
+        `dissolve`는 _stitch가 **실제 적용한** 디졸브 길이(concat 폴백이면 0)를 받는다 —
+        설정값을 다시 읽으면 폴백 시 경계 k마다 k×디졸브만큼 자막이 앞서가는 누적 오차가
+        생긴다. `boundary_dissolves`(경계별 실적용 값, len=len(beats)-1)가 오면 그걸
+        우선한다 — 유사도 매칭 경계(마이크로 컷)와 미스매치 경계(2배)가 섞이면 대표값
+        하나로는 전환 시점이 어긋난다(2026-07-10). 자막 전환 시점은 각 경계 디졸브의 중앙.
+
+        문장 단위 순차 표시(2026-07-10 PO — 한 줄씩 넘어가는 스타일): 각 비트를
+        `_split_caption_segments`로 문장 단위 세그먼트로 나누고, 비트의 표시 구간
+        [start,end)를 세그먼트 글자 수 비율로 나눠 세그먼트마다 그 시간에만 보이게
+        한다(발화 속도에 대한 근사 — 실제 음성 타임스탬프는 없음, 글자수 비례가
+        가장 단순하고 충분히 정확한 근사). 구두점이 없어 분리가 안 되면 세그먼트가
+        1개로 종전처럼 비트 전체 구간에 표시된다(하위호환).
+
+        drawtext 이스케이프 지뢰를 피하려고 대사는 textfile(UTF-8)로 전달한다. 폰트가
+        없거나 경로에 작은따옴표가 있으면 자막 없이 통과한다.
+        """
+        if not beats:
+            return None
+        font = self._find_caption_font()
+        if font is None:
+            log.warning("video.caption.no_font")
+            return None
+        # ffmpeg 필터 파서는 2단계다: 바깥(그래프) 파서가 따옴표를 소비한 뒤 drawtext의
+        # 옵션 파서가 ':'로 다시 쪼갠다 — 드라이브 콜론(C:)은 따옴표만으로 못 지키고
+        # 반드시 \: 로 이스케이프해야 한다(실측 2026-07-06: 미이스케이프 시 파스 실패).
+        font_ff = str(font).replace("\\", "/").replace(":", r"\:")
+        dur = [
+            (d if d is not None else _CLIP_SEC)
+            for d in (durations if len(durations or []) == len(beats) else [None] * len(beats))
+        ]
+        bd = (
+            list(boundary_dissolves)
+            if boundary_dissolves is not None and len(boundary_dissolves) == len(beats) - 1
+            else [dissolve] * (len(beats) - 1)
+        )
+        starts = [0.0]
+        cum = dur[0]
+        for k in range(1, len(beats)):
+            d_k = bd[k - 1]
+            starts.append(max(0.0, cum - d_k / 2))
+            cum += dur[k] - d_k
+        ends = starts[1:] + [cum + 1.0]  # 마지막 자막은 영상 끝까지(여유 1초)
+        import subprocess
+
+        import imageio_ffmpeg
+
+        media_dir = Path(self.settings.nutti_media_dir)
+        out_path = media_dir / f"video_{uuid4().hex[:12]}.mp4"
+        txt_files: list[Path] = []
+        size = int(self.settings.caption_font_size)
+        # 줄바꿈 폭은 글자 크기에 반비례(한글 글리프 폭 ≈ fontsize) — 화면 폭의 ~82%를
+        # 넘지 않게. 큰 글씨일수록 적은 글자에서 줄을 바꾼다.
+        wrap_width = max(8, int(_STITCH_W * 0.82 / size))
+        line_h = round(size * 1.35)  # 줄 높이(자간 포함)
+        try:
+            filters: list[str] = []
+            for k, beat in enumerate(beats):
+                beat_start, beat_end = starts[k], ends[k]
+                beat_width = max(0.0, beat_end - beat_start)
+                segments = self._split_caption_segments(beat)
+                total_chars = sum(len(seg) for seg in segments) or 1
+                seg_start = beat_start
+                for si, seg in enumerate(segments):
+                    is_last = si == len(segments) - 1
+                    seg_end = (
+                        beat_end
+                        if is_last
+                        else seg_start + beat_width * len(seg) / total_chars
+                    )
+                    # 표시 텍스트는 끝 온점(.)을 뗀다(2026-07-10 PO — 캡션에 마침표가
+                    # 거슬린다는 지적). 물음표·느낌표는 의미를 담으므로 남긴다. 문장
+                    # 분리(_split_caption_segments)는 이 처리 전 원문 `seg`로 이미 끝났으므로
+                    # 세그먼트 경계 판정에는 영향 없다 — 표시 시점의 순수 시각적 처리.
+                    display_text = seg[:-1] if seg.endswith(".") else seg
+                    # drawtext는 여러 줄을 블록 좌측 정렬로만 그린다(줄별 중앙정렬 미지원,
+                    # 실측 2026-07-06) — 줄마다 독립 drawtext를 써서 각 줄을 중앙정렬한다.
+                    # 블록 하단을 caption_y_pos(기본 960px — Shorts UI 회피, 2026-07-14 PO)에
+                    # 고정(위로
+                    # 쌓기)해 줄 수가 늘어도 화면 밖으로 잘리지 않는다(실측: 40px 4줄이
+                    # 하단 잘림 — 여전히 유효한 가드, 기준점만 h*0.86→명시 픽셀로 변경).
+                    lines = self._wrap_caption(display_text, width=wrap_width).split("\n")
+                    for j, line in enumerate(lines):
+                        y = f"{self.settings.caption_y_pos}-{(len(lines) - j) * line_h}"
+                        f = self._drawtext_filter(
+                            line, font_ff=font_ff, size=size, y=y,
+                            media_dir=media_dir, txt_files=txt_files,
+                            enable=f"between(t,{seg_start:.3f},{seg_end:.3f})",
+                        )
+                        if f is None:
+                            return None
+                        filters.append(f)
+                    seg_start = seg_end
+            # 상단 훅 오버레이(2026-07-16 PO — KR 쇼츠 무음 시청 대응): 훅 비트(①)
+            # 첫 문장을 영상 전체 동안 상단에 크게 표시한다(정보성 쇼츠의 제목 오버레이
+            # 관행). enable 없이 굽어 스크롤 중간 합류 시청자도 주제를 즉시 잡는다.
+            if self.settings.hook_overlay:
+                # 빈 비트 방어(리뷰 지적): 훅 문장이 없으면 오버레이만 건너뛰고
+                # 하단 자막은 그대로 굽는다.
+                hook_segs = self._split_caption_segments(beats[0])
+                hook = hook_segs[0] if hook_segs else ""
+                hook = hook[:-1] if hook.endswith(".") else hook
+                hsize = int(self.settings.hook_font_size)
+                hwrap = max(6, int(_STITCH_W * 0.9 / hsize))
+                hline_h = round(hsize * 1.35)
+                for j, line in enumerate(
+                    self._wrap_caption(hook, width=hwrap).split("\n") if hook else []
+                ):
+                    f = self._drawtext_filter(
+                        line, font_ff=font_ff, size=hsize,
+                        y=str(int(self.settings.hook_y_pos) + j * hline_h),
+                        media_dir=media_dir, txt_files=txt_files,
+                    )
+                    if f is None:
+                        return None
+                    filters.append(f)
+            if not filters:
+                # 전 비트가 빈 대사라 그릴 자막이 없다 — 빈 -vf로 ffmpeg를 부르지 않고
+                # 무자막 원본 유지로 조기 폴백한다.
+                return None
+            cmd = [
+                imageio_ffmpeg.get_ffmpeg_exe(),
+                "-y",
+                "-i", video,
+                "-vf", ",".join(filters),
+                # 비디오만 재인코딩(자막 픽셀 합성), 오디오는 무손실 통과.
+                "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+                "-c:a", "copy", "-movflags", "+faststart",
+                str(out_path),
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+            log.info("video.captions.burned", path=str(out_path), beats=len(beats))
+            return str(out_path)
+        except Exception:
+            # 자막은 품질 개선용 best-effort — 어떤 실패도 무자막 원본으로 폴백한다
+            # (_trim_tail_fixed·_chain_frame과 동일 관례. 좁은 except면 예기치 못한
+            # 예외가 클립 생산 전체를 죽인다 — 리뷰 지적).
+            Path(out_path).unlink(missing_ok=True)
+            log.warning("video.caption.failed")
+            return None
+        finally:
+            for tf in txt_files:
+                try:
+                    tf.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     def _generate_frame(self, script: Script, style: EpisodeStyle) -> str:
         """프레임 클라이언트(Kontext)로 시작 프레임을 생성한다(마스코트 레퍼런스 이미지 첨부).
 
@@ -1114,9 +2101,14 @@ class VideoStudio:
         if client is None:
             client = owned = FalKontextClient(self.settings, sleep=self._sleep)
         try:
+            # fallback_prompt: 주제의 신체 어휘가 FLUX 안전 필터를 오탐시키면(2026-07-14
+            # 실측 — "엉덩이·항문낭"/"허리 라인"에 has_nsfw_concepts=True + placeholder)
+            # 같은 프롬프트 재시도는 결정적으로 전부 실패한다. 재시도부터는 주제 문장을
+            # 뺀 프롬프트로 전환한다 — 주제는 배경 연출용 부가 문맥이라 빠져도 무해.
             path = client.generate_frame(
                 self._frame_prompt(script, style),
                 reference_image_path=self.settings.nutti_mascot_image or None,
+                fallback_prompt=self._frame_prompt(script, style, include_topic=False),
             )
         finally:
             if owned is not None:
@@ -1125,15 +2117,26 @@ class VideoStudio:
         return path
 
     @staticmethod
-    def _frame_prompt(script: Script, style: EpisodeStyle) -> str:
+    def _frame_prompt(script: Script, style: EpisodeStyle, *, include_topic: bool = True) -> str:
         """시작 프레임 생성용 장면 프롬프트(마스코트·세로 9:16·금지 요소 명시).
 
         `style`은 호출부(produce)가 한 번 계산해 비트 클립과 공유하는 편별
         의상·장소 — 여기서 독립 계산하지 않는다(프레임-클립 장면 일치 계약).
         주제도 AI 생성 텍스트이므로 `_sanitize_prompt_text`로 정제해 삽입한다
         (작은따옴표 치환 + 길이 제한 — 간접 프롬프트 주입 심층 방어).
+
+        include_topic=False면 주제(Scene context) 문장을 뺀다 — 건강 주제의 신체
+        어휘가 FLUX 안전 필터를 오탐시킬 때의 재시도 폴백용(generate_frame 참조).
         """
         topic = _sanitize_prompt_text(script.topic, _MAX_TOPIC_CHARS)
+        # 주제는 AI 생성물 — 금지 리터럴(브랜드명 등)이 섞여 오면 크래시 대신 결정적으로
+        # 제거하고 진행한다(리뷰 medium: 대본 파서는 회복형인데 프레임 가드만 무복구
+        # 크래시인 설계 비대칭 해소). 사람이 직접 고치는 PO 수정 구역(의상·장소)은
+        # 반대로 시끄럽게 실패(_validate_visual_prompt)하는 것이 맞다 — 의도된 비대칭.
+        for banned in _PROMPT_BANNED_LITERALS:
+            topic = re.sub(re.escape(banned), "", topic, flags=re.IGNORECASE)
+        topic = " ".join(topic.split())
+        # (아래 조립 결과는 반환 직전에 _validate_visual_prompt로 하드가드 — 2026-07-07 PO)
         # ===================== PO 수정 구역 (첫 장면 비주얼) =====================
         # 영상 "첫 장면의 구도·표정·마이크 연출"을 바꾸려면 아래 영어 묘사를 고친다.
         # 배경·의상은 위 로테이션 리스트(PO 수정 구역 — 편별 연출 로테이션)에서 고친다.
@@ -1141,14 +2144,31 @@ class VideoStudio:
         # ASCII 작은따옴표(') 금지(주입 방어 검증과 충돌). 한국어로 원하는 그림만 정해도 됨.
         # 리터럴 "9:16"·브랜드명은 화면 자막으로 렌더되므로 넣지 않는다(세로 비율은 Kontext
         # aspect_ratio 파라미터가 담당). 캐릭터는 "진짜 실사 강아지"로 못박아 인형탈 방지.
-        return (
+        scene_context = f"Scene context: {topic}. " if include_topic else ""
+        # 소품·포맷(2026-07-16 PO): 프레임은 FLF 끝프레임 고정의 앵커라 비트 클립과
+        # 소품·마이크 유무가 일치해야 경계가 안 튄다 — build_beat의 scene 문장과 동일하게
+        # 조립한다. interview 편은 마이크가 프레임에도 있어야 클립 시작·끝에서 마이크가
+        # 나타났다 사라지는 점프가 없다.
+        prop = f", with {style.prop}" if style.prop else ""
+        if style.fmt == "interview":
+            mic = (
+                "A handheld interview microphone reaches into the frame from off-screen, "
+                "pointed at the puppy; the person holding it stays completely out of frame. "
+            )
+        else:
+            mic = "No microphone and no interview setup in frame. "
+        prompt = (
             "A photorealistic tall vertical portrait-orientation starting frame for a "
-            f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}, {style.setting}, "
+            f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}{prop}, "
+            f"{style.setting}, "
             "looking straight at the camera with a calm, gentle, friendly face, ready to "
             f"talk directly to the camera. {_CINEMATIC_LOOK} "
-            f"Scene context: {topic}. "
+            f"{scene_context}"
             "Absolutely no text, letters, numbers, words, captions, logos, brand names, or "
             "watermarks anywhere. No people, no humans in costume, no other animals. "
-            "No microphone and no interview setup in frame."
+            f"{mic}"
         )
+        # 하드가드: 금지 리터럴·작은따옴표 0개(대사 없음) — 과금 전 검증(2026-07-07 PO).
+        _validate_visual_prompt(prompt, expected_quotes=0)
+        return prompt
         # =================== PO 수정 구역 끝 (첫 장면 비주얼) ===================

@@ -13,6 +13,20 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _usable_key(value: str | None) -> bool:
+    """API 키 값이 실제로 쓸 수 있는지(비어 있지 않고 주석이 아님) 판정한다.
+
+    pydantic-settings는 `.env`의 인라인 주석을 분리하지 않으므로,
+    `KEY=   # 설명`처럼 빈 값 뒤에 주석이 붙으면 키 값이 `'# 설명'`이라는
+    truthy 문자열로 파싱된다. 단순 truthiness 검사는 이런 더미 값을 진짜 키로
+    오인해 fast-fail 가드를 우회시키므로, strip 후 주석(`#` 시작)을 배제한다.
+    """
+    if not value:
+        return False
+    stripped = value.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -36,6 +50,11 @@ class Settings(BaseSettings):
     # 매 사이클의 성과 분석을 다음 사이클 feedback으로 자동 연결하고,
     # 최근 주제를 기억해 주제 자동 생성 시 중복을 피하는 데 쓴다.
     state_path: str = Field(default="data/pipeline_state.json", alias="NUTTI_STATE_PATH")
+    # 성과 수집 지연(시간). 업로드 직후 YouTube Analytics는 최근 1~3일치를 아직 집계하지
+    # 않아 조회수·시청시간이 0으로 나온다(실측 2026-07-08: 전날 업로드분 API 조회 전부 0).
+    # 그 0을 다음 대본 피드백으로 저장하면 루프가 노이즈로 오염된다 — 업로드는 대기 큐에
+    # 쌓고, 이 시간(기본 48h)이 지난 건만 조회해 분석한다. dry_run은 지연 없이 즉시 수집.
+    analytics_min_age_hours: int = Field(default=48, ge=0, alias="NUTTI_ANALYTICS_MIN_AGE_HOURS")
     # 사이클별 제작 비용을 누적 기록하는 원장(ledger) 경로. `nutti cost`로 일/월/전체
     # 실제 지출을 조회한다(dry_run 실행은 실제 지출 0으로 기록·구분).
     cost_ledger_path: str = Field(
@@ -48,11 +67,8 @@ class Settings(BaseSettings):
     # 생성된 프레임/영상을 저장하는 로컬 디렉터리(fal 산출물은 일정 시간 후 삭제되므로 즉시 저장).
     nutti_media_dir: str = Field(default="data/media", alias="NUTTI_MEDIA_DIR")
 
-    # 영상 백엔드: veo_fal(단일) — fal.ai 경유 Veo 3.1, 네이티브 한국어 음성 + 종량제.
-    # 과거의 veo(Gemini API)·kling 백엔드는 2026-06-16 리팩토링에서 제거됐다.
-    video_backend: Literal["veo_fal"] = Field(
-        default="veo_fal", alias="NUTTI_VIDEO_BACKEND"
-    )
+    # 영상 백엔드는 veo_fal 단일이다(과거 veo/kling 백엔드·NUTTI_VIDEO_BACKEND 선택지는
+    # 2026-06/07 리팩토링에서 제거).
     # fal.ai 단일 키 — 프레임(Kontext)·영상(Veo) 모두 FAL_KEY 하나로 처리. fal.ai 대시보드 발급.
     fal_key: str = Field(default="", alias="FAL_KEY")
 
@@ -70,7 +86,7 @@ class Settings(BaseSettings):
         default=120.0, alias="NUTTI_KONTEXT_TIMEOUT_SEC"
     )
 
-    # ---- fal.ai Veo 3.1 백엔드(video_backend="veo_fal") ----
+    # ---- fal.ai Veo 3.1 백엔드(veo_fal) ----
     # Veo 3.1을 fal.ai 종량제로 호스팅해 네이티브 한국어 음성·마스코트 일관성을 유지한다.
     # Lite 화질로 싸게 검증하고, Fast로 승격할 때는 모델명만 바꾼다(PO 승인 후).
     veo_fal_model: str = Field(
@@ -112,7 +128,44 @@ class Settings(BaseSettings):
     # 확률적으로 의상·구도를 살짝 바꿔 비트 경계에서 점프가 보일 수 있는데, 짧은 디졸브로
     # 그 순간을 부드럽게 가린다(근본 제거가 아닌 완화 — 2026-06-29 PO 옵션 B). 0이면
     # 디졸브 없이 단순 concat. 너무 길면 대사가 겹쳐 잘리므로 0.2~0.4초 권장.
-    veo_fal_crossfade_sec: float = Field(default=0.25, alias="NUTTI_VEO_FAL_CROSSFADE_SEC")
+    veo_fal_crossfade_sec: float = Field(default=0.35, alias="NUTTI_VEO_FAL_CROSSFADE_SEC")
+    # 비트 경계 점프컷 위장 + 시각 리듬용 교차 펀치인(디지털 줌) 배율(2026-07-06 PO).
+    # 짝수 비트(1·3번째 — 훅 포함)를 이 배율로 확대 크롭해 컷마다 화면 크기가 교차되게
+    # 한다. 1.0 이하면 비활성. 크롭 세로 기준은 상단 1/3(얼굴 보존). 켤 땐 1.08~1.15.
+    # 기본 1.0(비활성, 2026-07-10 PO): 교차 줌이 "강아지 크기가 비트마다 들쭉날쭉해
+    # 연속 영상 같지 않다"는 체감의 직접 원인 — 점프컷 위장은 유사도 컷(임계 이하
+    # 최이른 프레임)+마이크로 하드컷이 대신하므로 위장용 줌은 역효과만 남았다.
+    veo_fal_punch_in_scale: float = Field(default=1.0, alias="NUTTI_VEO_FAL_PUNCH_IN_SCALE")
+    # 비트별 대사를 하단 한글 자막으로 굽기(스티칭 후 ffmpeg drawtext, best-effort).
+    # 기본 True — 2줄/26px 렌더 결과를 PO가 승인(2026-07-07, 최초 "이상함" 판정 시의
+    # 렌더 결함은 26px 수정으로 이미 해소됨). Veo가 임의로 박는 깨진 자막은
+    # negative_prompt로 계속 막는다(별개 방어).
+    caption_burn: bool = Field(default=True, alias="NUTTI_CAPTION_BURN")
+    # 자막 폰트 파일 경로. 비우면 OS 기본 후보 탐색(2026-07-10 PO 지시로 '여기어때
+    # 잘난체'가 최우선 — assets/fonts/yg-jalnan.otf, 상업용 무료 폰트지만 "파일 배포"는
+    # 라이선스 금지라 이 public 저장소엔 커밋하지 않고 로컬에만 둔다(.gitignore). 그
+    # 파일이 없는 환경(CI·새 클론·Docker)은 맑은고딕 → Noto CJK → 나눔 순으로 폴백.
+    caption_font: str = Field(default="", alias="NUTTI_CAPTION_FONT")
+    # 자막 글자 크기(px, 720px 폭 기준). 26px가 "너무 작다"(2026-07-10 PO)는 지적으로
+    # 34px로 상향(화면 폭의 ~4.7%). 이전 40px "너무 크다"(2026-06-06) 판정보다는 작게.
+    # 테두리 두께는 크기에 비례해 자동 산출.
+    # ge=1: 0이면 _burn_captions의 wrap_width 나눗셈이 ZeroDivisionError로 클립 생산을
+    # 죽인다(리뷰 지적) — 설정 로드 시점에 시끄럽게 거부한다(과금 전 fail-fast).
+    caption_font_size: int = Field(default=34, ge=1, alias="NUTTI_CAPTION_FONT_SIZE")
+    # 자막 하단 기준 y좌표(px, 1280px 높이 기준). 1200px(2026-07-10)은 YouTube Shorts
+    # UI(제목·채널명 오버레이, 하단 ~240px)에 깔리는 실측 문제로 1040px로 올렸으나
+    # (2026-07-13), 프로덕션 편(0SVBKNkGoA4) 육안 확인 결과 여전히 낮다는 PO 판정
+    # (2026-07-14) — 하단 25% 지점인 960px로 추가 상향.
+    caption_y_pos: int = Field(default=960, ge=1, alias="NUTTI_CAPTION_Y_POS")
+    # 상단 훅 텍스트 오버레이(2026-07-16 PO — KR 쇼츠 트렌드: 시청의 85%가 무음 시작이라
+    # 훅은 음성이 아닌 화면 텍스트로 꽂아야 함). 훅 비트(①) 첫 문장을 영상 전체 동안
+    # 화면 상단에 크게 굽는다. 자막(_burn_captions)과 같은 best-effort 계약.
+    hook_overlay: bool = Field(default=True, alias="NUTTI_HOOK_OVERLAY")
+    # 훅 오버레이 글자 크기(px, 720px 폭 기준). 하단 자막(34px)보다 크게 — 제목 역할.
+    hook_font_size: int = Field(default=48, ge=1, alias="NUTTI_HOOK_FONT_SIZE")
+    # 훅 오버레이 첫 줄 상단 y(px, 1280px 높이 기준). Shorts 상단 UI(검색·카메라 아이콘,
+    # ~150px)를 피해 그 아래에 둔다.
+    hook_y_pos: int = Field(default=200, ge=1, alias="NUTTI_HOOK_Y_POS")
     # 비트 경계 끊김(클립이 8초 동안 포즈가 drift해 다음 클립과 안 이어짐)을 근본적으로
     # 줄이기 위한 "끝프레임 고정" 모드(2026-06-29 PO 아이디어). True면 image-to-video
     # 대신 first-last-frame-to-video 모델을 써 각 비트 클립의 시작·끝 프레임을 동일한
@@ -140,15 +193,42 @@ class Settings(BaseSettings):
     veo_fal_clip_tail_trim_sec: float = Field(
         default=0.0, alias="NUTTI_VEO_FAL_CLIP_TAIL_TRIM_SEC"
     )
+    # 비트 경계 유사도 스티칭 판단 임계(2026-07-07 PO 지시). 고정 지점 트림 대신, 경계
+    # 근처 프레임 쌍의 평균절대차(MAD, 픽셀당 0~255)를 계산해 이 값 이하면 그 프레임 쌍에서
+    # 실제로 이어붙인다. 초과하면 기존 트림을 유지하되 해당 경계만 크로스페이드를 2배로
+    # 늘려 완화한다(_find_similarity_cuts/_produce_clips_veo_fal). 0 이하면 유사도 스티칭을
+    # 완전히 끄고 기존 고정 트림 경로만 쓴다.
+    stitch_sim_threshold: float = Field(default=18.0, alias="NUTTI_STITCH_SIM_THRESHOLD")
+
+    # 비트 클립 QC 레이어(2026-07-07 PO 지시). 각 비트 클립이 스티칭에 도달하기 전에
+    # 중간 프리즈·블랙프레임·무발화·꼬리 미수렴을 잡아 그 비트만 재생성한다(상한 초과 시
+    # 현행 트림·마스킹 폴백). 아래 MAD 임계값들은 미검증 기본값으로, 6차 라이브 런에서 실측
+    # 보정할 예정이다 — 지금은 보수적으로 두어 정상 클립을 오검출하지 않는 쪽에 무게를 둔다.
+    qc_enabled: bool = Field(default=True, alias="NUTTI_QC_ENABLED")
+    qc_max_retries: int = Field(default=2, alias="NUTTI_QC_MAX_RETRIES")
+    qc_freeze_min_sec: float = Field(default=0.5, alias="NUTTI_QC_FREEZE_MIN_SEC")
+    qc_black_min_sec: float = Field(default=0.3, alias="NUTTI_QC_BLACK_MIN_SEC")
+    qc_edge_ignore_sec: float = Field(default=0.5, alias="NUTTI_QC_EDGE_IGNORE_SEC")
+    qc_min_speech_sec: float = Field(default=1.0, alias="NUTTI_QC_MIN_SPEECH_SEC")
+    qc_tail_window_sec: float = Field(default=1.0, alias="NUTTI_QC_TAIL_WINDOW_SEC")
+    qc_tail_converge_mad_max: float = Field(
+        default=20.0, alias="NUTTI_QC_TAIL_CONVERGE_MAD_MAX"
+    )
+    qc_tail_delta_max: float = Field(default=8.0, alias="NUTTI_QC_TAIL_DELTA_MAX")
+    # 화면 텍스트(외계어 자막) QC(2026-07-10 PO "절대 안 생기게"). Veo가 프레임 안에
+    # 임의로 그리는 깨진 한글 자막은 프롬프트 3겹 방어(본문 금지문 + _NEGATIVE +
+    # negative_prompt 전송)로도 확률적으로 뚫린다(실측: "칙하 아대되?" 등) — 하드룰
+    # 원칙(AI 생성물=회복형 재생성)대로 비트 클립 프레임을 Claude 비전으로 판정해
+    # 검출 시 그 비트만 재생성한다. qc_enabled와 AND. 판정 실패는 보류(파이프라인 무해).
+    qc_text_enabled: bool = Field(default=True, alias="NUTTI_QC_TEXT_ENABLED")
 
     # 저장소
     google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
     google_service_account_json: str = Field(default="", alias="GOOGLE_SERVICE_ACCOUNT_JSON")
 
-    # 검수
+    # 검수 (텔레그램 단일 채널 — Discord 게이트는 2026-07-17 미완성 스캐폴딩 정리로 제거)
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
-    discord_webhook_url: str = Field(default="", alias="DISCORD_WEBHOOK_URL")
     # 검수 대기 동작
     review_timeout_sec: int = Field(default=3600, alias="NUTTI_REVIEW_TIMEOUT_SEC")
     review_poll_interval_sec: float = Field(default=3.0, alias="NUTTI_REVIEW_POLL_INTERVAL_SEC")

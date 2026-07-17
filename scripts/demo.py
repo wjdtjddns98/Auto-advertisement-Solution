@@ -30,7 +30,7 @@ def dry():
 
 # 1) 전체 파이프라인 ---------------------------------------------------------
 line("1) 전체 파이프라인 (쇼츠) — 대본→팩트체크→검수→영상→메타→업로드→분석")
-orch = Orchestrator(dry(), telegram=AutoApproveGate(), discord=AutoApproveGate())
+orch = Orchestrator(dry(), telegram=AutoApproveGate())
 run = orch.run("강아지 닭가슴살 간식, 하루 적정량은?")
 print(f"  대본 생성됨   : {run.script.body.splitlines()[0]}")
 print(f"  팩트체크 통과 : {run.script.fact_checked}")
@@ -47,7 +47,7 @@ print(f"  업로드 플랫폼 : {sorted(u.platform for u in run2.uploads)}")
 # 2) 팩트체크 자동 거절/재생성 (#1) ------------------------------------------
 line("2) 팩트체크 실패 → 자동 재생성 후 한도 초과 시 거절 (#1 수정)")
 orch_fc = Orchestrator(
-    dry(), telegram=AutoApproveGate(), discord=AutoApproveGate(), max_factcheck_retries=1
+    dry(), telegram=AutoApproveGate(), max_factcheck_retries=1
 )
 fc_calls = {"n": 0}
 gen_calls = {"n": 0}

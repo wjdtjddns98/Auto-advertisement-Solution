@@ -34,7 +34,7 @@ def _run_with_video(duration: float) -> PipelineRun:
 
 def test_veo_fal_lite_cost_matches_unit_price():
     """Veo(fal) Lite(=$0.05/초·기본) + 프레임 $0.04(FLUX Kontext) + 텍스트 추정의 합계가 맞아야 한다."""
-    settings = Settings(NUTTI_DRY_RUN=True, NUTTI_VIDEO_BACKEND="veo_fal")
+    settings = Settings(NUTTI_DRY_RUN=True)
     cost = estimate_run_cost(_run_with_video(32.0), settings)
 
     labels = {item.label for item in cost.items}
@@ -52,7 +52,6 @@ def test_veo_fal_fast_unit_price():
     """모델명에 'fast'가 있으면 $0.15/초로 계산된다."""
     settings = Settings(
         NUTTI_DRY_RUN=True,
-        NUTTI_VIDEO_BACKEND="veo_fal",
         NUTTI_VEO_FAL_MODEL="fal-ai/veo3.1/fast/image-to-video",
     )
     cost = estimate_run_cost(_run_with_video(10.0), settings)
@@ -65,7 +64,6 @@ def test_veo_fal_standard_unit_price():
     """모델명에 'standard'가 있으면 $0.40/초로 계산된다."""
     settings = Settings(
         NUTTI_DRY_RUN=True,
-        NUTTI_VIDEO_BACKEND="veo_fal",
         NUTTI_VEO_FAL_MODEL="fal-ai/veo3.1/standard/image-to-video",
     )
     cost = estimate_run_cost(_run_with_video(10.0), settings)
@@ -78,7 +76,6 @@ def test_unknown_video_model_falls_back_and_marks_estimate():
     """단가표에 없는 모델은 조용히 틀리지 않도록 보수적 기본값 + '단가추정' 라벨."""
     settings = Settings(
         NUTTI_DRY_RUN=True,
-        NUTTI_VIDEO_BACKEND="veo_fal",
         NUTTI_VEO_FAL_MODEL="fal-ai/veo9.9/unknown/image-to-video",
     )
     cost = estimate_run_cost(_run_with_video(8.0), settings)
@@ -89,7 +86,7 @@ def test_unknown_video_model_falls_back_and_marks_estimate():
 
 def test_text_line_is_marked_estimated():
     """텍스트 생성 라인은 추정치(estimated=True)로 표시된다."""
-    settings = Settings(NUTTI_DRY_RUN=True, NUTTI_VIDEO_BACKEND="veo_fal")
+    settings = Settings(NUTTI_DRY_RUN=True)
     cost = estimate_run_cost(_run_with_video(8.0), settings)
     text_item = next(i for i in cost.items if i.label.startswith("텍스트"))
     assert text_item.estimated is True
@@ -107,14 +104,14 @@ def test_no_video_no_frame_or_video_lines():
 
 
 def test_total_is_sum_of_items():
-    settings = Settings(NUTTI_DRY_RUN=True, NUTTI_VIDEO_BACKEND="veo_fal")
+    settings = Settings(NUTTI_DRY_RUN=True)
     cost = estimate_run_cost(_run_with_video(24.0), settings)
     # total_usd는 4자리 반올림이므로 원합과 반올림 오차 내에서 일치해야 한다.
     assert cost.total_usd == round(sum(i.usd for i in cost.items), 4)
 
 
 def test_format_cost_dry_run_shows_zero_spend():
-    settings = Settings(NUTTI_DRY_RUN=True, NUTTI_VIDEO_BACKEND="veo_fal")
+    settings = Settings(NUTTI_DRY_RUN=True)
     cost = estimate_run_cost(_run_with_video(8.0), settings)
     text = format_cost(cost)
     assert "DRY_RUN" in text
@@ -130,8 +127,8 @@ def test_format_cost_live_shows_total():
 
 def test_orchestrator_attaches_cost_to_run():
     """파이프라인을 끝까지 돌리면 run.cost가 채워진다(배선 확인)."""
-    settings = Settings(NUTTI_DRY_RUN=True, NUTTI_ENV="test", NUTTI_VIDEO_BACKEND="veo_fal")
-    orch = Orchestrator(settings, telegram=AutoApproveGate(), discord=AutoApproveGate())
+    settings = Settings(NUTTI_DRY_RUN=True, NUTTI_ENV="test")
+    orch = Orchestrator(settings, telegram=AutoApproveGate())
     run = orch.run("강아지 닭가슴살 간식 적정량")
     assert run.cost is not None
     assert run.cost.total_usd > 0

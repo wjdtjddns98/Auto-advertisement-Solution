@@ -1,4 +1,4 @@
-"""Publisher(YouTube/Instagram 업로드·성과 수집) 단위 테스트.
+"""Publisher(YouTube 업로드·YouTube/Instagram 성과 수집) 단위 테스트.
 
 모든 테스트는 fake 클라이언트 주입 또는 dry_run으로 **네트워크 없이** 동작한다.
 conftest._block_real_network autouse 픽스처가 실제 httpx 전송을 차단한다.
@@ -13,11 +13,8 @@ import pytest
 
 from nutti.config import Settings
 from nutti.integrations.publishing import (
-    INSTAGRAM_POLL_TIMEOUT_SEC,
-    FalMediaUploader,
     InstagramClient,
     PublishError,
-    PublishTimeoutError,
     Publisher,
     YouTubeClient,
     _usable_key,
@@ -55,10 +52,6 @@ def _video(script_id: str = "abc123") -> VideoAsset:
 def _meta(title: str = "테스트 영상") -> Metadata:
     """테스트용 최소 Metadata."""
     return Metadata(title=title, description="간식 설명", hashtags=["강아지", "간식"])
-
-
-def _no_sleep(_seconds: float) -> None:
-    """폴링 대기 없이 즉시 반환하는 가짜 sleep(결정적 시간 제어)."""
 
 
 # ---------------------------------------------------------------------------
@@ -116,69 +109,18 @@ class FakeYouTubeClient:
 
 
 class FakeInstagramClient:
-    """InstagramClient 실 클라이언트 대체.
+    """InstagramClient 실 클라이언트 대체 — 인사이트 조회 전용.
 
-    create_container/poll_container/publish/fetch_permalink/fetch_insights 호출을
-    기록하고 결정적 값을 반환한다.
-    poll_statuses: 큐 기반 상태 반환(deque). 비면 "FINISHED"를 반환한다.
-    raise_on_create=True 설정 시 create_container()에서 PublishError를 던진다.
-    raise_on_publish=True 설정 시 publish()에서 PublishError를 던진다.
+    insights=None이면 기본 더미, insights={}이면 빈 dict(명시적 빈 결과 테스트용).
     """
 
-    def __init__(
-        self,
-        *,
-        creation_id: str = "ig_container_001",
-        media_id: str = "ig_media_001",
-        permalink: str = "https://www.instagram.com/reel/ig_media_001/",
-        poll_statuses: list[str] | None = None,
-        insights: dict | None = None,
-        raise_on_create: bool = False,
-        raise_on_publish: bool = False,
-    ):
-        self._creation_id = creation_id
-        self._media_id = media_id
-        self._permalink = permalink
-        # deque를 소비하면서 순차 상태를 반환, 소진하면 "FINISHED"
-        self._poll_queue: deque[str] = deque(poll_statuses or [])
-        # insights=None이면 기본 더미, insights={}이면 빈 dict(명시적 빈 결과 테스트용)
+    def __init__(self, *, insights: dict | None = None):
         self._insights = (
             insights
             if insights is not None
             else {"views": 300, "likes": 15, "comments": 2, "ig_reels_avg_watch_time": 18500}
         )
-        self.raise_on_create = raise_on_create
-        self.raise_on_publish = raise_on_publish
-        # 호출 기록
-        self.create_calls: list[tuple] = []
-        self.poll_calls: list[str] = []
-        self.publish_calls: list[str] = []
-        self.permalink_calls: list[str] = []
         self.insights_calls: list[str] = []
-
-    def create_container(
-        self, video: VideoAsset, meta: Metadata, *, video_url: str | None = None
-    ) -> str:
-        self.create_calls.append((video, meta, video_url))
-        if self.raise_on_create:
-            raise PublishError("Instagram 컨테이너 생성 HTTP 400")
-        return self._creation_id
-
-    def poll_container(self, creation_id: str) -> str:
-        self.poll_calls.append(creation_id)
-        if self._poll_queue:
-            return self._poll_queue.popleft()
-        return "FINISHED"
-
-    def publish(self, creation_id: str) -> str:
-        self.publish_calls.append(creation_id)
-        if self.raise_on_publish:
-            raise PublishError("Instagram 게시 HTTP 500")
-        return self._media_id
-
-    def fetch_permalink(self, media_id: str) -> str:
-        self.permalink_calls.append(media_id)
-        return self._permalink
 
     def fetch_insights(self, media_id: str) -> dict:
         self.insights_calls.append(media_id)
@@ -308,21 +250,6 @@ def test_youtube_missing_keys_raise_value_error():
         publisher.upload_youtube(_video(), _meta())
 
 
-def test_instagram_missing_keys_raise_value_error():
-    """dry_run=False + 클라이언트 미주입 + 액세스 토큰/계정 ID 없음 → ValueError.
-
-    upload_instagram의 필수 키 검증 가드(publishing.py:492-498)가 실제로 동작함을 검증한다.
-    이 테스트가 없으면 가드 블록이 삭제·약화되어도 pytest가 통과해버린다.
-    """
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="",
-        INSTAGRAM_ACCOUNT_ID="",
-    )
-    # ig_client를 주입하지 않아야 가드가 평가된다.
-    publisher = Publisher(settings)
-
-    with pytest.raises(ValueError, match="INSTAGRAM_ACCESS_TOKEN"):
-        publisher.upload_instagram(_video(), _meta())
 
 
 def test_youtube_redaction_does_not_leak_access_token():
@@ -350,17 +277,6 @@ def test_youtube_redaction_does_not_leak_access_token():
 # ---------------------------------------------------------------------------
 
 
-def test_instagram_dry_run_returns_dummy():
-    """dry_run=True이면 네트워크 없이 즉시 UploadResult를 반환한다."""
-    settings = _dry_settings()
-    publisher = Publisher(settings)
-    video = _video("script002")
-
-    result = publisher.upload_instagram(video, _meta())
-
-    assert result.platform == "instagram"
-    assert result.external_id == "ig_script002"
-    assert "script002" in result.url
 
 
 # ---------------------------------------------------------------------------
@@ -368,247 +284,28 @@ def test_instagram_dry_run_returns_dummy():
 # ---------------------------------------------------------------------------
 
 
-def test_instagram_upload_full_flow():
-    """라이브 경로에서 create → poll(IN_PROGRESS → FINISHED) → publish → permalink 전체 플로우."""
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    fake_ig = FakeInstagramClient(
-        creation_id="container_001",
-        media_id="media_001",
-        permalink="https://www.instagram.com/reel/media_001/",
-        # 처음에는 IN_PROGRESS, 두 번째에서 FINISHED
-        poll_statuses=["IN_PROGRESS", "FINISHED"],
-    )
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
-
-    result = publisher.upload_instagram(_video(), _meta())
-
-    # create_container 호출 확인
-    assert len(fake_ig.create_calls) == 1
-    # poll_container 2회 호출 확인(IN_PROGRESS → FINISHED)
-    assert len(fake_ig.poll_calls) == 2
-    assert fake_ig.poll_calls == ["container_001", "container_001"]
-    # publish 호출 확인
-    assert len(fake_ig.publish_calls) == 1
-    assert fake_ig.publish_calls[0] == "container_001"
-    # permalink 조회 확인
-    assert len(fake_ig.permalink_calls) == 1
-    # 결과 검증
-    assert result.platform == "instagram"
-    assert result.external_id == "media_001"
-    assert result.url == "https://www.instagram.com/reel/media_001/"
 
 
-def test_instagram_upload_finished_immediately():
-    """poll_container가 첫 번째 호출에서 바로 FINISHED를 반환하는 경우."""
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
-
-    result = publisher.upload_instagram(_video(), _meta())
-
-    assert len(fake_ig.poll_calls) == 1
-    assert result.platform == "instagram"
 
 
-def test_instagram_clock_based_timeout_is_load_bearing():
-    """clock 주입으로 타임아웃을 제어할 수 있음을 검증한다(clock 기반 타임아웃 회귀 방지).
-
-    clock이 start=0, 첫 while 통과(0), poll 1회, 두 번째 while에서 초과 → 타임아웃.
-    counter 기반이었다면 100개의 IN_PROGRESS를 다 소진한 후 FINISHED를 반환해 성공했을 것이다.
-    이 테스트는 clock 기반 구현이 없으면 PublishTimeoutError가 발생하지 않아 실패한다.
-    """
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    # tick 0: start(=0.0), tick 1: 첫 while check(0<TIMEOUT → 통과), tick 2: 두 번째 while check(초과)
-    ticks = iter([0.0, 0.0, INSTAGRAM_POLL_TIMEOUT_SEC + 1.0])
-    fake_ig = FakeInstagramClient(
-        poll_statuses=["IN_PROGRESS"] * 100,  # 많이 줘도 clock이 1회 후 차단
-    )
-    publisher = Publisher(
-        settings,
-        ig_client=fake_ig,
-        clock=lambda: next(ticks),
-        sleep=_no_sleep,
-    )
-
-    with pytest.raises(PublishTimeoutError):
-        publisher.upload_instagram(_video(), _meta())
-
-    # clock 기반이면 IN_PROGRESS 정확히 1번만 폴링하고 타임아웃
-    assert len(fake_ig.poll_calls) == 1
 
 
-def test_instagram_container_error_status_raises():
-    """컨테이너 상태가 ERROR이면 PublishError를 발생시킨다."""
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    fake_ig = FakeInstagramClient(poll_statuses=["IN_PROGRESS", "ERROR"])
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
-
-    with pytest.raises(PublishError, match="ERROR"):
-        publisher.upload_instagram(_video(), _meta())
 
 
-def test_instagram_container_expired_status_raises():
-    """컨테이너 상태가 EXPIRED이면 PublishError를 발생시킨다."""
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    fake_ig = FakeInstagramClient(poll_statuses=["EXPIRED"])
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
-
-    with pytest.raises(PublishError, match="EXPIRED"):
-        publisher.upload_instagram(_video(), _meta())
 
 
-def test_instagram_create_container_error_propagates():
-    """create_container()에서 PublishError 발생 시 전파된다."""
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    fake_ig = FakeInstagramClient(raise_on_create=True)
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
-
-    with pytest.raises(PublishError, match="400"):
-        publisher.upload_instagram(_video(), _meta())
-
-    # poll/publish는 호출되지 않음
-    assert len(fake_ig.poll_calls) == 0
-    assert len(fake_ig.publish_calls) == 0
 
 
-def test_instagram_publish_error_propagates():
-    """publish()에서 PublishError 발생 시 전파된다."""
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"], raise_on_publish=True)
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
-
-    with pytest.raises(PublishError, match="500"):
-        publisher.upload_instagram(_video(), _meta())
 
 
-def test_instagram_redaction_does_not_leak_token():
-    """PublishError 메시지에 access_token 값이 포함되지 않는다.
-
-    _raise_for_publish는 상태 코드만 노출하며, URL에 토큰이 포함되더라도
-    에러 메시지에서 직접 토큰 값이 새지 않도록 설계되어 있음을 검증한다.
-    """
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="MY_SECRET_IG_TOKEN",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    fake_ig = FakeInstagramClient(raise_on_create=True)
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
-
-    with pytest.raises(PublishError) as exc_info:
-        publisher.upload_instagram(_video(), _meta())
-
-    # 에러 메시지에 토큰 값이 노출되지 않아야 함
-    assert "MY_SECRET_IG_TOKEN" not in str(exc_info.value)
 
 
-def test_instagram_create_container_transport_error_does_not_leak_token():
-    """create_container()에서 TransportError 발생 시 access_token이 PublishError에 노출되지 않는다.
-
-    httpx.TransportError는 request 객체(POST 바디에 access_token 포함)를 담고 있으나,
-    래핑된 PublishError 메시지에는 토큰이 포함되지 않아야 한다.
-    이 테스트가 없으면 try/except 제거 시 토큰이 노출되어 실패한다.
-    """
-    secret_token = "SUPER_SECRET_IG_ACCESS_TOKEN"
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN=secret_token,
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    # POST 바디에 access_token이 포함된 요청을 시뮬레이션하는 fake HTTP 클라이언트
-    fake_request = httpx.Request(
-        "POST",
-        "https://graph.facebook.com/v25.0/ig_acc_123/media",
-        data={"access_token": secret_token, "media_type": "REELS"},
-    )
-    raising_http = FakeRaisingHttpClient(fake_request)
-    client = InstagramClient(settings, http=raising_http)
-
-    with pytest.raises(PublishError) as exc_info:
-        client.create_container(_video(), _meta())
-
-    assert secret_token not in str(exc_info.value)
 
 
-def test_instagram_publish_transport_error_does_not_leak_token():
-    """publish()에서 TransportError 발생 시 access_token이 PublishError에 노출되지 않는다."""
-    secret_token = "PUBLISH_SECRET_TOKEN"
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN=secret_token,
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    fake_request = httpx.Request(
-        "POST",
-        "https://graph.facebook.com/v25.0/ig_acc_123/media_publish",
-        data={"access_token": secret_token, "creation_id": "cid_001"},
-    )
-    raising_http = FakeRaisingHttpClient(fake_request)
-    client = InstagramClient(settings, http=raising_http)
-
-    with pytest.raises(PublishError) as exc_info:
-        client.publish("cid_001")
-
-    assert secret_token not in str(exc_info.value)
 
 
-def test_instagram_poll_container_transport_error_does_not_leak_token():
-    """poll_container()에서 TransportError 발생 시 access_token이 PublishError에 노출되지 않는다."""
-    secret_token = "POLL_SECRET_TOKEN"
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN=secret_token,
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    # access_token이 쿼리 파라미터로 포함된 URL을 시뮬레이션
-    fake_request = httpx.Request(
-        "GET",
-        f"https://graph.facebook.com/v25.0/cid_001?fields=status_code&access_token={secret_token}",
-    )
-    raising_http = FakeRaisingHttpClient(fake_request)
-    client = InstagramClient(settings, http=raising_http)
-
-    with pytest.raises(PublishError) as exc_info:
-        client.poll_container("cid_001")
-
-    assert secret_token not in str(exc_info.value)
 
 
-def test_instagram_fetch_permalink_transport_error_does_not_leak_token():
-    """fetch_permalink()에서 TransportError 발생 시 access_token이 PublishError에 노출되지 않는다."""
-    secret_token = "PERMALINK_SECRET_TOKEN"
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN=secret_token,
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    fake_request = httpx.Request(
-        "GET",
-        f"https://graph.facebook.com/v25.0/media_001?fields=permalink&access_token={secret_token}",
-    )
-    raising_http = FakeRaisingHttpClient(fake_request)
-    client = InstagramClient(settings, http=raising_http)
-
-    with pytest.raises(PublishError) as exc_info:
-        client.fetch_permalink("media_001")
-
-    assert secret_token not in str(exc_info.value)
 
 
 def test_instagram_fetch_insights_transport_error_does_not_leak_token():
@@ -1311,57 +1008,8 @@ def test_youtube_fetch_analytics_malformed_columns_returns_empty():
 # ---------------------------------------------------------------------------
 
 
-def test_instagram_upload_published_status_proceeds():
-    """폴링 중 PUBLISHED 상태가 반환되면 타임아웃 없이 게시 단계로 진행해야 한다.
-
-    항목 12: PUBLISHED 분기(publishing.py: status == "PUBLISHED" → break)가 실제로
-    동작하는지 검증한다. 이 테스트가 없으면 해당 분기가 삭제되어도 탐지되지 않는다.
-    """
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    # PUBLISHED 상태를 즉시 반환해 폴링 루프가 break 되는지 확인
-    fake_ig = FakeInstagramClient(
-        creation_id="container_pub",
-        media_id="media_pub",
-        permalink="https://www.instagram.com/reel/media_pub/",
-        poll_statuses=["PUBLISHED"],
-    )
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
-
-    result = publisher.upload_instagram(_video(), _meta())
-
-    # 폴링이 1회(PUBLISHED에서 break) 후 publish까지 진행되어야 한다.
-    assert len(fake_ig.poll_calls) == 1
-    assert len(fake_ig.publish_calls) == 1
-    assert result.platform == "instagram"
-    assert result.external_id == "media_pub"
 
 
-def test_instagram_upload_permalink_fallback_url():
-    """fetch_permalink가 빈 문자열을 반환하면 fallback URL을 사용해야 한다.
-
-    항목 12: permalink-fallback 분기(publishing.py: url = permalink or f"...")가
-    실제로 동작하는지 검증한다. 이 분기가 없으면 빈 URL로 UploadResult가 만들어진다.
-    """
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    # permalink=""를 반환해 fallback URL이 사용되는지 확인
-    fake_ig = FakeInstagramClient(
-        media_id="media_fallback",
-        permalink="",  # 빈 문자열 → fallback URL 사용
-        poll_statuses=["FINISHED"],
-    )
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
-
-    result = publisher.upload_instagram(_video(), _meta())
-
-    # fallback URL 형식: https://www.instagram.com/reel/{media_id}/
-    assert result.url == "https://www.instagram.com/reel/media_fallback/"
-    assert result.external_id == "media_fallback"
 
 
 def test_fetch_youtube_performance_no_client_creates_default(monkeypatch):
@@ -1516,156 +1164,16 @@ def test_fetch_instagram_performance_no_client_creates_default(monkeypatch):
     assert report.avg_view_duration_sec == pytest.approx(21.0)
 
 
-def test_upload_instagram_closes_self_created_ig_client(monkeypatch):
-    """upload_instagram이 내부 생성한 InstagramClient를 try/finally로 close()해야 한다.
-
-    ig_client를 주입하지 않으면 Publisher가 직접 InstagramClient를 생성하는데,
-    이 인스턴스는 try/finally 안에서 정확히 1회 close()되어야 한다.
-    """
-    import nutti.integrations.publishing as _pub_mod
-
-    close_calls: list[str] = []
-
-    class _TrackingIGClient:
-        def create_container(
-            self, video: VideoAsset, meta: Metadata, *, video_url: str | None = None
-        ) -> str:
-            return "container_track"
-
-        def poll_container(self, creation_id: str) -> str:
-            return "FINISHED"
-
-        def publish(self, creation_id: str) -> str:
-            return "media_track"
-
-        def fetch_permalink(self, media_id: str) -> str:
-            return "https://www.instagram.com/reel/media_track/"
-
-        def close(self) -> None:
-            close_calls.append("closed")
-
-    def _fake_ig_constructor(settings):
-        return _TrackingIGClient()
-
-    monkeypatch.setattr(_pub_mod, "InstagramClient", _fake_ig_constructor)
-
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-    publisher = Publisher(settings, sleep=_no_sleep)  # ig_client 미주입 → 내부 생성
-    publisher.upload_instagram(_video(), _meta())
-
-    assert len(close_calls) == 1, (
-        f"InstagramClient.close()가 정확히 1회 호출되어야 합니다 (실제: {len(close_calls)}회)"
-    )
 
 
-def test_upload_instagram_does_not_close_injected_ig_client():
-    """upload_instagram이 주입된 ig_client는 close()하지 않아야 한다."""
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-
-    class _TrackingInjected:
-        def __init__(self):
-            self.close_count = 0
-
-        def create_container(
-            self, video: VideoAsset, meta: Metadata, *, video_url: str | None = None
-        ) -> str:
-            return "container_inj"
-
-        def poll_container(self, creation_id: str) -> str:
-            return "FINISHED"
-
-        def publish(self, creation_id: str) -> str:
-            return "media_inj"
-
-        def fetch_permalink(self, media_id: str) -> str:
-            return "https://www.instagram.com/reel/media_inj/"
-
-        def close(self) -> None:
-            self.close_count += 1
-
-    injected = _TrackingInjected()
-    publisher = Publisher(settings, ig_client=injected, sleep=_no_sleep)
-    publisher.upload_instagram(_video(), _meta())
-
-    assert injected.close_count == 0, "주입된 ig_client는 Publisher가 close()해서는 안 됩니다"
 
 
-def test_instagram_poll_container_error_mid_loop():
-    """poll_container가 루프 중간에 PublishError를 발생시키면 즉시 전파되어야 한다.
-
-    IN_PROGRESS → PublishError 순서로 poll이 호출될 때, Publisher 폴링 루프가
-    예외를 잡지 않고 그대로 전파하는지 검증한다.
-    FakeInstagramClient에 raise_on_poll 옵션을 추가해 이 경로를 커버한다.
-    """
-    settings = _live_settings(
-        INSTAGRAM_ACCESS_TOKEN="ig_token",
-        INSTAGRAM_ACCOUNT_ID="ig_acc_123",
-    )
-
-    call_count = 0
-
-    class _PollErrorAfterFirstClient:
-        """첫 번째 poll은 IN_PROGRESS, 두 번째는 PublishError를 발생시킨다."""
-
-        def create_container(
-            self, video: VideoAsset, meta: Metadata, *, video_url: str | None = None
-        ) -> str:
-            return "container_err"
-
-        def poll_container(self, creation_id: str) -> str:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return "IN_PROGRESS"
-            raise PublishError("poll_container 전송 오류 — 네트워크 단절")
-
-        def publish(self, creation_id: str) -> str:  # pragma: no cover
-            raise AssertionError("poll 오류 후 publish가 호출되면 안 됩니다")
-
-        def fetch_permalink(self, media_id: str) -> str:  # pragma: no cover
-            raise AssertionError("poll 오류 후 fetch_permalink가 호출되면 안 됩니다")
-
-        def close(self) -> None:
-            pass
-
-    publisher = Publisher(
-        settings,
-        ig_client=_PollErrorAfterFirstClient(),
-        sleep=_no_sleep,
-    )
-
-    with pytest.raises(PublishError, match="poll_container 전송 오류"):
-        publisher.upload_instagram(_video(), _meta())
-
-    # poll이 정확히 2회 호출(IN_PROGRESS + 예외) 후 루프 탈출
-    assert call_count == 2
 
 
 # ---------------------------------------------------------------------------
-# Instagram 공개 URL 호스팅(fal-storage 업로드) — FalMediaUploader + 결정 로직
 # ---------------------------------------------------------------------------
 
 
-class FakeFalUploader:
-    """FalMediaUploader 대체 — upload 호출을 기록하고 결정적 공개 URL을 반환한다."""
-
-    def __init__(self, file_url: str = "https://v3.fal.media/files/vid_001.mp4"):
-        self._file_url = file_url
-        self.upload_calls: list[tuple] = []
-        self.closed = False
-
-    def upload(self, data: bytes, *, content_type: str, file_name: str) -> str:
-        self.upload_calls.append((data, content_type, file_name))
-        return self._file_url
-
-    def close(self) -> None:
-        self.closed = True
 
 
 def _fal_live_settings(**overrides) -> Settings:
@@ -1681,115 +1189,18 @@ def _local_mp4(tmp_path, data: bytes = b"FAKE_MP4_BYTES") -> VideoAsset:
     return VideoAsset(script_id="abc123", video_path=str(p), final_url=str(p))
 
 
-def test_instagram_local_video_uploaded_to_fal_then_passed_as_url(tmp_path):
-    """로컬 mp4면 fal-storage에 업로드하고, 그 공개 URL을 create_container에 넘긴다."""
-    settings = _fal_live_settings(INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc")
-    data = b"REEL_VIDEO_BYTES"
-    video = _local_mp4(tmp_path, data)
-    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
-    fake_up = FakeFalUploader(file_url="https://v3.fal.media/files/hosted.mp4")
-    publisher = Publisher(settings, ig_client=fake_ig, fal_uploader=fake_up, sleep=_no_sleep)
-
-    publisher.upload_instagram(video, _meta())
-
-    # 업로드는 정확히 1회 — content_type=video/mp4, 파일명·바이트 전달
-    assert len(fake_up.upload_calls) == 1
-    up_data, up_ct, up_name = fake_up.upload_calls[0]
-    assert up_data == data
-    assert up_ct == "video/mp4"
-    assert up_name == "reel.mp4"
-    # create_container에 fal 공개 URL이 video_url로 주입됐는지 확인
-    assert len(fake_ig.create_calls) == 1
-    _, _, video_url_used = fake_ig.create_calls[0]
-    assert video_url_used == "https://v3.fal.media/files/hosted.mp4"
-    # 주입된 업로더는 Publisher가 close()하지 않는다(수명은 호출자 관리)
-    assert fake_up.closed is False
 
 
-def test_instagram_already_public_url_skips_upload(tmp_path):
-    """final_url이 이미 공개 http(s) URL이면 추가 업로드 없이 그대로 넘긴다."""
-    settings = _fal_live_settings(INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc")
-    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
-    fake_up = FakeFalUploader()
-    publisher = Publisher(settings, ig_client=fake_ig, fal_uploader=fake_up, sleep=_no_sleep)
-
-    # _video()의 final_url = "https://fake.local/final/abc123.mp4" (이미 https)
-    publisher.upload_instagram(_video(), _meta())
-
-    assert len(fake_up.upload_calls) == 0  # 업로드 생략
-    _, _, video_url_used = fake_ig.create_calls[0]
-    assert video_url_used == "https://fake.local/final/abc123.mp4"
 
 
-def test_instagram_missing_fal_key_raises_value_error(tmp_path):
-    """로컬 영상 + 업로더 미주입 + FAL_KEY 없음 → ValueError(빠른 실패)."""
-    # FAL_KEY 비움. ig_client는 주입해 ig 키 가드를 건너뛰고 호스팅 가드만 평가.
-    settings = _live_settings(
-        FAL_KEY="", INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc"
-    )
-    video = _local_mp4(tmp_path)
-    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)
-
-    with pytest.raises(ValueError, match="FAL_KEY"):
-        publisher.upload_instagram(video, _meta())
-
-    # 호스팅 가드에서 막혀 컨테이너 생성까지 가지 않는다
-    assert len(fake_ig.create_calls) == 0
 
 
-def test_instagram_video_file_not_found_raises(tmp_path):
-    """로컬 경로가 실제 파일이 아니면 PublishError(파일명만 노출, 전체 경로 가림)."""
-    settings = _fal_live_settings(INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc")
-    missing = tmp_path / "secret_dir" / "nope.mp4"
-    video = VideoAsset(script_id="abc123", final_url=str(missing))
-    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
-    publisher = Publisher(settings, ig_client=fake_ig, fal_uploader=FakeFalUploader(), sleep=_no_sleep)
-
-    with pytest.raises(PublishError) as exc_info:
-        publisher.upload_instagram(video, _meta())
-
-    msg = str(exc_info.value)
-    assert "nope.mp4" in msg
-    assert "secret_dir" not in msg
 
 
-def test_instagram_no_video_source_raises(tmp_path):
-    """final_url·video_path 모두 비면 PublishError."""
-    settings = _fal_live_settings(INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc")
-    video = VideoAsset(script_id="abc123")  # 위치 없음
-    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
-    publisher = Publisher(settings, ig_client=fake_ig, fal_uploader=FakeFalUploader(), sleep=_no_sleep)
-
-    with pytest.raises(PublishError, match="영상 위치"):
-        publisher.upload_instagram(video, _meta())
 
 
-def test_instagram_self_created_uploader_is_closed(tmp_path, monkeypatch):
-    """업로더 미주입 시 Publisher가 내부 생성한 FalMediaUploader를 정확히 1회 close()한다."""
-    import nutti.integrations.publishing as _pub_mod
-
-    close_calls: list[str] = []
-
-    class _TrackingUploader:
-        def upload(self, data: bytes, *, content_type: str, file_name: str) -> str:
-            return "https://v3.fal.media/files/tracked.mp4"
-
-        def close(self) -> None:
-            close_calls.append("closed")
-
-    monkeypatch.setattr(_pub_mod, "FalMediaUploader", lambda settings: _TrackingUploader())
-
-    settings = _fal_live_settings(INSTAGRAM_ACCESS_TOKEN="tok", INSTAGRAM_ACCOUNT_ID="acc")
-    fake_ig = FakeInstagramClient(poll_statuses=["FINISHED"])
-    publisher = Publisher(settings, ig_client=fake_ig, sleep=_no_sleep)  # 업로더 미주입
-
-    publisher.upload_instagram(_local_mp4(tmp_path), _meta())
-
-    assert len(close_calls) == 1
 
 
-# --- FalMediaUploader 내부 단위 테스트 (fake HTTP 주입) ---
 
 
 _INITIATE_OK = {
@@ -1798,203 +1209,21 @@ _INITIATE_OK = {
 }
 
 
-def test_fal_uploader_initiate_then_put_returns_file_url():
-    """initiate(인증) → presigned PUT(인증 미첨부) 순으로 업로드하고 file_url을 반환한다."""
-    settings = _fal_live_settings()
-    http = FakeHttpClient(
-        [
-            FakeHttpResponse(status_code=200, body=_INITIATE_OK),  # initiate POST
-            FakeHttpResponse(status_code=200),  # presigned PUT
-        ]
-    )
-    uploader = FalMediaUploader(settings, http=http)
-
-    file_url = uploader.upload(b"VIDEO", content_type="video/mp4", file_name="out.mp4")
-
-    assert file_url == "https://v3.fal.media/files/out.mp4"
-    # initiate: rest.alpha.fal.ai + Authorization 헤더 + content_type/file_name 바디
-    init_url, init_kwargs = http.post_calls[0]
-    assert "rest.alpha.fal.ai/storage/upload/initiate" in init_url
-    assert init_kwargs["headers"]["Authorization"] == "Key test-fal-key"
-    assert init_kwargs["json"] == {"content_type": "video/mp4", "file_name": "out.mp4"}
-    # PUT: presigned upload_url + Content-Type만, 자격증명(Authorization) 미첨부
-    put_url, put_kwargs = http.put_calls[0]
-    assert put_url == "https://storage.fal.media/upload/out.mp4?sig=abc"
-    assert put_kwargs["content"] == b"VIDEO"
-    assert put_kwargs["headers"]["Content-Type"] == "video/mp4"
-    assert "Authorization" not in put_kwargs["headers"]
 
 
-def test_fal_uploader_missing_url_raises_without_key_leak():
-    """initiate 응답에 URL이 없으면 PublishError(응답 키 목록 미노출)이고 PUT을 시도하지 않는다."""
-    settings = _fal_live_settings()
-    http = FakeHttpClient([FakeHttpResponse(status_code=200, body={"unexpected": 1})])
-    uploader = FalMediaUploader(settings, http=http)
-
-    with pytest.raises(PublishError) as exc_info:
-        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
-
-    assert "unexpected" not in str(exc_info.value)
-    assert len(http.put_calls) == 0
 
 
-def test_fal_uploader_initiate_http_error_propagates():
-    """initiate HTTP 4xx면 PublishError(상태 코드)를 발생시킨다."""
-    settings = _fal_live_settings()
-    http = FakeHttpClient([FakeHttpResponse(status_code=401, body={"error": "bad key"})])
-    uploader = FalMediaUploader(settings, http=http)
-
-    with pytest.raises(PublishError, match="401"):
-        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
 
 
-def test_fal_uploader_rejects_loopback_upload_url():
-    """upload_url이 loopback이면 PUT 전에 거부(SSRF 방어)."""
-    settings = _fal_live_settings()
-    http = FakeHttpClient(
-        [
-            FakeHttpResponse(
-                status_code=200,
-                body={
-                    "file_url": "https://v3.fal.media/files/out.mp4",
-                    "upload_url": "https://127.0.0.1/upload",
-                },
-            )
-        ]
-    )
-    uploader = FalMediaUploader(settings, http=http)
-
-    with pytest.raises(PublishError, match="loopback"):
-        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
-    assert len(http.put_calls) == 0
 
 
-def test_fal_uploader_rejects_non_https_upload_url():
-    """upload_url이 http(비-https)면 거부(SSRF 방어)."""
-    settings = _fal_live_settings()
-    http = FakeHttpClient(
-        [
-            FakeHttpResponse(
-                status_code=200,
-                body={
-                    "file_url": "https://v3.fal.media/files/out.mp4",
-                    "upload_url": "http://storage.fal.media/upload",
-                },
-            )
-        ]
-    )
-    uploader = FalMediaUploader(settings, http=http)
-
-    with pytest.raises(PublishError, match="scheme"):
-        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
-    assert len(http.put_calls) == 0
 
 
-def test_fal_uploader_rejects_internal_domain_upload_url():
-    """upload_url이 클라우드 내부 도메인(metadata.google.internal)이면 거부."""
-    settings = _fal_live_settings()
-    http = FakeHttpClient(
-        [
-            FakeHttpResponse(
-                status_code=200,
-                body={
-                    "file_url": "https://v3.fal.media/files/out.mp4",
-                    "upload_url": "https://metadata.google.internal/upload",
-                },
-            )
-        ]
-    )
-    uploader = FalMediaUploader(settings, http=http)
-
-    with pytest.raises(PublishError, match="내부망"):
-        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
-    assert len(http.put_calls) == 0
 
 
-def test_fal_uploader_rejects_non_fal_file_url():
-    """file_url이 비-fal 호스트면 거부(이후 Instagram에 넘기기 전 차단)."""
-    settings = _fal_live_settings()
-    http = FakeHttpClient(
-        [
-            FakeHttpResponse(
-                status_code=200,
-                body={
-                    "file_url": "https://evil.com/out.mp4",
-                    "upload_url": "https://storage.fal.media/upload?sig=x",
-                },
-            )
-        ]
-    )
-    uploader = FalMediaUploader(settings, http=http)
-
-    with pytest.raises(PublishError, match="호스트"):
-        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
-    assert len(http.put_calls) == 0
 
 
-def test_fal_uploader_initiate_transport_error_does_not_leak_key():
-    """initiate 전송 오류 시 FAL_KEY가 PublishError에 노출되지 않는다."""
-    secret = "SUPER_SECRET_FAL_KEY"
-    settings = _fal_live_settings(FAL_KEY=secret)
-    fake_request = httpx.Request(
-        "POST",
-        "https://rest.alpha.fal.ai/storage/upload/initiate",
-        headers={"Authorization": f"Key {secret}"},
-    )
-    uploader = FalMediaUploader(settings, http=FakeRaisingHttpClient(fake_request))
-
-    with pytest.raises(PublishError) as exc_info:
-        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
-
-    assert secret not in str(exc_info.value)
-    assert exc_info.value.__cause__ is None
 
 
-def test_fal_uploader_put_transport_error_does_not_leak_presigned_url():
-    """presigned PUT 전송 오류 시 upload_url(서명 포함)이 PublishError에 노출되지 않는다.
-
-    initiate는 정상 응답하고 그 다음 PUT에서 TransportError가 발생하는 경로를 핀한다
-    (initiate만 커버하는 테스트로는 PUT 단계 from None 제거를 못 잡는다)."""
-    sig_secret = "PRESIGNED_SIGNATURE_SECRET"
-    presigned = f"https://storage.fal.media/upload/out.mp4?sig={sig_secret}"
-    settings = _fal_live_settings()
-    fake_request = httpx.Request("PUT", presigned)
-
-    class _PutRaisingClient:
-        def post(self, url, **kwargs):
-            return FakeHttpResponse(
-                status_code=200,
-                body={"file_url": "https://v3.fal.media/files/out.mp4", "upload_url": presigned},
-            )
-
-        def put(self, url, **kwargs):
-            raise httpx.TransportError("연결 오류", request=fake_request)
-
-    uploader = FalMediaUploader(settings, http=_PutRaisingClient())
-
-    with pytest.raises(PublishError) as exc_info:
-        uploader.upload(b"V", content_type="video/mp4", file_name="out.mp4")
-
-    assert sig_secret not in str(exc_info.value)
-    assert exc_info.value.__cause__ is None
 
 
-def test_fal_uploader_rejects_cgnat_upload_url():
-    """upload_url이 CGNAT 대역(100.64.0.0/10)이면 거부(not is_global 강화 핀)."""
-    settings = _fal_live_settings()
-    http = FakeHttpClient(
-        [
-            FakeHttpResponse(
-                status_code=200,
-                body={
-                    "file_url": "https://v3.fal.media/files/out.mp4",
-                    "upload_url": "https://100.64.0.1/upload",
-                },
-            )
-        ]
-    )
-    uploader = FalMediaUploader(settings, http=http)
-
-    with pytest.raises(PublishError, match="비공개"):
-        uploader.upload(b"V", content_type="video/mp4", file_name="x.mp4")
-    assert len(http.put_calls) == 0

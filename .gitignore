@@ -41,6 +41,16 @@ data/
 .claude/worktrees/
 .claude/.credentials.json
 
+# 로컬 전용 자동화 스크립트(주간/데일리 보고 등 — 커밋 안 함, 로컬에서만 사용)
+tools/
+
+# 라이선스 폰트 파일(2026-07-10 — '여기어때 잘난체'). 이 저장소는 public이고 폰트
+# 라이선스가 "폰트 파일 수정·복제·배포" 금지를 명시(noonnu.cc 확인) — 영상 렌더 사용
+# 자체는 허용(O)이지만 파일을 public repo에 올리는 건 별개의 재배포라 커밋하지 않는다.
+# 로컬에만 두고 실행: video.py의 폰트 후보 1순위가 이 경로를 찾고, 없으면(CI·새
+# 클론·Docker) 기존 폴백(맑은고딕→Noto CJK→나눔)으로 조용히 넘어간다.
+assets/fonts/
+
 # OS 파일
 Thumbs.db
 .DS_Store

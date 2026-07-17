@@ -91,6 +91,50 @@ def test_script_system_prompt_pins_strong_hook():
     assert "첫 1초" in SCRIPT_SYSTEM_PROMPT
     assert "스크롤" in SCRIPT_SYSTEM_PROMPT
     assert "밋밋한" in SCRIPT_SYSTEM_PROMPT and "금지" in SCRIPT_SYSTEM_PROMPT
+    # 2026-07-16 KR 쇼츠 트렌드 반영(PO 지시) 핀: 훅 첫 문장 2초 컷 + 패턴 다양화 +
+    # 15초 지점 2차 훅. 지워지면 실패(리버트 가드).
+    assert "15자 이내" in SCRIPT_SYSTEM_PROMPT
+    assert "고정하지 말고" in SCRIPT_SYSTEM_PROMPT
+    assert "2차 훅" in SCRIPT_SYSTEM_PROMPT
+
+
+def test_pick_episode_format_deterministic_and_valid():
+    """편 포맷 로테이션(2026-07-16 PO): 결정적이고, 규칙 dict 키가 로테이션 목록의
+    부분집합이며, 표본에서 전 포맷이 실제로 등장한다."""
+    from nutti.integrations.ai_text import (
+        EPISODE_FORMATS,
+        FORMAT_SCRIPT_RULES,
+        pick_episode_format,
+    )
+
+    assert pick_episode_format("고구마") == pick_episode_format("고구마")
+    assert set(FORMAT_SCRIPT_RULES) <= set(EPISODE_FORMATS)
+    seen = {pick_episode_format(f"주제-{i}") for i in range(300)}
+    assert seen == set(EPISODE_FORMATS)
+
+
+def test_generate_script_injects_format_rule_into_prompt():
+    """포맷 규칙이 있는 편은 유저 프롬프트에 [이번 편 포맷] 블록이 붙고(대본 구조 지시),
+    direct/interview 편은 붙지 않는다 — dry_run이 Script.prompt를 보존하므로 무네트워크 검증."""
+    from nutti.integrations.ai_text import (
+        FORMAT_SCRIPT_RULES,
+        AITextClient,
+        pick_episode_format,
+    )
+    from nutti.config import Settings
+
+    client = AITextClient(Settings(NUTTI_DRY_RUN="true"))
+    quiz_topic = next(
+        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "quiz"
+    )
+    direct_topic = next(
+        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "direct"
+    )
+    quiz_script = client.generate_script(quiz_topic)
+    direct_script = client.generate_script(direct_topic)
+    assert "[이번 편 포맷" in quiz_script.prompt
+    assert FORMAT_SCRIPT_RULES["quiz"] in quiz_script.prompt
+    assert "[이번 편 포맷" not in direct_script.prompt
 
 
 def test_script_system_prompt_bans_brand_in_last_beat():
@@ -106,15 +150,36 @@ def test_script_system_prompt_cta_calm_tone():
     assert "느낌표를 쓰지 말 것" in SCRIPT_SYSTEM_PROMPT
 
 
-def test_script_system_prompt_pins_beat_char_range():
-    """SCRIPT_SYSTEM_PROMPT가 비트당 길이 범위(8초 채움~50자 상한)를 명시한다(리버트 가드).
+def test_topic_system_prompt_bans_brand_in_topic():
+    """주제 프롬프트의 브랜드명 금지 리버트 가드(리뷰 medium — 주제가 영상 장면 묘사에
+    삽입되므로 브랜드명 리터럴이 화면 자막으로 렌더되는 사고 경로)."""
+    from nutti.integrations.ai_text import TOPIC_SYSTEM_PROMPT
 
-    하한(40자)은 비트 사이 빈 구간을 막고, 상한(46자)은 발화가 약 7초 안에 끝나 끝
-    글리치 구간을 적응 트림으로 잘라낼 여유를 남긴다(2026-06-29 PO: 8초 꽉 채우면
-    잘라낼 여유가 없어 글리치가 남고, 고정 트림은 대본별로 대사가 잘림). 회귀 방지 핀.
+    assert "브랜드명" in TOPIC_SYSTEM_PROMPT
+    assert "절대 넣지 않는다" in TOPIC_SYSTEM_PROMPT
+
+
+def test_script_system_prompt_pins_pronunciation_guidance():
+    """발음 리스크 지시 리버트 가드(2026-07-06 PO: '귀진드기'→'귀진득기' 오발음 실측).
+
+    AI 음성이 읽기 어려운 희귀 복합어를 일상어로 풀어 쓰라는 지시가 빠지면 실패한다.
     """
-    assert "40~46자" in SCRIPT_SYSTEM_PROMPT  # 발화 ~7초 종료(끝 여유 확보)
-    assert "46자를 넘겨" in SCRIPT_SYSTEM_PROMPT  # 상한(트림 여유 보호)
+    assert "귀진드기" in SCRIPT_SYSTEM_PROMPT  # 실측 사례 예시가 지시문에 유지
+    assert "발음" in SCRIPT_SYSTEM_PROMPT
+    assert "일상어로 풀어 쓴다" in SCRIPT_SYSTEM_PROMPT
+
+
+def test_script_system_prompt_pins_beat_char_range():
+    """SCRIPT_SYSTEM_PROMPT가 비트당 길이 범위(8초 채움~44자 상한)를 명시한다(리버트 가드).
+
+    하한(38자)은 비트 사이 빈 구간을 막고, 상한(44자)은 발화가 약 7초 안에 끝나 끝
+    글리치 구간을 적응 트림으로 잘라낼 여유를 남긴다(2026-06-29 PO: 8초 꽉 채우면
+    잘라낼 여유가 없어 글리치가 남고, 고정 트림은 대본별로 대사가 잘림). 상한은
+    2026-07-10 PO 지시로 46→44자 타이트화(발화 끝~클립 끝 여유 확대 → 비트 경계
+    유사도 매칭 품질 개선, 실측 근거). 회귀 방지 핀.
+    """
+    assert "38~44자" in SCRIPT_SYSTEM_PROMPT  # 발화 ~7초 종료(끝 여유 확보)
+    assert "44자를 넘겨" in SCRIPT_SYSTEM_PROMPT  # 상한(트림 여유 보호)
 
 
 def test_split_into_beats_strips_bullets_and_numbers():
@@ -227,6 +292,87 @@ def _live_client(msg) -> AITextClient:
     client = AITextClient(settings)
     client._client = _FakeAnthropic(msg)
     return client
+
+
+def _valid_body() -> str:
+    """하드룰 4줄(각 33~46자) 전부 통과하는 대본 본문."""
+    lines = [
+        "강아지 간식 양 열에 아홉은 잘못 알고 있어요 지금 바로 확인해 보세요",
+        "체중 일 킬로그램당 적정 열량 기준이 있어요 간식은 하루 열량의 십 퍼센트",
+        "몸무게별 적정량은 고정이 아니라 활동량에 따라 조금씩 달라지니 살펴보세요",
+        "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인해 보세요",
+    ]
+    assert all(33 <= len(x) <= 46 for x in lines), [len(x) for x in lines]
+    return "\n".join(lines)
+
+
+def test_validate_script_body_passes_clean_script():
+    """하드룰 전부 통과하는 대본은 위반 0건."""
+    from nutti.integrations.ai_text import validate_script_body
+
+    assert validate_script_body(_valid_body()) == []
+
+
+def test_validate_script_body_catches_each_rule():
+    """규칙별 검출: 비트 수·글자수·의성어·발음 리스크·브랜드명·마지막 느낌표."""
+    from nutti.integrations.ai_text import validate_script_body
+
+    base = _valid_body().splitlines()
+
+    def swapped(idx: int, line: str) -> str:
+        lines = base[:]
+        lines[idx] = line
+        return "\n".join(lines)
+
+    # (교체할 줄, 기대 위반 키워드) — 규칙별 1케이스씩.
+    cases = [
+        (0, "강아지가 콜록콜록 기침하면 열에 아홉은 놓치는 위험 신호가 있어요", "의성어"),
+        (1, "짧은 대사", "38~44자"),
+        (2, "귀진드기 감염은 초기에 잡아야 해요 가려움 신호를 놓치지 마세요 꼭", "발음"),
+        (3, "Nutti 계산기로 우리 아이 맞춤 급여량을 오늘 바로 확인해 보세요", "브랜드"),
+        (3, "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인하세요!", "느낌표"),
+    ]
+    assert any("4줄" in v for v in validate_script_body("\n".join(base[:3])))
+    for idx, line, keyword in cases:
+        violations = validate_script_body(swapped(idx, line))
+        assert any(keyword in v for v in violations), (keyword, violations)
+
+
+def test_generate_script_regenerates_on_hard_rule_violation(monkeypatch):
+    """하드룰 위반 대본 → 위반 사유를 붙여 자동 재생성, 통과본으로 확정."""
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)  # _client=None → 폴백(_llm_text) 경로
+    bodies = iter(["강아지가 콜록콜록 짧은 대사", _valid_body()])
+    prompts: list[str] = []
+
+    def fake_llm(full, **_kw):
+        prompts.append(full)
+        return next(bodies)
+
+    monkeypatch.setattr(client, "_llm_text", fake_llm)
+    script = client.generate_script("간식 적정량")
+    assert len(prompts) == 2  # 1회 위반 → 1회 재생성
+    assert "하드룰 위반" in prompts[1] and "의성어" in prompts[1]  # 위반 사유가 피드백으로
+    assert script.body == _valid_body()
+    assert len(script.beats) == 4
+
+
+def test_generate_script_gives_up_after_max_tries(monkeypatch):
+    """재시도 소진 시 마지막 결과로 진행(파이프라인 중단 금지 — 검수①이 안전망)."""
+    from nutti.integrations.ai_text import _SCRIPT_MAX_TRIES
+
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    calls = {"n": 0}
+
+    def fake_llm(full, **_kw):
+        calls["n"] += 1
+        return "항상 위반하는 짧은 대사"
+
+    monkeypatch.setattr(client, "_llm_text", fake_llm)
+    script = client.generate_script("간식 적정량")
+    assert calls["n"] == _SCRIPT_MAX_TRIES
+    assert script.body == "항상 위반하는 짧은 대사"  # 마지막 결과 유지, 예외 없음
 
 
 def test_fact_check_parse_failure_fails_safe():
@@ -554,4 +700,37 @@ def test_clean_topic_preserves_leading_numbers_in_title():
 def test_clean_topic_empty_returns_blank():
     assert _clean_topic("") == ""
     assert _clean_topic("   \n  ") == ""
+
+
+# --- 화면 텍스트 판정(judge_frames_have_text — 영상 QC 외계어 자막 차단용) ---
+
+
+def test_judge_frames_have_text_dry_run_returns_none():
+    """dry_run은 항상 보류(None) — 외부 호출 없는 결정적 시뮬레이션 계약."""
+    assert _client().judge_frames_have_text(["f.png"]) is None
+
+
+def test_judge_frames_have_text_empty_paths_returns_none():
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    assert AITextClient(settings).judge_frames_have_text([]) is None
+
+
+def test_judge_frames_have_text_parses_yes_no(monkeypatch):
+    """claude -p 폴백 경로: YES→True, no→False, 그 외→None(보류). 프롬프트에 파일 경로 포함."""
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    prompts: list[str] = []
+    answers = {"value": "YES"}
+
+    def fake_llm(self, prompt, max_tokens=1024):
+        prompts.append(prompt)
+        return answers["value"]
+
+    monkeypatch.setattr(AITextClient, "_llm_text", fake_llm)
+    assert client.judge_frames_have_text(["C:/x/f1.png", "C:/x/f2.png"]) is True
+    assert "C:/x/f1.png" in prompts[-1] and "C:/x/f2.png" in prompts[-1]
+    answers["value"] = "no"
+    assert client.judge_frames_have_text(["f.png"]) is False
+    answers["value"] = "잘 모르겠어요"
+    assert client.judge_frames_have_text(["f.png"]) is None
 

@@ -16,7 +16,7 @@ dry_run이면 네트워크/SDK 없이 결정적 더미 결과를 반환해 파�
 | `video_veo_fal.py` | `FalVeoClient`: fal.ai Veo 3.1 image-to-video(제출→폴링→다운로드). 비트당 8초 클립 |
 | `image_kontext.py` | `FalKontextClient`: fal.ai FLUX.1 Kontext [pro] 시작 프레임 생성(레퍼런스 이미지를 fal-storage 업로드 후 편집) |
 | `_fal_common.py` | fal.ai 큐 REST 공통 헬퍼(상수·`_fal_headers`·`_validate_*`·SSRF 가드). image_kontext·video_veo_fal이 공유 |
-| `publishing.py` | `Publisher`: YouTube Data API·Instagram Graph API 업로드 + 성과 조회. `FalMediaUploader`로 로컬 영상을 fal-storage에 업로드해 공개 URL(*.fal.media)을 만들어 Instagram `video_url`로 넘긴다(Meta가 직접 cURL). image_kontext와 동일한 fal-storage 흐름 |
+| `publishing.py` | `Publisher`: YouTube Data API 자동 업로드 + YouTube/Instagram 성과 조회. Instagram 자동 게시는 제거(수동 텔레그램 핸드오프, 2026-06-18 PO) — 인사이트 조회만 유지 |
 | `telegram.py` | `TelegramClient`: Bot API 래퍼(sendMessage/getUpdates/answerCallback/editMessageText). `_call`이 오류를 분류 |
 
 ## For AI Agents

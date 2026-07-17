@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from typing import Optional
 
@@ -21,6 +22,16 @@ from nutti.pipeline.cost import format_cost
 from nutti.pipeline.cost_ledger import CostLedger, format_summary, summarize_records
 from nutti.pipeline.orchestrator import GateRejected, Orchestrator
 
+# Windows 콘솔/리다이렉트(cp949)에서 분석 텍스트의 유니코드(— 등)가 UnicodeEncodeError로
+# 마지막 출력을 죽이는 것 방지(실측 2026-07-06: 업로드·상태저장 성공 후 최종 print에서
+# exit 1). 인코딩 불가 문자만 ?로 대체 — 콘솔 표시 전용, 데이터 경로와 무관.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(errors="replace")
+        except (OSError, ValueError):  # pragma: no cover - 특수 콘솔 방어
+            pass
+
 app = typer.Typer(help="Nutti 애견간식 콘텐츠 자동화 파이프라인")
 
 
@@ -29,7 +40,9 @@ def run(
     topic: Optional[str] = typer.Argument(
         None, help="대본 주제(생략 시 직전 성과·최근 주제를 반영해 자동 생성)"
     ),
-    reels: bool = typer.Option(False, "--reels", help="인스타 릴스도 함께 업로드"),
+    reels: bool = typer.Option(
+        False, "--reels", help="인스타 릴스용 영상·캡션을 텔레그램으로 핸드오프(수동 업로드)"
+    ),
     feedback: str = typer.Option(
         "", "--feedback", help="이전 사이클 개선 포인트(생략 시 직전 분석을 자동 사용)"
     ),
@@ -44,6 +57,14 @@ def run(
     fmt = ContentFormat.REELS if reels else ContentFormat.SHORTS
 
     orchestrator = Orchestrator(settings)
+    # 성과 수집: 숙성된(며칠 지난) 직전 업로드의 조회수를 걷어 이번 사이클 피드백으로
+    # 저장한다. 업로드 직후엔 Analytics가 0이라, 수집은 항상 지난 사이클 영상을 대상으로
+    # 지연 수행한다(collect_ready_feedback). resolve_inputs보다 먼저 호출해 방금 걷은
+    # 피드백이 이번 대본에 곧바로 반영되게 한다.
+    analysis = orchestrator.collect_ready_feedback()
+    if analysis:
+        typer.echo(f"[직전 업로드 성과 분석 → 피드백 저장]\n{analysis}\n")
+
     # 피드백 자동 연결 + (주제 미지정 시) 주제 자동 생성.
     topic, feedback = orchestrator.resolve_inputs(topic, feedback)
     typer.secho(f"주제: {topic}", fg=typer.colors.CYAN)
@@ -64,8 +85,7 @@ def run(
         typer.echo("")
         typer.secho(format_cost(result.cost), fg=typer.colors.MAGENTA)
 
-    analysis = orchestrator.collect_and_analyze(result)
-    typer.echo(f"\n[성과 분석 → 다음 사이클 피드백으로 저장됨]\n{analysis}")
+    typer.echo("\n[이번 업로드는 성과 수집 대기 큐에 등록됨 — 며칠 뒤 다음 실행에서 분석]")
 
 
 @app.command()

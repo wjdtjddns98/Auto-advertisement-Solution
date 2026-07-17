@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import zlib
 
 from pydantic import BaseModel
 
@@ -23,31 +24,94 @@ log = get_logger(__name__)
 # 한국어 프롬프트라 PO가 직접 고쳐도 안전하다.
 SCRIPT_SYSTEM_PROMPT = (
     "너는 애견 수제간식 브랜드 'Nutti'의 콘텐츠 작가다. "
-    "수의학·사실에 기반한 강아지 건강/다이어트/음식 정보를 다룬다. "
+    "수의학·사실에 기반한 강아지 건강/다이어트/음식 정보를 다루되, 어떤 주제든 간식·영양·"
+    "급여와 반드시 연결한다(브랜드 정체성 — 2026-07-07 PO). 건강 이상 신호를 다루는 주제라면 "
+    "③실용 팁 비트에서 그 상황의 간식·급여 관리 요령(양 줄이기·재료 바꾸기·수분 보충 등)으로 "
+    "자연스럽게 잇는다. 단, 간식으로 질병을 치료·예방한다는 식의 근거 없는 효능 주장은 금지. "
     "약 35초 분량의 쇼츠/릴스 대본을 '정확히 4개의 비트'로 쓴다: "
     "①훅 ②핵심설명 ③핵심설명·실용 팁 ④마무리·CTA"
-    "①훅이 가장 중요하다 — 첫 1초 안에 스크롤을 멈춰 세워야 한다. 구체적 숫자·충격적 "
-    "사실('열에 아홉은 잘못…'), '이거 모르면 큰일나는'식 위기감, 통념을 뒤집는 반전, 또는 "
-    "시청자를 직격하는 뜨끔한 질문 중 하나로 강하게 연다. 밋밋한 인사·자기소개·일반적 주제 "
-    "소개, '오늘은 ~에 대해'식 도입, 누구나 아는 뻔한 말은 절대 금지한다. 설명하듯 풀지 말고 "
+    "①훅이 가장 중요하다 — 첫 1초 안에 스크롤을 멈춰 세워야 한다. 훅 비트의 첫 문장은 "
+    "공백 포함 15자 이내의 한 방으로 짧게 끊는다(발화 2초 안에 끝나야 스와이프 판단을 "
+    "이긴다 — 2026-07-16 KR 쇼츠 트렌드 반영). 패턴은 ⓐ뜨끔한 질문 ⓑ구체적 숫자·충격 "
+    "사실('열에 아홉은 잘못…') ⓒ통념을 뒤집는 반전 ⓓ문장을 중간에 끊어 궁금하게 만드는 "
+    "호기심형 중 주제에 가장 맞는 것을 고르되, 한 패턴('~다면 넘기지 마세요'류 경고형)에 "
+    "고정하지 말고 편마다 다양하게 쓴다. 그 숫자·반전·질문이 첫 문장 맨 앞에 바로 나와야 "
+    "한다 — 배경 설명을 먼저 깔고 뒤에 등장시키면 안 된다. "
+    "밋밋한 인사·자기소개·일반적 주제 소개, '오늘은 ~에 대해'식 도입, '혹시 ~하시나요'류 "
+    "완곡한 질문, 누구나 아는 뻔한 말은 절대 금지한다. 설명하듯 풀지 말고 "
     "시청자(우리 아이)를 곧장 찌르는 한 방으로 시작해 끝까지 긴장을 끌고 간다. "
+    "②비트는 앞 비트를 반복·요약하며 열지 말고 반전·상승 전환('근데 진짜 문제는 따로 "
+    "있어요'식)으로 열어 15초 지점의 2차 훅을 만든다(알고리즘이 15초 잔존을 확산 기준으로 "
+    "본다). "
     "④마무리 비트(CTA)에서는 브랜드 이름('Nutti'·'누띠')을 절대 언급하지 않는다. 또한 "
     "느낌표·외침 같은 들뜬 톤 대신 앞 비트와 같은 차분한 권유체로 쓴다(영상에서 마지막 "
     "비트 음성이 들뜨며 화자가 바뀌는 경향을 줄이기 위함 — 끝에 느낌표를 쓰지 말 것). — "
     "각 비트는 강아지 마스코트가 말하는 8초짜리 한 클립이 된다 — 발화가 약 7초 안에 끝나 "
-    "끝에 약간 여유가 남도록 한국어 2문장, 공백 포함 40~46자로 쓴다(너무 짧으면 비트 사이가 "
-    "비고, 46자를 넘겨 8초를 꽉 채우면 끝 글리치 구간을 잘라낼 여유가 없어진다). "
+    "끝에 약간 여유가 남도록 한국어 2문장, 공백 포함 38~44자로 쓴다(너무 짧으면 비트 사이가 "
+    "비고, 44자를 넘겨 8초 가까이 채우면 발화 끝~클립 끝 여유가 줄어 비트 경계 스티칭이 "
+    "덜 매끄러워진다 — 2026-07-10 실측: 발화가 일찍 끝날수록 경계 프레임 매칭 품질이 좋다). "
+    "대사는 AI 음성이 그대로 읽는다 — 발음이 꼬이기 쉬운 단어(희귀 복합명사, 받침·경음이 "
+    "연달아 붙는 표현, 예: '귀진드기' 같은 전문 복합어)는 자연스러운 일상어로 풀어 쓴다"
+    "('귀에 사는 진드기', '외이염' 등 또박또박 읽히는 형태). 의학 용어가 꼭 필요하면 짧고 "
+    "발음이 명확한 단어를 고르고, 긴 복합어는 쉼표로 끊어 읽기 쉽게 나눈다. "
     "반드시 팩트체크 가능한 내용만 포함하고, 과장·근거 없는 의학 주장은 금지한다. "
     "출력은 각 비트를 줄바꿈으로 구분해 정확히 4줄로 — 머리말·번호·따옴표 없이 대사 문장만."
 )
 # ======================= PO 수정 구역 끝 (대본 톤·내용) =======================
 
+# ==================== PO 수정 구역 (편별 대본 포맷 로테이션) ====================
+# 편마다 대본 구조·톤이 바뀐다(2026-07-16 PO — 포맷 다양화, KR 쇼츠 트렌드).
+# 포맷은 "주제 문자열" 해시로 대본 생성 전에 결정된다 — script.id는 대본 생성 후에야
+# 생기므로 쓸 수 없고, 주제 해시라야 대본 구조(여기)와 영상 연출(video.pick_episode_style)
+# 이 같은 포맷을 공유한다. direct×2로 기본 정보전달 비중을 유지한다.
+EPISODE_FORMATS = ["direct", "direct", "interview", "vet", "quiz", "ranking", "vlog"]
+
+# 포맷별 대본 추가 지시. 하드룰 파서(4비트·글자수·의성어 금지 등)는 그대로 적용되므로
+# 구조·톤만 지시한다. direct·interview는 현행 대본 규칙 그대로(추가 지시 없음 —
+# interview는 영상 연출만 다름). 줄 머리에 '3.' 같은 숫자+구두점을 쓰지 말 것
+# (_split_into_beats가 번호 매김으로 오인해 제거한다).
+FORMAT_SCRIPT_RULES = {
+    "vet": (
+        "이번 편은 수의사 상황극이다: 마스코트가 동물병원 진료실의 수의사 선생님으로서 "
+        "보호자에게 설명하는 톤으로 쓴다('보호자님' 호칭을 1~2회 자연스럽게 사용). "
+        "진료하듯 차분하고 신뢰감 있게, 단 어린 목소리 페르소나 자체는 유지한다."
+    ),
+    "quiz": (
+        "이번 편은 O/X 퀴즈다: ①훅 비트는 O/X로 답할 수 있는 질문으로 끝난다"
+        "(예: '맞을까요, 틀릴까요?'). ②비트는 정답을 아직 밝히지 않고 힌트나 흔한 "
+        "오해를 짚는다. ③비트 첫 문장에서 정답을 공개하고 이유를 설명한다. "
+        "④비트는 기존 마무리·CTA 규칙 그대로."
+    ),
+    "ranking": (
+        "이번 편은 카운트다운 랭킹이다: ①훅에서 '세 가지'를 예고해 끝까지 보게 만들고, "
+        "②비트=3위, ③비트=2위, ④비트=1위 공개 후 기존 CTA 규칙대로 마무리한다. "
+        "1위가 가장 중요하거나 의외인 정보여야 한다. 순위는 '3위는'처럼 문장 안에서 "
+        "말로 풀어 쓴다(줄 머리 번호 매김 금지)."
+    ),
+    "vlog": (
+        "이번 편은 강아지 1인칭 브이로그다: 마스코트가 오늘 자기가 직접 겪은 일처럼 "
+        "후기 톤으로 정보를 풀어낸다(예: '나 오늘 병원 다녀왔어'). 반말 혼잣말 톤을 "
+        "허용하되 정보의 정확성 규칙은 그대로 지킨다."
+    ),
+}
+# ================== PO 수정 구역 끝 (편별 대본 포맷 로테이션) ==================
+
+
+def pick_episode_format(key: str) -> str:
+    """문자열(주제) CRC32로 편 포맷을 결정적으로 고른다 — 대본·영상이 공유하는 단일 소스."""
+    return EPISODE_FORMATS[zlib.crc32(f"format:{key}".encode()) % len(EPISODE_FORMATS)]
+
 # 주제 자동 생성용 시스템 프롬프트(다음 사이클에 다룰 쇼츠 주제 1개 제안).
 TOPIC_SYSTEM_PROMPT = (
     "너는 애견 수제간식 브랜드 'Nutti'의 콘텐츠 기획자다. "
     "수의학·사실에 기반한 강아지 건강/다이어트/음식 정보를 다루는 30초 쇼츠 주제를 "
-    "딱 한 개 제안한다. 최근 다룬 주제와 겹치지 않게 하고, 성과 분석 피드백이 있으면 "
-    "그 방향(잘 된 포맷·소재)을 반영한다. 검색·시청 욕구를 자극하되 과장은 피한다."
+    "딱 한 개 제안한다. 주제는 반드시 간식·영양·급여와 연관돼야 한다(브랜드 정체성 — "
+    "2026-07-07 PO): 순수 질환 정보로만 끝나는 주제는 금지하고, 건강 이상 신호를 다루더라도 "
+    "'그때의 간식·급여 관리' 각도가 주제 문안에 드러나게 잡는다. "
+    "최근 다룬 주제와 겹치지 않게 하고, 성과 분석 피드백이 있으면 "
+    "그 방향(잘 된 포맷·소재)을 반영한다. 검색·시청 욕구를 자극하되 과장은 피한다. "
+    "주제 문안에 브랜드명('Nutti'·'누띠')은 절대 넣지 않는다 — 주제는 영상 장면 묘사에 "
+    "그대로 삽입되며 브랜드명 리터럴은 화면 자막으로 렌더되는 실측 사고가 있다."
 )
 
 # dry_run 및 폴백용 주제 시드(외부 호출 없이 매 사이클 다른 주제가 나오도록).
@@ -215,6 +279,65 @@ def _split_into_beats(text: str, n: int = 4) -> list[str]:
     return sentences or ([joined] if joined else [])
 
 
+# ==================== 대본 하드룰 파서(2026-07-07 PO 지시) ====================
+# 프롬프트 지시는 모델이 "참고사항"으로 취급해 간헐적으로 어긴다(실측: 의성어·발음
+# 리스크 단어 잔존). 아래 규칙은 코드 레벨로 강제하고, 위반 시 위반 사유를 붙여
+# 자동 재생성한다. 목록은 실측 축적 — 새 사례가 나오면 여기에 추가.
+_BEAT_COUNT = 4
+# 지시상 38~44자지만 하드룰은 완충(재생성 무한루프 방지). 이 범위 밖만 반려.
+# 2026-07-10 PO 지시로 상한을 타이트하게(40~46→38~44) — 발화가 8초를 덜 채울수록
+# 비트 경계 유사도 매칭 여유(발화 끝~클립 끝)가 커져 스티칭이 더 매끄럽다(실측).
+_BEAT_MIN_CHARS, _BEAT_MAX_CHARS = 33, 46
+# 의성어 — 대사에 들어가면 Veo가 효과음을 내며 입모양이 어긋난다(립싱크 붕괴 실측:
+# '콜록콜록'). 서술("기침을 한다면")로 풀어 쓰게 강제한다.
+_BANNED_ONOMATOPOEIA = [
+    "콜록", "쿨럭", "캑캑", "에취", "멍멍", "왈왈", "킁킁", "낑낑", "헥헥", "그르렁",
+]
+# 발음 리스크 — Veo TTS가 오발음한 실측 단어 축적('귀진드기'→'귀진득기').
+_PRONUNCIATION_BLOCKLIST = ["귀진드기"]
+# CTA 브랜드명 금지(시스템 프롬프트 지시의 하드룰판).
+_BRAND_BLOCKLIST = ["nutti", "누띠", "누티"]
+
+
+def validate_script_body(body: str) -> list[str]:
+    """대본 하드룰 검증 — 위반 사유 목록을 반환한다(빈 리스트=통과).
+
+    각 사유는 모델에게 재생성 피드백으로 그대로 전달되므로 "무엇을 어떻게 고칠지"
+    형태의 한국어 문장으로 쓴다.
+    """
+    lines = [ln.strip() for ln in (body or "").splitlines() if ln.strip()]
+    violations: list[str] = []
+    if len(lines) != _BEAT_COUNT:
+        violations.append(f"비트가 {len(lines)}줄 — 정확히 {_BEAT_COUNT}줄로 다시 쓸 것")
+    for i, ln in enumerate(lines, start=1):
+        if not (_BEAT_MIN_CHARS <= len(ln) <= _BEAT_MAX_CHARS):
+            violations.append(
+                f"{i}번 비트가 {len(ln)}자 — 공백 포함 38~44자로 다시 쓸 것"
+            )
+        for word in _BANNED_ONOMATOPOEIA:
+            if word in ln:
+                violations.append(
+                    f"{i}번 비트에 의성어 '{word}' — 의성어는 영상에서 입모양과 "
+                    "어긋나므로 금지, 서술형으로 풀어 쓸 것"
+                )
+        for word in _PRONUNCIATION_BLOCKLIST:
+            if word in ln:
+                violations.append(
+                    f"{i}번 비트에 발음이 어려운 단어 '{word}' — 일상어로 풀어 쓸 것"
+                )
+        for word in _BRAND_BLOCKLIST:
+            if word in ln.lower():
+                violations.append(f"{i}번 비트에 브랜드명 '{word}' — 브랜드명 언급 금지")
+    if lines and "!" in lines[-1]:
+        violations.append("마지막 비트에 느낌표 — 차분한 권유체로 느낌표 없이 쓸 것")
+    return violations
+
+
+# 하드룰 위반 시 재생성 횟수(최초 1회 + 재시도 2회). 초과하면 마지막 결과를 그대로
+# 반환하고 경고 로그를 남긴다 — 최종 안전망은 텔레그램 검수①(사람).
+_SCRIPT_MAX_TRIES = 3
+
+
 class AITextClient:
     """Anthropic SDK 래퍼. dry_run이면 더미 대본/메타데이터를 생성한다."""
 
@@ -237,6 +360,12 @@ class AITextClient:
         prompt = f"주제: {topic}\n"
         if feedback:
             prompt += f"\n[이전 사이클 개선 포인트]\n{feedback}\n"
+        # 편별 포맷(2026-07-16 PO): 주제 해시로 결정 — video.pick_episode_style과 동일
+        # 소스라 대본 구조와 영상 연출이 항상 같은 포맷을 본다. 시스템 프롬프트가 아닌
+        # 유저 프롬프트에 붙여 prompt caching(ephemeral)을 깨지 않는다.
+        fmt_rule = FORMAT_SCRIPT_RULES.get(pick_episode_format(topic))
+        if fmt_rule:
+            prompt += f"\n[이번 편 포맷 — 반드시 이 구조로]\n{fmt_rule}\n"
         prompt += "\n위 주제로 35초 쇼츠 대본을 비트별로 정확히 4줄로 작성해줘."
 
         if self.settings.dry_run:
@@ -257,10 +386,46 @@ class AITextClient:
                 fact_checked=True,
             )
 
-        if self._client is None:
-            # 비-dry_run + Anthropic 키 없음 → claude -p(Claude Code) 폴백.
-            return self._generate_via_fallback(topic, prompt)
+        # 라이브 경로(API/폴백 공통): 하드룰 파서 위반 시 위반 사유를 붙여 재생성
+        # (2026-07-07 PO — 프롬프트 지시만으로는 의성어·발음 리스크가 새는 실측).
+        body = ""
+        gen_prompt = prompt
+        for attempt in range(1, _SCRIPT_MAX_TRIES + 1):
+            body = self._generate_body_once(gen_prompt)
+            violations = validate_script_body(body)
+            if not violations:
+                break
+            log.warning(
+                "script.hard_rule_violation",
+                attempt=attempt,
+                violations=violations,
+            )
+            gen_prompt = (
+                f"{prompt}\n[하드룰 위반 — 아래를 반드시 고쳐 대사 4줄만 다시 출력]\n- "
+                + "\n- ".join(violations)
+            )
+        else:
+            # 재시도 소진 — 마지막 결과로 진행(최종 안전망 = 텔레그램 검수①).
+            log.warning("script.hard_rule_gave_up", tries=_SCRIPT_MAX_TRIES)
+        # 실제 모드에서는 호출자가 fact_check_script로 검증/갱신한다.
+        return Script(
+            topic=topic,
+            body=body,
+            prompt=prompt,
+            beats=_split_into_beats(body),
+            fact_checked=False,
+        )
 
+    def _generate_body_once(self, prompt: str) -> str:
+        """대본 본문 1회 생성 — Anthropic API 우선, 키 없으면 claude -p 폴백."""
+        if self._client is None:
+            full = (
+                f"{SCRIPT_SYSTEM_PROMPT}\n\n{prompt}\n\n"
+                "비트별로 정확히 4줄만 출력해줘. 머리말·번호·설명·코드블록 없이 대사 문장만."
+            )
+            body = self._llm_text(full, max_tokens=1024)
+            log.info("script.generated_via_fallback", chars=len(body))
+            return body
         # 시스템 프롬프트에 prompt caching 적용(ephemeral).
         msg = self._client.messages.create(
             model=self.settings.script_model,
@@ -274,15 +439,7 @@ class AITextClient:
             ],
             messages=[{"role": "user", "content": prompt}],
         )
-        body = _first_text(msg)
-        # 실제 모드에서는 호출자가 fact_check_script로 검증/갱신한다.
-        return Script(
-            topic=topic,
-            body=body,
-            prompt=prompt,
-            beats=_split_into_beats(body),
-            fact_checked=False,
-        )
+        return _first_text(msg)
 
     def _claude_cli(self, full_prompt: str) -> str:
         """claude -p(헤드리스 print 모드)로 프롬프트를 보내고 stdout(텍스트)을 반환.
@@ -321,21 +478,64 @@ class AITextClient:
         """
         return self._claude_cli(full_prompt)
 
-    def _generate_via_fallback(self, topic: str, prompt: str) -> Script:
-        """Anthropic API 대신 Claude Code(claude -p)로 대본 생성 — 추가 키/과금 없음."""
-        full = (
-            f"{SCRIPT_SYSTEM_PROMPT}\n\n{prompt}\n\n"
-            "비트별로 정확히 4줄만 출력해줘. 머리말·번호·설명·코드블록 없이 대사 문장만."
-        )
-        body = self._llm_text(full, max_tokens=1024)
-        log.info("script.generated_via_fallback", topic=topic, chars=len(body))
-        return Script(
-            topic=topic,
-            body=body,
-            prompt=prompt,
-            beats=_split_into_beats(body),
-            fact_checked=False,
-        )
+    # 영상 QC용 화면 텍스트 판정 프롬프트 — 우리가 굽는 하단 자막은 비트 클립 단계에는
+    # 아직 없으므로, 비트 클립 프레임에서 글자가 보이면 전부 Veo가 임의로 그린 결함이다.
+    _TEXT_OVERLAY_JUDGE_PROMPT = (
+        "당신은 영상 QC 검사원입니다. 첨부된 이미지들은 AI 생성 쇼츠 영상에서 뽑은 "
+        "스틸 프레임입니다. 프레임 화면 안에 렌더링된 글자(자막·캡션·문자·단어·"
+        "워터마크·로고 텍스트 — 언어 무관, 깨진 글자 포함)가 하나라도 보이면 YES, "
+        "전혀 없으면 NO만 출력하세요. 다른 말은 붙이지 마세요."
+    )
+
+    def judge_frames_have_text(self, frame_paths: list[str]) -> bool | None:
+        """프레임 이미지들에 렌더된 글자가 보이는지 Claude 비전으로 판정한다.
+
+        영상 QC(외계어 자막 차단, video._qc_text_overlay)가 쓴다. 반환:
+        True(글자 있음 → 해당 비트 재생성) / False(없음) / None(판단 보류 —
+        dry_run이거나 응답이 YES/NO가 아님). 경로는 3-way: dry_run→보류,
+        API 키 있음→Anthropic 비전, 없음→claude -p(Claude Code가 파일을 직접 읽음).
+        호출부(video)가 예외를 보류로 삼키므로 여기선 전파해도 안전하다.
+        """
+        if self.settings.dry_run or not frame_paths:
+            return None
+        if self._client is not None:
+            import base64
+            from pathlib import Path
+
+            content: list[dict] = []
+            for p in frame_paths:
+                data = base64.b64encode(Path(p).read_bytes()).decode("ascii")
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": data,
+                        },
+                    }
+                )
+            content.append({"type": "text", "text": self._TEXT_OVERLAY_JUDGE_PROMPT})
+            msg = self._client.messages.create(
+                model=self.settings.script_model,
+                max_tokens=8,
+                messages=[{"role": "user", "content": content}],
+            )
+            answer = _first_text(msg)
+        else:
+            prompt = (
+                f"{self._TEXT_OVERLAY_JUDGE_PROMPT}\n\n"
+                "아래 이미지 파일들을 Read 도구로 하나씩 직접 열어 확인한 뒤 판정하세요:\n"
+                + "\n".join(frame_paths)
+            )
+            answer = self._llm_text(prompt, max_tokens=8)
+        a = (answer or "").strip().upper()
+        if a.startswith("YES"):
+            return True
+        if a.startswith("NO"):
+            return False
+        log.warning("qc.text_judge.unparseable")
+        return None
 
     def _fact_check_via_fallback(self, script: Script) -> FactCheckResult:
         """Anthropic API 없이 Claude Code(claude -p)로 팩트체크 — 안전 게이트 유지.
