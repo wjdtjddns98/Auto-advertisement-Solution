@@ -237,6 +237,28 @@ def test_frame_prompt_sanitizes_topic():
     assert "No people, no humans in costume, no other animals." in prompt
 
 
+def test_frame_prompt_shot_rotation_deterministic_and_diverse():
+    """구도·표정 로테이션(2026-07-20 PO — 썸네일 단조 해소): script.id로 결정적 선택.
+
+    같은 id는 항상 같은 구도, 서로 다른 id 집합은 _FRAME_SHOTS 전 항목을 커버해야
+    한다(로테이션 배선 검증). 모든 항목은 ASCII 작은따옴표 금지(하드가드 계약).
+    """
+    from types import SimpleNamespace
+
+    style = EpisodeStyle("a sporty grey hoodie", "sitting on a park bench", "", "direct")
+    s1 = SimpleNamespace(topic="주제", id="shot-fixed")
+    assert VideoStudio._frame_prompt(s1, style) == VideoStudio._frame_prompt(s1, style)
+    seen: set[int] = set()
+    for i in range(50):
+        p = VideoStudio._frame_prompt(SimpleNamespace(topic="주제", id=f"id-{i}"), style)
+        for j, shot in enumerate(video_module._FRAME_SHOTS):
+            if shot in p:
+                seen.add(j)
+    assert seen == set(range(len(video_module._FRAME_SHOTS)))
+    for shot in video_module._FRAME_SHOTS:
+        assert "'" not in shot
+
+
 # --- 섹션 3: VideoStudio.produce() dry_run ---
 
 
