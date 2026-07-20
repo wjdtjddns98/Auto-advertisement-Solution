@@ -1467,7 +1467,7 @@ def test_vet_format_forces_clinic_set_without_prop():
     assert s.prop == ""
     # 프레임 프롬프트에도 그대로 실린다(FLF 앵커 일치).
     prompt = VideoStudio._frame_prompt(_script(), s)
-    assert "veterinarian coat" in prompt and "veterinary clinic" in prompt
+    assert "veterinarian scrub" in prompt and "veterinary clinic" in prompt
 
 
 def test_build_beat_scene_includes_prop_only_when_set():
