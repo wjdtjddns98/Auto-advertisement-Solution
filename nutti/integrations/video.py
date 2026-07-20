@@ -578,11 +578,17 @@ class VeoPromptBuilder:
     # 2026-07-16 PO("캐릭터가 너무 정적이라 밋밋함"): 중간 비트의 제스처 어휘를
     # _MOTION_FINAL_FREE에서 이미 검증된 수준(앞발 흔들기·귀 쫑긋·꼬리 흔들기·상체
     # 리액션)으로 확대. 화면 이탈·기립·끝 페이드 가드와 FLF 끝 포즈 수렴은 그대로 유지.
+    # 2026-07-20 PO("팔을 너무 자주 흔듦, 자연스러운 움직임 필요"): 앞발 제스처를
+    # "클립당 최대 1회, 반복 금지"로 제한하고 고개·귀·꼬리·무게 이동·표정 중심으로 전환
+    # (_MOTION_FINAL_FREE 동일). 어휘 목록 앞쪽의 paw waves를 Veo가 과도 샘플링한 부작용.
     _MOTION_LIVELY = (
         "The puppy stays seated and centered in frame the whole time but moves naturally "
-        "and expressively as it talks — happy head tilts, little paw waves, excited ear "
-        "wiggles, a joyful tail wag, leaning slightly toward the camera, and lively "
-        "expressive reactions that bring real energy and charm to the shot. It is already "
+        "and expressively as it talks — gentle head tilts, small ear twitches, a joyful "
+        "tail wag, subtle shifts of body weight, leaning slightly toward the camera, and "
+        "lively facial expressions that bring real energy and charm to the shot. Its "
+        "front paws stay relaxed on the ground almost the entire time — at most one "
+        "brief, small paw gesture in the whole clip, never repeated or constant paw "
+        "waving. It is already "
         "in lively motion from the very first moments of the clip — it starts talking and "
         "moving right away, with no still, frozen, or slow warm-up intro. It never "
         "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
@@ -597,8 +603,9 @@ class VeoPromptBuilder:
     # 페이드/글리치 같은 깨짐 방지 최소 가드만 남긴다.
     _MOTION_FINAL_FREE = (
         "The puppy stays seated and centered in frame but is free to be playful and "
-        "adorable as it talks — happy head tilts, little paw waves, excited ear wiggles, "
-        "a joyful tail wag, cute expressive reactions. Let its natural charm show; no "
+        "adorable as it talks — happy head tilts, excited ear wiggles, a joyful tail "
+        "wag, cute expressive reactions; at most one brief, small paw gesture, never "
+        "repeated or constant paw waving. Let its natural charm show; no "
         "forced calm-down at the end. It never leaves the frame. The clip ends on a "
         "clean, fully-lit, sharp frame — no fade-out, no dimming, no blur, no warping, "
         "and no glitch at the end."
