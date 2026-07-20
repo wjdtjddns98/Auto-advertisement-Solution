@@ -1462,11 +1462,11 @@ def test_pick_episode_style_includes_prop_and_format():
     # 결정성: 같은 id는 항상 같은 소품·포맷.
     assert pick_episode_style("abc").prop == pick_episode_style("abc").prop
     assert pick_episode_style("abc").fmt == pick_episode_style("abc").fmt
-    # 40편 표본에서 소품 있는 편과 인터뷰 포맷 편이 실제로 등장한다(로테이션 유효성).
+    # 40편 표본에서 소품 있는 편과 3종 포맷(2026-07-20 PO 축소: vlog/interview/vet)이
+    # 전부 실제로 등장한다(로테이션 유효성).
     styles = [pick_episode_style(f"script-{i}") for i in range(40)]
     assert any(s.prop for s in styles)
-    assert any(s.fmt == "interview" for s in styles)
-    assert any(s.fmt == "direct" for s in styles)
+    assert {s.fmt for s in styles} == set(EPISODE_FORMATS)
 
 
 def test_pick_episode_style_format_follows_topic_not_script_id():
@@ -1576,9 +1576,18 @@ def test_produce_clips_direct_format_keeps_mic_out_of_beat_prompts(tmp_path, mon
 
 
 def test_pick_episode_style_deterministic():
-    """같은 script_id면 항상 같은 스타일이 나온다(편 안에서 프레임·전 비트가 공유)."""
-    a = pick_episode_style("abc123")
-    b = pick_episode_style("abc123")
+    """같은 script_id면 항상 같은 스타일이 나온다(편 안에서 프레임·전 비트가 공유).
+
+    로테이션 리스트 검증은 vet 아닌 키로 고정한다 — vet 편은 수의사 세트 고정이라
+    리스트 밖 값이 정상(2026-07-20 3종 축소로 vet 버킷이 1/3이 돼 명시 회피 필수).
+    """
+    from nutti.integrations.ai_text import pick_episode_format
+
+    key = next(
+        f"id-{i}" for i in range(100) if pick_episode_format(f"id-{i}") != "vet"
+    )
+    a = pick_episode_style(key)
+    b = pick_episode_style(key)
     assert a == b
     assert a.outfit in video_module._EPISODE_OUTFITS
     assert a.setting in video_module._EPISODE_SETTINGS
@@ -1600,6 +1609,8 @@ def test_pick_episode_style_outfit_setting_independent():
     mismatched = False
     for i in range(40):
         s = pick_episode_style(f"script-{i}")
+        if s.fmt == "vet":  # vet 편은 수의사 세트 고정 — 로테이션 독립성 표본에서 제외
+            continue
         if video_module._EPISODE_OUTFITS.index(s.outfit) != video_module._EPISODE_SETTINGS.index(
             s.setting
         ):

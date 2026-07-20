@@ -386,10 +386,10 @@ _EPISODE_PROPS = [
     "a little daisy flower clip tucked into the fur on its head",
 ]
 # 포맷 로테이션(2026-07-16 PO — 포맷 다양화): 목록·선택 로직은 ai_text의
-# EPISODE_FORMATS/pick_episode_format이 단일 소스다 — 대본 구조(quiz/ranking/vlog/vet
-# 톤)와 영상 연출(마이크·수의사 세트)이 같은 포맷을 봐야 하므로 여기서 중복 정의하지
-# 않는다. "interview"=화면 밖 인터뷰어+마이크(_MIC), "vet"=수의사 상황극(아래 가운·
-# 진료실 오버라이드), 그 외("direct"/"quiz"/"ranking"/"vlog")=정면 발화(대본만 다름).
+# EPISODE_FORMATS/pick_episode_format이 단일 소스다 — 대본 구조(vlog/vet 톤)와 영상
+# 연출(마이크·수의사 세트)이 같은 포맷을 봐야 하므로 여기서 중복 정의하지 않는다.
+# "interview"=화면 밖 인터뷰어+마이크(_MIC), "vet"=수의사 상황극(아래 가운·진료실
+# 오버라이드), "vlog"=정면 발화(대본만 다름). 2026-07-20 PO: 3종+전 포맷 반말로 축소.
 # 수의사 상황극 전용 의상·장소(2026-07-16 PO). 로테이션 대신 고정 — 콘셉트 유지를 위해
 # 소품도 뽑지 않는다(밀짚모자 쓴 수의사는 콘셉트 붕괴). ASCII 작은따옴표(') 금지.
 # 흰 가운은 순백 털에 묻혀 Kontext가 통째로 떨궜다(2026-07-20 run11 실측 — 배경만 반영,
