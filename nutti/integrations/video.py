@@ -392,7 +392,14 @@ _EPISODE_PROPS = [
 # 진료실 오버라이드), 그 외("direct"/"quiz"/"ranking"/"vlog")=정면 발화(대본만 다름).
 # 수의사 상황극 전용 의상·장소(2026-07-16 PO). 로테이션 대신 고정 — 콘셉트 유지를 위해
 # 소품도 뽑지 않는다(밀짚모자 쓴 수의사는 콘셉트 붕괴). ASCII 작은따옴표(') 금지.
-_VET_OUTFIT = "a clean white veterinarian coat with a small stethoscope resting around its neck"
+# 흰 가운은 순백 털에 묻혀 Kontext가 통째로 떨궜다(2026-07-20 run11 실측 — 배경만 반영,
+# 가운·청진기 누락 → PO 반려). 색 대비(민트 스크럽+검정 청진기)와 "실제 옷 레이어" 명시로
+# 시각적으로 강제한다. 데님·스웨터 등 유색 의상은 같은 프롬프트 경로에서 정상 렌더(실측).
+_VET_OUTFIT = (
+    "a tiny mint-green veterinarian scrub top with a neat folded collar, worn as a clearly "
+    "visible clothing layer over its white fur, plus a black stethoscope with a shiny "
+    "silver chest piece draped around its neck"
+)
 _VET_SETTING = "sitting at the examination desk of a bright, tidy veterinary clinic room"
 # 전 항목 sitting 계열로 통일(2026-07-06 PO) — standing 시작 프레임이 뽑히면 클립 전체가
 # 이족보행 인형탈 느낌이 되고, 모션 지시(_MOTION_HOLD/_MOTION_LIVELY의 "stays seated")와
@@ -571,11 +578,17 @@ class VeoPromptBuilder:
     # 2026-07-16 PO("캐릭터가 너무 정적이라 밋밋함"): 중간 비트의 제스처 어휘를
     # _MOTION_FINAL_FREE에서 이미 검증된 수준(앞발 흔들기·귀 쫑긋·꼬리 흔들기·상체
     # 리액션)으로 확대. 화면 이탈·기립·끝 페이드 가드와 FLF 끝 포즈 수렴은 그대로 유지.
+    # 2026-07-20 PO("팔을 너무 자주 흔듦, 자연스러운 움직임 필요"): 앞발 제스처를
+    # "클립당 최대 1회, 반복 금지"로 제한하고 고개·귀·꼬리·무게 이동·표정 중심으로 전환
+    # (_MOTION_FINAL_FREE 동일). 어휘 목록 앞쪽의 paw waves를 Veo가 과도 샘플링한 부작용.
     _MOTION_LIVELY = (
         "The puppy stays seated and centered in frame the whole time but moves naturally "
-        "and expressively as it talks — happy head tilts, little paw waves, excited ear "
-        "wiggles, a joyful tail wag, leaning slightly toward the camera, and lively "
-        "expressive reactions that bring real energy and charm to the shot. It is already "
+        "and expressively as it talks — gentle head tilts, small ear twitches, a joyful "
+        "tail wag, subtle shifts of body weight, leaning slightly toward the camera, and "
+        "lively facial expressions that bring real energy and charm to the shot. Its "
+        "front paws stay relaxed on the ground almost the entire time — at most one "
+        "brief, small paw gesture in the whole clip, never repeated or constant paw "
+        "waving. It is already "
         "in lively motion from the very first moments of the clip — it starts talking and "
         "moving right away, with no still, frozen, or slow warm-up intro. It never "
         "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
@@ -590,8 +603,9 @@ class VeoPromptBuilder:
     # 페이드/글리치 같은 깨짐 방지 최소 가드만 남긴다.
     _MOTION_FINAL_FREE = (
         "The puppy stays seated and centered in frame but is free to be playful and "
-        "adorable as it talks — happy head tilts, little paw waves, excited ear wiggles, "
-        "a joyful tail wag, cute expressive reactions. Let its natural charm show; no "
+        "adorable as it talks — happy head tilts, excited ear wiggles, a joyful tail "
+        "wag, cute expressive reactions; at most one brief, small paw gesture, never "
+        "repeated or constant paw waving. Let its natural charm show; no "
         "forced calm-down at the end. It never leaves the frame. The clip ends on a "
         "clean, fully-lit, sharp frame — no fade-out, no dimming, no blur, no warping, "
         "and no glitch at the end."
