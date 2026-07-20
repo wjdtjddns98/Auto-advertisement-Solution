@@ -412,6 +412,23 @@ _EPISODE_SETTINGS = [
     "sitting in front of a cute pet shop entrance",
     "sitting at a tidy home office desk like a news anchor",
 ]
+# 시작 프레임 구도·표정 로테이션(2026-07-20 PO — "썸네일이 전부 같은 자세"): Shorts
+# 썸네일은 영상 프레임에서 자동 추출되므로 시작 프레임 구도가 곧 썸네일이다. 종전엔
+# "정면 응시·차분한 표정" 한 가지 고정이라 매편 똑같아 보였다. 전 항목 sitting 유지
+# (기립 드리프트 가드 보존)·얼굴 정면 가시(립싱크 가독) 범위에서 앵글·표정만 바꾼다.
+# FLF 앵커 특성상 영상 전체 구도도 이 프레임을 따라간다. ASCII 작은따옴표(') 금지.
+_FRAME_SHOTS = [
+    "looking straight at the camera with a calm, gentle, friendly face, ready to talk "
+    "directly to the camera",
+    "framed in a close-up from the chest up, its head slightly tilted to one side with a "
+    "curious, bright expression, looking straight into the camera",
+    "captured from a slight three-quarter angle, its body turned a little sideways while "
+    "its face turns back toward the camera with a playful open-mouth smile",
+    "seen from a slightly high camera angle looking down as the puppy looks up at the "
+    "camera with big round pleading eyes",
+    "captured from a slightly low camera angle as the puppy leans eagerly toward the "
+    "camera with an excited, joyful expression, mouth open as if mid-sentence",
+]
 # ===================== PO 수정 구역 끝 (편별 연출 로테이션) =====================
 
 
@@ -2164,6 +2181,10 @@ class VideoStudio:
         # 조립한다. interview 편은 마이크가 프레임에도 있어야 클립 시작·끝에서 마이크가
         # 나타났다 사라지는 점프가 없다.
         prop = f", with {style.prop}" if style.prop else ""
+        # 구도·표정은 script.id 해시로 결정적 선택(의상·장소·소품과 같은 패턴, 독립 salt).
+        # 매편 다른 썸네일 구도가 나오게 하는 핵심 — 고정 문구였던 시절의 "전부 같은
+        # 자세" 문제(2026-07-20 PO)를 로테이션으로 해소한다.
+        shot = _FRAME_SHOTS[zlib.crc32(f"shot:{script.id}".encode()) % len(_FRAME_SHOTS)]
         if style.fmt == "interview":
             mic = (
                 "A handheld interview microphone reaches into the frame from off-screen, "
@@ -2175,8 +2196,7 @@ class VideoStudio:
             "A photorealistic tall vertical portrait-orientation starting frame for a "
             f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}{prop}, "
             f"{style.setting}, "
-            "looking straight at the camera with a calm, gentle, friendly face, ready to "
-            f"talk directly to the camera. {_CINEMATIC_LOOK} "
+            f"{shot}. {_CINEMATIC_LOOK} "
             f"{scene_context}"
             "Absolutely no text, letters, numbers, words, captions, logos, brand names, or "
             "watermarks anywhere. No people, no humans in costume, no other animals. "
