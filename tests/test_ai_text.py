@@ -114,8 +114,9 @@ def test_pick_episode_format_deterministic_and_valid():
 
 
 def test_generate_script_injects_format_rule_into_prompt():
-    """포맷 규칙이 있는 편은 유저 프롬프트에 [이번 편 포맷] 블록이 붙고(대본 구조 지시),
-    direct/interview 편은 붙지 않는다 — dry_run이 Script.prompt를 보존하므로 무네트워크 검증."""
+    """포맷 규칙이 있는 편(vet/vlog)은 유저 프롬프트에 [이번 편 포맷] 블록이 붙고(대본
+    구조 지시), interview 편은 붙지 않는다 — dry_run이 Script.prompt를 보존하므로
+    무네트워크 검증. (2026-07-20 PO 3종 축소로 quiz/direct → vet/interview로 교체)"""
     from nutti.integrations.ai_text import (
         FORMAT_SCRIPT_RULES,
         AITextClient,
@@ -124,17 +125,23 @@ def test_generate_script_injects_format_rule_into_prompt():
     from nutti.config import Settings
 
     client = AITextClient(Settings(NUTTI_DRY_RUN="true"))
-    quiz_topic = next(
-        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "quiz"
+    vet_topic = next(
+        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "vet"
     )
-    direct_topic = next(
-        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "direct"
+    interview_topic = next(
+        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "interview"
     )
-    quiz_script = client.generate_script(quiz_topic)
-    direct_script = client.generate_script(direct_topic)
-    assert "[이번 편 포맷" in quiz_script.prompt
-    assert FORMAT_SCRIPT_RULES["quiz"] in quiz_script.prompt
-    assert "[이번 편 포맷" not in direct_script.prompt
+    vet_script = client.generate_script(vet_topic)
+    interview_script = client.generate_script(interview_topic)
+    assert "[이번 편 포맷" in vet_script.prompt
+    assert FORMAT_SCRIPT_RULES["vet"] in vet_script.prompt
+    assert "[이번 편 포맷" not in interview_script.prompt
+
+
+def test_script_system_prompt_enforces_banmal():
+    """전 포맷 반말 컨셉(2026-07-20 PO 확정) 핀 — 지워지면 실패(리버트 가드)."""
+    assert "반말" in SCRIPT_SYSTEM_PROMPT
+    assert "존댓말" in SCRIPT_SYSTEM_PROMPT
 
 
 def test_script_system_prompt_bans_brand_in_last_beat():
