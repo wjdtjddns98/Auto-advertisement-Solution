@@ -110,9 +110,17 @@ FORMAT_SCRIPT_RULES = {
 # ================== PO 수정 구역 끝 (편별 대본 포맷 로테이션) ==================
 
 
-def pick_episode_format(key: str) -> str:
-    """문자열(주제) CRC32로 편 포맷을 결정적으로 고른다 — 대본·영상이 공유하는 단일 소스."""
-    return EPISODE_FORMATS[zlib.crc32(f"format:{key}".encode()) % len(EPISODE_FORMATS)]
+def pick_episode_format(key: str, avoid: str = "") -> str:
+    """문자열(주제) CRC32로 편 포맷을 결정적으로 고른다 — 대본·영상이 공유하는 단일 소스.
+
+    avoid(직전 편 포맷)와 같게 나오면 다음 인덱스로 한 칸 민다 — 연속 편 포맷 중복 방지
+    (2026-07-21 PO, 실측: 해시 운으로 최근 6편 중 vet 4회·2연속). 회피 결과는 해시만으론
+    재현할 수 없으므로 호출자(오케스트레이터)가 state에 저장해 다음 편에 넘긴다.
+    """
+    idx = zlib.crc32(f"format:{key}".encode()) % len(EPISODE_FORMATS)
+    if EPISODE_FORMATS[idx] == avoid:
+        idx = (idx + 1) % len(EPISODE_FORMATS)
+    return EPISODE_FORMATS[idx]
 
 
 # 완료율 A/B(2026-07-21 PO): 2026 쇼츠 알고리즘은 완료율·루프 재생을 최우선한다 —
@@ -408,17 +416,24 @@ class AITextClient:
         """
         return _split_into_beats(body, n=pick_beat_count(topic))
 
-    def generate_script(self, topic: str, feedback: str = "") -> Script:
-        """주제로부터 대본 생성. feedback은 5단계 분석 결과를 반영할 때 사용."""
+    def generate_script(
+        self, topic: str, feedback: str = "", episode_format: str = ""
+    ) -> Script:
+        """주제로부터 대본 생성. feedback은 5단계 분석 결과를 반영할 때 사용.
+
+        episode_format은 오케스트레이터가 직전 편 회피를 반영해 확정한 포맷 — 비면
+        주제 해시 폴백(레거시 경로·테스트 하위호환). 확정값은 Script.episode_format으로
+        영상 단계에 전달된다.
+        """
         # 편별 비트 수(완료율 A/B, 2026-07-21 PO): 주제 해시로 3/4비트 결정.
         n_beats = pick_beat_count(topic)
+        fmt = episode_format or pick_episode_format(topic)
         prompt = f"주제: {topic}\n"
         if feedback:
             prompt += f"\n[이전 사이클 개선 포인트]\n{feedback}\n"
-        # 편별 포맷(2026-07-16 PO): 주제 해시로 결정 — video.pick_episode_style과 동일
-        # 소스라 대본 구조와 영상 연출이 항상 같은 포맷을 본다. 시스템 프롬프트가 아닌
-        # 유저 프롬프트에 붙여 prompt caching(ephemeral)을 깨지 않는다.
-        fmt_rule = FORMAT_SCRIPT_RULES.get(pick_episode_format(topic))
+        # 편별 포맷(2026-07-16 PO): 시스템 프롬프트가 아닌 유저 프롬프트에 붙여
+        # prompt caching(ephemeral)을 깨지 않는다.
+        fmt_rule = FORMAT_SCRIPT_RULES.get(fmt)
         if fmt_rule:
             prompt += f"\n[이번 편 포맷 — 반드시 이 구조로]\n{fmt_rule}\n"
         prompt += (
@@ -441,6 +456,7 @@ class AITextClient:
                 body=body,
                 prompt=prompt,
                 beats=_split_into_beats(body, n=n_beats),
+                episode_format=fmt,
                 fact_checked=True,
             )
 
@@ -471,6 +487,7 @@ class AITextClient:
             body=body,
             prompt=prompt,
             beats=_split_into_beats(body, n=n_beats),
+            episode_format=fmt,
             fact_checked=False,
         )
 

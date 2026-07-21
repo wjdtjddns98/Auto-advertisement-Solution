@@ -160,6 +160,32 @@ def test_vlog_format_rule_has_fail_twist():
     assert "반전" in FORMAT_SCRIPT_RULES["vlog"]
 
 
+def test_pick_episode_format_avoid_shifts_to_next():
+    """avoid(직전 편 포맷)와 같으면 다음 포맷으로 밀린다 — 연속 중복 방지(2026-07-21 PO)."""
+    from nutti.integrations.ai_text import EPISODE_FORMATS, pick_episode_format
+
+    topic = "주제-중복테스트"
+    base = pick_episode_format(topic)
+    shifted = pick_episode_format(topic, avoid=base)
+    assert shifted != base
+    assert shifted == EPISODE_FORMATS[(EPISODE_FORMATS.index(base) + 1) % len(EPISODE_FORMATS)]
+    # avoid와 다르면 그대로.
+    other = next(f for f in EPISODE_FORMATS if f != base)
+    assert pick_episode_format(topic, avoid=other) == base
+
+
+def test_generate_script_carries_episode_format():
+    """generate_script가 확정 포맷을 Script.episode_format으로 실어 영상 단계와 공유한다."""
+    client = _client()
+    script = client.generate_script("주제-포맷전달", episode_format="interview")
+    assert script.episode_format == "interview"
+    # 미지정 시 주제 해시 폴백.
+    from nutti.integrations.ai_text import pick_episode_format
+
+    script2 = client.generate_script("주제-포맷폴백")
+    assert script2.episode_format == pick_episode_format("주제-포맷폴백")
+
+
 def test_pick_episode_format_deterministic_and_valid():
     """편 포맷 로테이션(2026-07-16 PO): 결정적이고, 규칙 dict 키가 로테이션 목록의
     부분집합이며, 표본에서 전 포맷이 실제로 등장한다."""
