@@ -761,6 +761,8 @@ def test_youtube_upload_video_algo_metadata_in_snippet(tmp_path):
     # tags는 '#'(앞공백 포함) 제거 + 빈 항목 제외
     assert snippet["tags"] == ["강아지", "반려견", "Shorts"]
     assert status["selfDeclaredMadeForKids"] is False
+    # AI 생성 콘텐츠 공개 표시(2026 inauthentic content 정책) — 항상 True 하드코딩 핀.
+    assert status["containsSyntheticMedia"] is True
 
 
 def test_youtube_upload_video_missing_location_raises(tmp_path):

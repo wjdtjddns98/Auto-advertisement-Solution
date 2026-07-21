@@ -140,7 +140,7 @@ class Orchestrator:
             # 사용자가 텔레그램에서 직접 입력한 수정본이므로 팩트체크를 재실행하지 않는다.
             # PO가 내용을 직접 확인·수정했다는 전제 하에 신뢰하는 설계다.
             run.script.body = script_review.revised_content
-            run.script.beats = self.ai.split_beats(run.script.body)  # 수정본 → 비트 재분할
+            run.script.beats = self.ai.split_beats(run.script.body, run.script.topic)  # 수정본 → 비트 재분할
             self.store.update_script(run.script)
         elif script_decision != ReviewDecision.APPROVED:
             log.warning(
@@ -163,7 +163,7 @@ class Orchestrator:
                 break
             if video_decision == ReviewDecision.REVISE and video_review.revised_content:
                 run.script.body = video_review.revised_content
-                run.script.beats = self.ai.split_beats(run.script.body)  # 수정본 → 비트 재분할
+                run.script.beats = self.ai.split_beats(run.script.body, run.script.topic)  # 수정본 → 비트 재분할
                 self.store.update_script(run.script)
                 run.video = self.studio.produce(run.script)
                 continue
