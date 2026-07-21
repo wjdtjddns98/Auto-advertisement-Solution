@@ -155,6 +155,10 @@ class YouTubeClient:
             "status": {
                 "privacyStatus": self.settings.youtube_privacy_status,
                 "selfDeclaredMadeForKids": self.settings.youtube_made_for_kids,
+                # AI 생성(합성) 콘텐츠 공개 표시 — 우리 파이프라인은 전 영상이 AI 생성이라
+                # 항상 True. 2026 'inauthentic content' 단속에서 미표시는 3진 아웃
+                # (경고→90일 수익화 정지→YPP 영구 제외) 사유라 하드코딩으로 강제한다.
+                "containsSyntheticMedia": True,
             },
         }
         # 1) Initiation POST — 세션 URI 발급

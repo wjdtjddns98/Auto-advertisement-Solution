@@ -232,7 +232,8 @@ def test_frame_prompt_sanitizes_topic():
     assert "간식’" in prompt
     # 주제 잘림 경계 핀 — 고정 템플릿(페르소나·마이크·의상·장소·소품) 길이를 더한 상한.
     # 핀의 목적은 "주제가 _MAX_TOPIC_CHARS로 잘린다"이므로 템플릿이 길어지면 함께 올린다.
-    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1400
+    # 2026-07-21: 첫 1초 가독성 문장 추가로 1400→1500 상향(실측 최장 1604, 여유 ~96).
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1500
     # 금지 요소 지시는 주입과 무관하게 유지된다(자막·코스튬·타 동물 금지 강화 문구).
     assert "No people, no humans in costume, no other animals." in prompt
 

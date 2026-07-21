@@ -98,6 +98,68 @@ def test_script_system_prompt_pins_strong_hook():
     assert "2차 훅" in SCRIPT_SYSTEM_PROMPT
 
 
+def test_pick_beat_count_deterministic_and_both_variants():
+    """완료율 A/B: 주제 해시로 3/4비트가 결정적으로 갈리고, 두 변형이 모두 나온다."""
+    from nutti.integrations.ai_text import pick_beat_count
+
+    assert pick_beat_count("고구마") == pick_beat_count("고구마")
+    seen = {pick_beat_count(f"주제-{i}") for i in range(100)}
+    assert seen == {3, 4}
+
+
+def test_build_script_system_prompt_three_beats():
+    """3비트 변형: 비트 수·줄 수·구조가 3에 맞게 조립된다(4비트 잔재 없음)."""
+    from nutti.integrations.ai_text import build_script_system_prompt
+
+    p3 = build_script_system_prompt(3)
+    assert "정확히 3개의 비트" in p3
+    assert "정확히 3줄" in p3
+    assert "①훅 ②핵심설명·실용 팁 ③마무리·CTA" in p3
+    assert "정확히 4" not in p3
+
+
+def test_validate_script_body_three_beats():
+    """n_beats=3이면 3줄이 통과하고 4줄이 반려된다(줄별 글자 하드룰은 _valid_body 재사용)."""
+    from nutti.integrations.ai_text import validate_script_body
+
+    base = _valid_body().splitlines()
+    three = "\n".join([base[0], base[1], base[3]])  # 훅·핵심·CTA — 각 줄 길이는 이미 유효
+    assert validate_script_body(three, n_beats=3) == []
+    violations = validate_script_body(_valid_body(), n_beats=3)  # 4줄 → 반려
+    assert any("3줄" in v for v in violations)
+
+
+def test_generate_script_dry_run_beats_follow_ab():
+    """dry_run 대본의 비트 수가 편별 A/B(pick_beat_count)를 따른다."""
+    from nutti.integrations.ai_text import pick_beat_count
+
+    client = _client()
+    for i in range(6):
+        topic = f"주제-{i}"
+        script = client.generate_script(topic)
+        assert len(script.beats) == pick_beat_count(topic)
+
+
+def test_split_beats_uses_topic_beat_count():
+    """REVISE 재분할도 주제 해시 비트 수를 따른다(대본 생성과 단일 소스)."""
+    from nutti.integrations.ai_text import pick_beat_count
+
+    client = _client()
+    body = "1문장이야.\n2문장이야.\n3문장이야.\n4문장이야."
+    topic3 = next(f"주제-{i}" for i in range(100) if pick_beat_count(f"주제-{i}") == 3)
+    topic4 = next(f"주제-{i}" for i in range(100) if pick_beat_count(f"주제-{i}") == 4)
+    assert len(client.split_beats(body, topic3)) == 3
+    assert len(client.split_beats(body, topic4)) == 4
+
+
+def test_vlog_format_rule_has_fail_twist():
+    """vlog 포맷 지시에 실패담·반전(허당) 요소가 담긴다(2026-07-21 트렌드 핀)."""
+    from nutti.integrations.ai_text import FORMAT_SCRIPT_RULES
+
+    assert "실패담" in FORMAT_SCRIPT_RULES["vlog"]
+    assert "반전" in FORMAT_SCRIPT_RULES["vlog"]
+
+
 def test_pick_episode_format_deterministic_and_valid():
     """편 포맷 로테이션(2026-07-16 PO): 결정적이고, 규칙 dict 키가 로테이션 목록의
     부분집합이며, 표본에서 전 포맷이 실제로 등장한다."""
@@ -357,7 +419,13 @@ def test_generate_script_regenerates_on_hard_rule_violation(monkeypatch):
         return next(bodies)
 
     monkeypatch.setattr(client, "_llm_text", fake_llm)
-    script = client.generate_script("간식 적정량")
+    # _valid_body()는 4줄이므로 4비트 버킷 주제로 고정(A/B 도입 후 3비트 주제면 반려됨).
+    from nutti.integrations.ai_text import pick_beat_count
+
+    topic = next(
+        t for t in (f"간식 적정량-{i}" for i in range(50)) if pick_beat_count(t) == 4
+    )
+    script = client.generate_script(topic)
     assert len(prompts) == 2  # 1회 위반 → 1회 재생성
     assert "하드룰 위반" in prompts[1] and "의성어" in prompts[1]  # 위반 사유가 피드백으로
     assert script.body == _valid_body()

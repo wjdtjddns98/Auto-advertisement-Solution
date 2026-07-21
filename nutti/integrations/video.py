@@ -2198,6 +2198,9 @@ class VideoStudio:
             f"{style.setting}, "
             f"{shot}. {_CINEMATIC_LOOK} "
             f"{scene_context}"
+            # 첫 1초 무음 가독성(2026-07-21 쇼츠 트렌드): 0초 프레임만 보고도 상황이
+            # 읽혀야 스와이프를 이긴다 — 배경·소품이 또렷이 보이는 상황 전달형 구도.
+            "The setting and props are clearly visible so the situation reads at a glance. "
             "Absolutely no text, letters, numbers, words, captions, logos, brand names, or "
             "watermarks anywhere. No people, no humans in costume, no other animals. "
             f"{mic}"
