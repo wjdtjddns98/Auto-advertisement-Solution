@@ -82,3 +82,15 @@ def test_feedback_and_topics_coexist(tmp_path):
     reloaded = _state(tmp_path)
     assert reloaded.get_feedback() == "피드백"
     assert reloaded.get_recent_topics() == ["주제"]
+
+
+def test_format_round_trip_and_blank_ignored(tmp_path):
+    """last_format 저장·조회 왕복 + 빈 값 무시(연속 포맷 중복 방지, PR #117)."""
+    from nutti.storage.state_store import PipelineState
+
+    s = PipelineState(str(tmp_path / "s.json"))
+    assert s.get_last_format() == ""
+    s.save_format("vet")
+    assert s.get_last_format() == "vet"
+    s.save_format("")  # 빈 값은 무시
+    assert s.get_last_format() == "vet"

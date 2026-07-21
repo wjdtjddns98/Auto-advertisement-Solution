@@ -573,3 +573,41 @@ def test_factcheck_passes_after_one_retry(monkeypatch):
     run = orch.run("주제")
     assert run.script.fact_checked is True
     assert run.uploads  # 재생성 후 통과 → 정상 진행
+
+
+# --- 포맷 연속 중복 방지(PR #117): last_format은 업로드 성공 시에만 저장 ---
+
+
+def test_run_persists_format_only_after_upload(tmp_path):
+    """업로드까지 완주한 런만 last_format을 남긴다."""
+    state = _tmp_state(tmp_path)
+    orch = Orchestrator(_dry_settings(), telegram=AutoApproveGate(), state=state)
+    run = orch.run("강아지 간식 포맷저장")
+    assert run.script.episode_format
+    assert state.get_last_format() == run.script.episode_format
+
+
+def test_rejected_run_does_not_persist_format(tmp_path):
+    """게이트 반려로 죽은 런은 last_format을 남기지 않는다(리뷰 지적 회귀 핀 —
+    죽은 런의 포맷이 회피 기준을 오염시키면 실제 게시 편끼리 연속 중복이 재발한다)."""
+    state = _tmp_state(tmp_path)
+    orch = Orchestrator(_dry_settings(), telegram=_RejectGate(), state=state)
+    try:
+        orch.run("반려될 주제")
+    except GateRejected:
+        pass
+    assert state.get_last_format() == ""
+
+
+def test_next_run_avoids_last_published_format(tmp_path):
+    """다음 런은 직전 게시 편의 포맷을 회피한다(오케스트레이터 배선 핀)."""
+    from nutti.integrations.ai_text import pick_episode_format
+
+    state = _tmp_state(tmp_path)
+    orch = Orchestrator(_dry_settings(), telegram=AutoApproveGate(), state=state)
+    first = orch.run("주제 하나")
+    fmt1 = first.script.episode_format
+    # 해시가 직전 편과 같은 포맷으로 떨어지는 주제를 골라, 회피 시프트를 강제 검증.
+    clash = next(f"주제-{i}" for i in range(100) if pick_episode_format(f"주제-{i}") == fmt1)
+    second = orch.run(clash)
+    assert second.script.episode_format != fmt1
