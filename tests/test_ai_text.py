@@ -98,6 +98,68 @@ def test_script_system_prompt_pins_strong_hook():
     assert "2차 훅" in SCRIPT_SYSTEM_PROMPT
 
 
+def test_pick_beat_count_deterministic_and_both_variants():
+    """완료율 A/B: 주제 해시로 3/4비트가 결정적으로 갈리고, 두 변형이 모두 나온다."""
+    from nutti.integrations.ai_text import pick_beat_count
+
+    assert pick_beat_count("고구마") == pick_beat_count("고구마")
+    seen = {pick_beat_count(f"주제-{i}") for i in range(100)}
+    assert seen == {3, 4}
+
+
+def test_build_script_system_prompt_three_beats():
+    """3비트 변형: 비트 수·줄 수·구조가 3에 맞게 조립된다(4비트 잔재 없음)."""
+    from nutti.integrations.ai_text import build_script_system_prompt
+
+    p3 = build_script_system_prompt(3)
+    assert "정확히 3개의 비트" in p3
+    assert "정확히 3줄" in p3
+    assert "①훅 ②핵심설명·실용 팁 ③마무리·CTA" in p3
+    assert "정확히 4" not in p3
+
+
+def test_validate_script_body_three_beats():
+    """n_beats=3이면 3줄이 통과하고 4줄이 반려된다(줄별 글자 하드룰은 _valid_body 재사용)."""
+    from nutti.integrations.ai_text import validate_script_body
+
+    base = _valid_body().splitlines()
+    three = "\n".join([base[0], base[1], base[3]])  # 훅·핵심·CTA — 각 줄 길이는 이미 유효
+    assert validate_script_body(three, n_beats=3) == []
+    violations = validate_script_body(_valid_body(), n_beats=3)  # 4줄 → 반려
+    assert any("3줄" in v for v in violations)
+
+
+def test_generate_script_dry_run_beats_follow_ab():
+    """dry_run 대본의 비트 수가 편별 A/B(pick_beat_count)를 따른다."""
+    from nutti.integrations.ai_text import pick_beat_count
+
+    client = _client()
+    for i in range(6):
+        topic = f"주제-{i}"
+        script = client.generate_script(topic)
+        assert len(script.beats) == pick_beat_count(topic)
+
+
+def test_split_beats_uses_topic_beat_count():
+    """REVISE 재분할도 주제 해시 비트 수를 따른다(대본 생성과 단일 소스)."""
+    from nutti.integrations.ai_text import pick_beat_count
+
+    client = _client()
+    body = "1문장이야.\n2문장이야.\n3문장이야.\n4문장이야."
+    topic3 = next(f"주제-{i}" for i in range(100) if pick_beat_count(f"주제-{i}") == 3)
+    topic4 = next(f"주제-{i}" for i in range(100) if pick_beat_count(f"주제-{i}") == 4)
+    assert len(client.split_beats(body, topic3)) == 3
+    assert len(client.split_beats(body, topic4)) == 4
+
+
+def test_vlog_format_rule_has_fail_twist():
+    """vlog 포맷 지시에 실패담·반전(허당) 요소가 담긴다(2026-07-21 트렌드 핀)."""
+    from nutti.integrations.ai_text import FORMAT_SCRIPT_RULES
+
+    assert "실패담" in FORMAT_SCRIPT_RULES["vlog"]
+    assert "반전" in FORMAT_SCRIPT_RULES["vlog"]
+
+
 def test_pick_episode_format_deterministic_and_valid():
     """편 포맷 로테이션(2026-07-16 PO): 결정적이고, 규칙 dict 키가 로테이션 목록의
     부분집합이며, 표본에서 전 포맷이 실제로 등장한다."""
@@ -114,8 +176,9 @@ def test_pick_episode_format_deterministic_and_valid():
 
 
 def test_generate_script_injects_format_rule_into_prompt():
-    """포맷 규칙이 있는 편은 유저 프롬프트에 [이번 편 포맷] 블록이 붙고(대본 구조 지시),
-    direct/interview 편은 붙지 않는다 — dry_run이 Script.prompt를 보존하므로 무네트워크 검증."""
+    """포맷 규칙이 있는 편(vet/vlog)은 유저 프롬프트에 [이번 편 포맷] 블록이 붙고(대본
+    구조 지시), interview 편은 붙지 않는다 — dry_run이 Script.prompt를 보존하므로
+    무네트워크 검증. (2026-07-20 PO 3종 축소로 quiz/direct → vet/interview로 교체)"""
     from nutti.integrations.ai_text import (
         FORMAT_SCRIPT_RULES,
         AITextClient,
@@ -124,17 +187,23 @@ def test_generate_script_injects_format_rule_into_prompt():
     from nutti.config import Settings
 
     client = AITextClient(Settings(NUTTI_DRY_RUN="true"))
-    quiz_topic = next(
-        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "quiz"
+    vet_topic = next(
+        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "vet"
     )
-    direct_topic = next(
-        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "direct"
+    interview_topic = next(
+        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "interview"
     )
-    quiz_script = client.generate_script(quiz_topic)
-    direct_script = client.generate_script(direct_topic)
-    assert "[이번 편 포맷" in quiz_script.prompt
-    assert FORMAT_SCRIPT_RULES["quiz"] in quiz_script.prompt
-    assert "[이번 편 포맷" not in direct_script.prompt
+    vet_script = client.generate_script(vet_topic)
+    interview_script = client.generate_script(interview_topic)
+    assert "[이번 편 포맷" in vet_script.prompt
+    assert FORMAT_SCRIPT_RULES["vet"] in vet_script.prompt
+    assert "[이번 편 포맷" not in interview_script.prompt
+
+
+def test_script_system_prompt_enforces_banmal():
+    """전 포맷 반말 컨셉(2026-07-20 PO 확정) 핀 — 지워지면 실패(리버트 가드)."""
+    assert "반말" in SCRIPT_SYSTEM_PROMPT
+    assert "존댓말" in SCRIPT_SYSTEM_PROMPT
 
 
 def test_script_system_prompt_bans_brand_in_last_beat():
@@ -350,7 +419,13 @@ def test_generate_script_regenerates_on_hard_rule_violation(monkeypatch):
         return next(bodies)
 
     monkeypatch.setattr(client, "_llm_text", fake_llm)
-    script = client.generate_script("간식 적정량")
+    # _valid_body()는 4줄이므로 4비트 버킷 주제로 고정(A/B 도입 후 3비트 주제면 반려됨).
+    from nutti.integrations.ai_text import pick_beat_count
+
+    topic = next(
+        t for t in (f"간식 적정량-{i}" for i in range(50)) if pick_beat_count(t) == 4
+    )
+    script = client.generate_script(topic)
     assert len(prompts) == 2  # 1회 위반 → 1회 재생성
     assert "하드룰 위반" in prompts[1] and "의성어" in prompts[1]  # 위반 사유가 피드백으로
     assert script.body == _valid_body()
@@ -523,12 +598,19 @@ def test_generate_metadata_live_without_key_uses_claude_code(monkeypatch):
     settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
     client = AITextClient(settings)
     url = "https://example.com/calc/"
-    monkeypatch.setattr(
-        client,
-        "_claude_cli",
-        lambda _full: '{"title": "강아지 사과 급여 꿀팁", "description": "본문", "hashtags": ["#사과"]}',
-    )
+    sent: list[str] = []
+
+    def _fake_cli(full):
+        sent.append(full)
+        return '{"title": "강아지 사과 급여 꿀팁", "description": "본문", "hashtags": ["#사과"]}'
+
+    monkeypatch.setattr(client, "_claude_cli", _fake_cli)
     meta = client.generate_metadata(Script(topic="강아지 사과", body="b"), url)
+    # 회귀 핀: 폴백(라이브 운영 기본) 프롬프트에도 SEO 지시가 실려야 한다 —
+    # 과거엔 폴백에 최적화 지시가 전혀 없었다(2026-07-21 조회수 최적화).
+    from nutti.integrations.ai_text import METADATA_GUIDE
+
+    assert METADATA_GUIDE in sent[0]
     assert meta.title == "강아지 사과 급여 꿀팁"
     assert "강아지 건강 간식 꿀팁" not in meta.title  # 정적 더미가 아님
     assert url in meta.description
@@ -556,6 +638,19 @@ def test_build_metadata_algo_optimization():
     assert url in meta.description
     assert "#강아지간식" in meta.description
     assert "#Shorts" in meta.description
+
+
+def test_build_metadata_appends_utm_tracked_link():
+    """계산기 링크에 UTM 추적 파라미터(utm_content=script.id)가 붙는다 — 편별 유입 분석용."""
+    from nutti.integrations.ai_text import AITextClient
+
+    script = Script(topic="강아지 사과", body="b")
+    url = "https://nutti.co.kr/calculator.html"
+    meta = AITextClient._build_metadata(script, url, "제목", "설명 본문", ["#강아지"])
+    assert (
+        f"{url}?utm_source=youtube&utm_medium=shorts&utm_content={script.id}"
+        in meta.description
+    )
 
 
 def test_build_metadata_does_not_duplicate_shorts():

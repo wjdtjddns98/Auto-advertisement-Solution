@@ -73,6 +73,7 @@ class FakeYouTubeClient:
         token: str = "fake_access_token",
         video_id: str = "yt_video_001",
         analytics: dict | None = None,
+        traffic: dict | None = None,
         raise_on_exchange: bool = False,
         raise_on_upload: bool = False,
     ):
@@ -84,12 +85,14 @@ class FakeYouTubeClient:
             if analytics is not None
             else {"views": 500, "likes": 20, "comments": 3, "averageViewDuration": 25.0}
         )
+        self._traffic = traffic if traffic is not None else {"SHORTS": 300, "YT_SEARCH": 200}
         self.raise_on_exchange = raise_on_exchange
         self.raise_on_upload = raise_on_upload
         # 호출 기록
         self.exchange_calls: list[None] = []
         self.upload_calls: list[tuple] = []
         self.analytics_calls: list[str] = []
+        self.traffic_calls: list[str] = []
 
     def exchange_token(self) -> str:
         self.exchange_calls.append(None)
@@ -106,6 +109,10 @@ class FakeYouTubeClient:
     def fetch_analytics(self, external_id: str) -> dict:
         self.analytics_calls.append(external_id)
         return self._analytics
+
+    def fetch_traffic_sources(self, external_id: str) -> dict[str, int]:
+        self.traffic_calls.append(external_id)
+        return self._traffic
 
 
 class FakeInstagramClient:
@@ -402,7 +409,16 @@ def test_fetch_performance_live_youtube_path():
     """라이브 경로에서 YouTubeClient.fetch_analytics를 호출하고 PerformanceReport를 반환한다."""
     settings = _live_settings()
     fake_yt = FakeYouTubeClient(
-        analytics={"views": 999, "likes": 42, "comments": 7, "averageViewDuration": 35.5}
+        analytics={
+            "views": 999,
+            "engagedViews": 400,
+            "likes": 42,
+            "comments": 7,
+            "shares": 3,
+            "averageViewDuration": 35.5,
+            "averageViewPercentage": 91.2,
+        },
+        traffic={"SHORTS": 700, "YT_SEARCH": 299},
     )
     publisher = Publisher(settings, yt_client=fake_yt)
     upload = UploadResult(
@@ -413,11 +429,16 @@ def test_fetch_performance_live_youtube_path():
 
     assert len(fake_yt.analytics_calls) == 1
     assert fake_yt.analytics_calls[0] == "video_123"
+    assert fake_yt.traffic_calls == ["video_123"]
     assert report.platform == "youtube"
     assert report.views == 999
+    assert report.engaged_views == 400
     assert report.likes == 42
     assert report.comments == 7
+    assert report.shares == 3
     assert report.avg_view_duration_sec == 35.5
+    assert report.avg_view_percentage == 91.2
+    assert report.traffic_sources == {"SHORTS": 700, "YT_SEARCH": 299}
 
 
 def test_fetch_performance_live_instagram_path():
@@ -740,6 +761,8 @@ def test_youtube_upload_video_algo_metadata_in_snippet(tmp_path):
     # tags는 '#'(앞공백 포함) 제거 + 빈 항목 제외
     assert snippet["tags"] == ["강아지", "반려견", "Shorts"]
     assert status["selfDeclaredMadeForKids"] is False
+    # AI 생성 콘텐츠 공개 표시(2026 inauthentic content 정책) — 항상 True 하드코딩 핀.
+    assert status["containsSyntheticMedia"] is True
 
 
 def test_youtube_upload_video_missing_location_raises(tmp_path):
@@ -925,6 +948,58 @@ def test_youtube_fetch_analytics_parses_report():
     assert get_kwargs["headers"]["Authorization"] == "Bearer tok"
 
 
+def test_youtube_fetch_traffic_sources_parses_rows():
+    """유입 경로 dimension 행([소스, 조회수])을 dict로 매핑하고, 형태가 어긋난 행은 건너뛴다."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, body={"access_token": "tok"}),
+            FakeHttpResponse(
+                status_code=200,
+                body={
+                    "columnHeaders": [
+                        {"name": "insightTrafficSourceType"},
+                        {"name": "views"},
+                    ],
+                    "rows": [["SHORTS", 34], ["YT_SEARCH", 50], ["깨진행"], ["BAD", "x"]],
+                },
+            ),
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    assert client.fetch_traffic_sources("v1") == {"SHORTS": 34, "YT_SEARCH": 50}
+    _, get_kwargs = http.get_calls[0]
+    assert get_kwargs["params"]["dimensions"] == "insightTrafficSourceType"
+    assert get_kwargs["params"]["filters"] == "video==v1"
+
+
+def test_youtube_fetch_traffic_sources_http_error_returns_empty():
+    """보조 지표라 HTTP 오류 시 예외 대신 빈 dict(성과 수집 본체 보호)."""
+    http = FakeHttpClient(
+        [
+            FakeHttpResponse(status_code=200, body={"access_token": "tok"}),
+            FakeHttpResponse(status_code=403, body={"error": "forbidden"}),
+        ]
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    assert client.fetch_traffic_sources("v1") == {}
+
+
+def test_youtube_fetch_traffic_sources_token_failure_returns_empty():
+    """리뷰 지적 회귀 핀: exchange_token의 PublishError도 soft-fail로 삼켜 빈 dict.
+
+    analytics용 1차 토큰 교환이 성공한 뒤 traffic-sources용 2차 교환이 401로 실패해도
+    이미 확보한 본체 지표를 버리지 않아야 한다(_fetch_youtube_performance 보호).
+    """
+    http = FakeHttpClient(
+        [FakeHttpResponse(status_code=401, body={"error": "invalid_grant"})]  # 토큰 교환 실패
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    assert client.fetch_traffic_sources("v1") == {}
+
+
 def test_youtube_fetch_analytics_no_rows_returns_empty():
     """rows가 없으면(업로드 직후 등) 빈 dict를 반환한다(상위에서 0 정규화)."""
     http = FakeHttpClient(
@@ -1027,7 +1102,11 @@ def test_fetch_youtube_performance_no_client_creates_default(monkeypatch):
     }
 
     # YouTubeClient.fetch_analytics를 non-zero dict 반환으로 monkeypatch
+    # (fetch_traffic_sources도 함께 — 실 구현은 네트워크를 타므로)
     monkeypatch.setattr(YouTubeClient, "fetch_analytics", lambda self, vid: _FAKE_ANALYTICS)
+    monkeypatch.setattr(
+        YouTubeClient, "fetch_traffic_sources", lambda self, vid: {"SHORTS": 500}
+    )
 
     settings = _live_settings()
     # yt_client를 주입하지 않음 → _fetch_youtube_performance 내부에서 YouTubeClient 직접 생성

@@ -386,13 +386,20 @@ _EPISODE_PROPS = [
     "a little daisy flower clip tucked into the fur on its head",
 ]
 # 포맷 로테이션(2026-07-16 PO — 포맷 다양화): 목록·선택 로직은 ai_text의
-# EPISODE_FORMATS/pick_episode_format이 단일 소스다 — 대본 구조(quiz/ranking/vlog/vet
-# 톤)와 영상 연출(마이크·수의사 세트)이 같은 포맷을 봐야 하므로 여기서 중복 정의하지
-# 않는다. "interview"=화면 밖 인터뷰어+마이크(_MIC), "vet"=수의사 상황극(아래 가운·
-# 진료실 오버라이드), 그 외("direct"/"quiz"/"ranking"/"vlog")=정면 발화(대본만 다름).
+# EPISODE_FORMATS/pick_episode_format이 단일 소스다 — 대본 구조(vlog/vet 톤)와 영상
+# 연출(마이크·수의사 세트)이 같은 포맷을 봐야 하므로 여기서 중복 정의하지 않는다.
+# "interview"=화면 밖 인터뷰어+마이크(_MIC), "vet"=수의사 상황극(아래 가운·진료실
+# 오버라이드), "vlog"=정면 발화(대본만 다름). 2026-07-20 PO: 3종+전 포맷 반말로 축소.
 # 수의사 상황극 전용 의상·장소(2026-07-16 PO). 로테이션 대신 고정 — 콘셉트 유지를 위해
 # 소품도 뽑지 않는다(밀짚모자 쓴 수의사는 콘셉트 붕괴). ASCII 작은따옴표(') 금지.
-_VET_OUTFIT = "a clean white veterinarian coat with a small stethoscope resting around its neck"
+# 흰 가운은 순백 털에 묻혀 Kontext가 통째로 떨궜다(2026-07-20 run11 실측 — 배경만 반영,
+# 가운·청진기 누락 → PO 반려). 색 대비(민트 스크럽+검정 청진기)와 "실제 옷 레이어" 명시로
+# 시각적으로 강제한다. 데님·스웨터 등 유색 의상은 같은 프롬프트 경로에서 정상 렌더(실측).
+_VET_OUTFIT = (
+    "a tiny mint-green veterinarian scrub top with a neat folded collar, worn as a clearly "
+    "visible clothing layer over its white fur, plus a black stethoscope with a shiny "
+    "silver chest piece draped around its neck"
+)
 _VET_SETTING = "sitting at the examination desk of a bright, tidy veterinary clinic room"
 # 전 항목 sitting 계열로 통일(2026-07-06 PO) — standing 시작 프레임이 뽑히면 클립 전체가
 # 이족보행 인형탈 느낌이 되고, 모션 지시(_MOTION_HOLD/_MOTION_LIVELY의 "stays seated")와
@@ -404,6 +411,23 @@ _EPISODE_SETTINGS = [
     "sitting on a bright modern kitchen floor",
     "sitting in front of a cute pet shop entrance",
     "sitting at a tidy home office desk like a news anchor",
+]
+# 시작 프레임 구도·표정 로테이션(2026-07-20 PO — "썸네일이 전부 같은 자세"): Shorts
+# 썸네일은 영상 프레임에서 자동 추출되므로 시작 프레임 구도가 곧 썸네일이다. 종전엔
+# "정면 응시·차분한 표정" 한 가지 고정이라 매편 똑같아 보였다. 전 항목 sitting 유지
+# (기립 드리프트 가드 보존)·얼굴 정면 가시(립싱크 가독) 범위에서 앵글·표정만 바꾼다.
+# FLF 앵커 특성상 영상 전체 구도도 이 프레임을 따라간다. ASCII 작은따옴표(') 금지.
+_FRAME_SHOTS = [
+    "looking straight at the camera with a calm, gentle, friendly face, ready to talk "
+    "directly to the camera",
+    "framed in a close-up from the chest up, its head slightly tilted to one side with a "
+    "curious, bright expression, looking straight into the camera",
+    "captured from a slight three-quarter angle, its body turned a little sideways while "
+    "its face turns back toward the camera with a playful open-mouth smile",
+    "seen from a slightly high camera angle looking down as the puppy looks up at the "
+    "camera with big round pleading eyes",
+    "captured from a slightly low camera angle as the puppy leans eagerly toward the "
+    "camera with an excited, joyful expression, mouth open as if mid-sentence",
 ]
 # ===================== PO 수정 구역 끝 (편별 연출 로테이션) =====================
 
@@ -571,11 +595,17 @@ class VeoPromptBuilder:
     # 2026-07-16 PO("캐릭터가 너무 정적이라 밋밋함"): 중간 비트의 제스처 어휘를
     # _MOTION_FINAL_FREE에서 이미 검증된 수준(앞발 흔들기·귀 쫑긋·꼬리 흔들기·상체
     # 리액션)으로 확대. 화면 이탈·기립·끝 페이드 가드와 FLF 끝 포즈 수렴은 그대로 유지.
+    # 2026-07-20 PO("팔을 너무 자주 흔듦, 자연스러운 움직임 필요"): 앞발 제스처를
+    # "클립당 최대 1회, 반복 금지"로 제한하고 고개·귀·꼬리·무게 이동·표정 중심으로 전환
+    # (_MOTION_FINAL_FREE 동일). 어휘 목록 앞쪽의 paw waves를 Veo가 과도 샘플링한 부작용.
     _MOTION_LIVELY = (
         "The puppy stays seated and centered in frame the whole time but moves naturally "
-        "and expressively as it talks — happy head tilts, little paw waves, excited ear "
-        "wiggles, a joyful tail wag, leaning slightly toward the camera, and lively "
-        "expressive reactions that bring real energy and charm to the shot. It is already "
+        "and expressively as it talks — gentle head tilts, small ear twitches, a joyful "
+        "tail wag, subtle shifts of body weight, leaning slightly toward the camera, and "
+        "lively facial expressions that bring real energy and charm to the shot. Its "
+        "front paws stay relaxed on the ground almost the entire time — at most one "
+        "brief, small paw gesture in the whole clip, never repeated or constant paw "
+        "waving. It is already "
         "in lively motion from the very first moments of the clip — it starts talking and "
         "moving right away, with no still, frozen, or slow warm-up intro. It never "
         "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
@@ -590,8 +620,9 @@ class VeoPromptBuilder:
     # 페이드/글리치 같은 깨짐 방지 최소 가드만 남긴다.
     _MOTION_FINAL_FREE = (
         "The puppy stays seated and centered in frame but is free to be playful and "
-        "adorable as it talks — happy head tilts, little paw waves, excited ear wiggles, "
-        "a joyful tail wag, cute expressive reactions. Let its natural charm show; no "
+        "adorable as it talks — happy head tilts, excited ear wiggles, a joyful tail "
+        "wag, cute expressive reactions; at most one brief, small paw gesture, never "
+        "repeated or constant paw waving. Let its natural charm show; no "
         "forced calm-down at the end. It never leaves the frame. The clip ends on a "
         "clean, fully-lit, sharp frame — no fade-out, no dimming, no blur, no warping, "
         "and no glitch at the end."
@@ -2150,6 +2181,10 @@ class VideoStudio:
         # 조립한다. interview 편은 마이크가 프레임에도 있어야 클립 시작·끝에서 마이크가
         # 나타났다 사라지는 점프가 없다.
         prop = f", with {style.prop}" if style.prop else ""
+        # 구도·표정은 script.id 해시로 결정적 선택(의상·장소·소품과 같은 패턴, 독립 salt).
+        # 매편 다른 썸네일 구도가 나오게 하는 핵심 — 고정 문구였던 시절의 "전부 같은
+        # 자세" 문제(2026-07-20 PO)를 로테이션으로 해소한다.
+        shot = _FRAME_SHOTS[zlib.crc32(f"shot:{script.id}".encode()) % len(_FRAME_SHOTS)]
         if style.fmt == "interview":
             mic = (
                 "A handheld interview microphone reaches into the frame from off-screen, "
@@ -2161,9 +2196,11 @@ class VideoStudio:
             "A photorealistic tall vertical portrait-orientation starting frame for a "
             f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}{prop}, "
             f"{style.setting}, "
-            "looking straight at the camera with a calm, gentle, friendly face, ready to "
-            f"talk directly to the camera. {_CINEMATIC_LOOK} "
+            f"{shot}. {_CINEMATIC_LOOK} "
             f"{scene_context}"
+            # 첫 1초 무음 가독성(2026-07-21 쇼츠 트렌드): 0초 프레임만 보고도 상황이
+            # 읽혀야 스와이프를 이긴다 — 배경·소품이 또렷이 보이는 상황 전달형 구도.
+            "The setting and props are clearly visible so the situation reads at a glance. "
             "Absolutely no text, letters, numbers, words, captions, logos, brand names, or "
             "watermarks anywhere. No people, no humans in costume, no other animals. "
             f"{mic}"

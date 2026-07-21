@@ -84,14 +84,22 @@ class UploadResult(BaseModel):
 
 
 class PerformanceReport(BaseModel):
-    """5단계 산출물: 콘텐츠별 성과 지표."""
+    """5단계 산출물: 콘텐츠별 성과 지표.
+
+    engaged_views·avg_view_percentage·traffic_sources는 노출/훅/이탈 원인 분리용
+    (2026-07-21 PO — engaged/views 비율=훅, percentage=이탈, traffic_sources=노출 경로).
+    """
 
     platform: str
     external_id: str
     views: int = 0
+    engaged_views: int = 0          # 스와이프로 이탈하지 않고 실제 시청한 조회
     likes: int = 0
     comments: int = 0
+    shares: int = 0
     avg_view_duration_sec: float = 0.0
+    avg_view_percentage: float = 0.0  # 영상 길이 대비 평균 시청 비율(%) — 100% 초과=루프
+    traffic_sources: dict[str, int] = Field(default_factory=dict)  # 예: {"SHORTS": 34}
     collected_at: datetime = Field(default_factory=_utcnow)
 
 
