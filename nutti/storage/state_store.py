@@ -78,6 +78,23 @@ class PipelineState:
         data["recent_topics"] = topics[: self.max_topics]
         self._save(data)
 
+    # --- 직전 편 포맷(연속 중복 회피) ---
+    # 포맷이 주제 해시라 연속 편이 같은 포맷에 걸릴 수 있다(2026-07-21 실측: 최근 6편 중
+    # vet 4회, run16·17 연속 vet → PO "중복 잡아라"). 실제 사용된 포맷을 저장해 다음 편이
+    # 회피한다 — 해시 재계산으로는 직전 편의 '회피 결과' 포맷을 복원할 수 없어 저장이 필수.
+
+    def get_last_format(self) -> str:
+        """직전 편에서 실제 사용된 포맷(없으면 빈 문자열)."""
+        return str(self._load().get("last_format", "") or "")
+
+    def save_format(self, fmt: str) -> None:
+        """이번 편 포맷을 저장한다(빈 값은 무시)."""
+        if not fmt or not fmt.strip():
+            return
+        data = self._load()
+        data["last_format"] = fmt
+        self._save(data)
+
     # --- 성과 수집 대기 큐(업로드 → 며칠 숙성 후 조회) ---
     # YouTube Analytics 지연 때문에 업로드 직후 조회하면 조회수가 0으로 나온다. 업로드를
     # 여기 쌓아두고(add_pending_upload), 오케스트레이터가 get_pending_uploads로 읽어

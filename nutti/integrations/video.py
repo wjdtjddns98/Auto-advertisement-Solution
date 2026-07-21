@@ -400,22 +400,27 @@ _VET_OUTFIT = (
     "visible clothing layer over its white fur, plus a black stethoscope with a shiny "
     "silver chest piece draped around its neck"
 )
-_VET_SETTING = "sitting at the examination desk of a bright, tidy veterinary clinic room"
-# 전 항목 sitting 계열로 통일(2026-07-06 PO) — standing 시작 프레임이 뽑히면 클립 전체가
-# 이족보행 인형탈 느낌이 되고, 모션 지시(_MOTION_HOLD/_MOTION_LIVELY의 "stays seated")와
-# 모순돼 드리프트를 유발한다. 새 장소를 추가할 때도 sitting 자세로 쓸 것.
+_VET_SETTING = (
+    "standing upright behind the examination desk of a bright, tidy veterinary clinic "
+    "room, front paws resting on the desk"
+)
+# 전 항목 standing(2족보행) 계열로 통일(2026-07-21 PO — 2족보행 강아지 트렌드 반영,
+# 2026-07-06 sitting 통일 결정의 의도적 반전). 과거 standing 회피 사유였던 "인형탈
+# 느낌"은 _MASCOT_APPEARANCE의 실사·해부학 가드 + 2족보행 레퍼런스 이미지(NUTTI_MASCOT_IMAGE)
+# 앵커가 담당한다. 모션 지시(_MOTION_HOLD/_MOTION_LIVELY)도 standing 기준으로 일치시켰다 —
+# 새 장소를 추가할 때도 standing 자세로 쓸 것(sitting 혼용 시 프레임-모션 모순으로 드리프트).
 _EPISODE_SETTINGS = [
-    "sitting on a busy city sidewalk like a street interview",
-    "sitting on a cozy living room sofa under warm lamps",
-    "sitting on a park bench on a sunny afternoon",
-    "sitting on a bright modern kitchen floor",
-    "sitting in front of a cute pet shop entrance",
-    "sitting at a tidy home office desk like a news anchor",
+    "standing on a busy city sidewalk like a street interview",
+    "standing in a cozy living room under warm lamps",
+    "standing on a park path on a sunny afternoon",
+    "standing on a bright modern kitchen floor",
+    "standing in front of a cute pet shop entrance",
+    "standing at a tidy home office desk like a news anchor, front paws on the desk",
 ]
 # 시작 프레임 구도·표정 로테이션(2026-07-20 PO — "썸네일이 전부 같은 자세"): Shorts
 # 썸네일은 영상 프레임에서 자동 추출되므로 시작 프레임 구도가 곧 썸네일이다. 종전엔
-# "정면 응시·차분한 표정" 한 가지 고정이라 매편 똑같아 보였다. 전 항목 sitting 유지
-# (기립 드리프트 가드 보존)·얼굴 정면 가시(립싱크 가독) 범위에서 앵글·표정만 바꾼다.
+# "정면 응시·차분한 표정" 한 가지 고정이라 매편 똑같아 보였다. 전 항목 standing 유지
+# (2026-07-21 2족보행 전환)·얼굴 정면 가시(립싱크 가독) 범위에서 앵글·표정만 바꾼다.
 # FLF 앵커 특성상 영상 전체 구도도 이 프레임을 따라간다. ASCII 작은따옴표(') 금지.
 _FRAME_SHOTS = [
     "looking straight at the camera with a calm, gentle, friendly face, ready to talk "
@@ -432,19 +437,21 @@ _FRAME_SHOTS = [
 # ===================== PO 수정 구역 끝 (편별 연출 로테이션) =====================
 
 
-def pick_episode_style(script_id: str, topic: str | None = None) -> EpisodeStyle:
+def pick_episode_style(
+    script_id: str, topic: str | None = None, fmt: str | None = None
+) -> EpisodeStyle:
     """script.id의 CRC32로 의상·장소·소품을, 주제 해시로 포맷을 결정적으로 고른다.
 
     의상·장소·소품은 서로 다른 salt로 해시해 독립적으로 조합된다 — 같은 salt를 쓰면
     리스트 길이가 같을 때 인덱스가 동기화돼 조합 다양성이 리스트 길이로 줄어든다.
-    포맷만 주제 문자열 기준(ai_text.pick_episode_format)인 이유: 대본 구조가 포맷을
-    따라야 하는데 대본 생성 시점엔 script.id가 아직 없다 — 주제가 유일한 공유 키.
-    topic 미지정(레거시 호출·테스트)이면 script_id를 키로 폴백한다(결정성 유지).
+    fmt가 오면(오케스트레이터가 직전 편 회피를 반영해 확정한 Script.episode_format)
+    그걸 그대로 쓴다 — 해시 재계산으로는 회피 결과를 복원할 수 없기 때문. 없으면
+    주제 해시, topic도 없으면(레거시 호출·테스트) script_id 폴백(결정성 유지).
     "vet" 포맷은 의상·장소를 수의사 세트로 고정하고 소품을 뽑지 않는다(콘셉트 보호).
     """
     from nutti.integrations.ai_text import pick_episode_format
 
-    fmt = pick_episode_format(topic if topic is not None else script_id)
+    fmt = fmt or pick_episode_format(topic if topic is not None else script_id)
     if fmt == "vet":
         return EpisodeStyle(_VET_OUTFIT, _VET_SETTING, "", fmt)
     outfit_idx = zlib.crc32(f"outfit:{script_id}".encode()) % len(_EPISODE_OUTFITS)
@@ -464,14 +471,19 @@ def pick_episode_style(script_id: str, topic: str | None = None) -> EpisodeStyle
 # 텍스트로 외형을 고정하는 것이 일관성의 핵심 수단 — 비워 두면 생성기가 매 편 다른
 # 강아지를 지어낸다(실제 증상). 반드시 레퍼런스 이미지(assets/mascot.png,
 # NUTTI_MASCOT_IMAGE)의 실제 모습과 일치시킬 것 — 텍스트와 이미지가 어긋나면 둘을
-# 섞어 오히려 더 들쭉날쭉해진다. 현재 값은 assets/mascot.png(흰 비숑프리제, PO 제공
-# 마스코트.png 1254x1254) 기준의 "얌전하고 귀여운 puppy". ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
+# 섞어 오히려 더 들쭉날쭉해진다. 2026-07-21 PO "2족보행 트렌드" 전환: 외형 텍스트를
+# 2족 기립으로 바꾸고 레퍼런스 이미지도 2족보행 변형(assets/mascot_bipedal.png,
+# NUTTI_MASCOT_IMAGE로 지정)으로 교체 — Kontext는 포즈 프롬프트를 무시하고 레퍼런스에
+# 앵커하므로(2026-07-20 실측) 이미지 교체 없이는 2족이 나오지 않는다.
+# ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
 _MASCOT_APPEARANCE = (
     "a real, photorealistic, live small white Bichon Frise puppy with a soft, fluffy, "
     "rounded pure-white powder-puff coat groomed into a round teddy-bear face, round dark "
-    "eyes, a small black nose, and a normal four-legged small dog body — a real live "
-    "animal, never a person in an animal costume, never a mascot suit or fursuit, never a "
-    "plush toy or stuffed animal"
+    "eyes, and a small black nose, standing upright on its two hind legs like a confident "
+    "little person with its front paws free like arms — still a real live animal with "
+    "natural small-dog anatomy, real dog proportions and real fur, never a person in an "
+    "animal costume, never a mascot suit or fursuit, never a plush toy or stuffed animal, "
+    "never a cartoon"
 )
 # ==================== PO 수정 구역 끝 (마스코트 외형) ====================
 
@@ -577,16 +589,17 @@ class VeoPromptBuilder:
         "fur color, markings, and overall appearance from the first frame to the last."
     )
     _MOTION_HOLD = (
-        "The puppy stays in the exact same upright seated position for the entire shot, "
-        "sitting still and centered, holding the same pose from the first frame to the "
-        "last frame; it does not lie down, stand up, walk, or leave the frame. The clip "
-        "ends on a clean, fully-lit, sharp frame with the puppy seated and centered — no "
-        "fade-out, no dimming, no blur at the end."
+        "The puppy stays in the exact same upright standing position on its two hind "
+        "legs for the entire shot, standing still and centered, holding the same pose "
+        "from the first frame to the last frame; it does not sit down, drop to all "
+        "fours, lie down, walk, or leave the frame. The clip ends on a clean, fully-lit, "
+        "sharp frame with the puppy standing and centered — no fade-out, no dimming, no "
+        "blur at the end."
     )
     # 끝프레임 고정(lock) 모드 전용 모션 지시(2026-06-29 PO: "모션홀드 풀어 생동감").
     # first-last-frame 모델이 시작·끝 프레임을 동일 마스코트 프레임으로 강제하므로, 중간에
     # 자유롭게 움직여도 클립은 항상 같은 끝 포즈로 수렴한다 — 정적인 _MOTION_HOLD 대신
-    # 앉은 채 자연스러운 제스처를 허용해 생기를 준다. 단 화면 이탈·기립·눕기는 막고
+    # 선 채(2족보행) 자연스러운 제스처를 허용해 생기를 준다. 단 화면 이탈·앉기·네발 복귀는 막고
     # 끝 페이드는 금지한다(negative_prompt 억제와 이중 방어).
     # 2026-07-10 PO("비트별로 페이드아웃되는 기분"): 종전의 "끝 2~3초 진정(wind-down)"
     # 강제를 제거 — 매 비트 끝마다 에너지가 죽어 페이드아웃처럼 보이는 직접 원인이었다.
@@ -594,22 +607,24 @@ class VeoPromptBuilder:
     # 이중 방어였다(수렴 실패는 QC의 tail_not_converged가 잡는다).
     # 2026-07-16 PO("캐릭터가 너무 정적이라 밋밋함"): 중간 비트의 제스처 어휘를
     # _MOTION_FINAL_FREE에서 이미 검증된 수준(앞발 흔들기·귀 쫑긋·꼬리 흔들기·상체
-    # 리액션)으로 확대. 화면 이탈·기립·끝 페이드 가드와 FLF 끝 포즈 수렴은 그대로 유지.
+    # 리액션)으로 확대. 화면 이탈·앉기(2026-07-21 2족보행 전환으로 기립→앉기 가드 반전)·
+    # 끝 페이드 가드와 FLF 끝 포즈 수렴은 그대로 유지.
     # 2026-07-20 PO("팔을 너무 자주 흔듦, 자연스러운 움직임 필요"): 앞발 제스처를
     # "클립당 최대 1회, 반복 금지"로 제한하고 고개·귀·꼬리·무게 이동·표정 중심으로 전환
     # (_MOTION_FINAL_FREE 동일). 어휘 목록 앞쪽의 paw waves를 Veo가 과도 샘플링한 부작용.
     _MOTION_LIVELY = (
-        "The puppy stays seated and centered in frame the whole time but moves naturally "
-        "and expressively as it talks — gentle head tilts, small ear twitches, a joyful "
-        "tail wag, subtle shifts of body weight, leaning slightly toward the camera, and "
-        "lively facial expressions that bring real energy and charm to the shot. Its "
-        "front paws stay relaxed on the ground almost the entire time — at most one "
-        "brief, small paw gesture in the whole clip, never repeated or constant paw "
-        "waving. It is already "
+        "The puppy stays standing upright on its two hind legs, centered in frame the "
+        "whole time, but moves naturally and expressively as it talks — gentle head "
+        "tilts, small ear twitches, a joyful tail wag, subtle shifts of body weight from "
+        "foot to foot, leaning slightly toward the camera, and lively facial expressions "
+        "that bring real energy and charm to the shot. Its front paws hang relaxed at "
+        "its sides almost the entire time — at most one brief, small paw gesture in the "
+        "whole clip, never repeated or constant paw waving. It is already "
         "in lively motion from the very first moments of the clip — it starts talking and "
-        "moving right away, with no still, frozen, or slow warm-up intro. It never "
-        "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
-        "leaves the frame. Keep this natural lively energy all the way to the end of the "
+        "moving right away, with no still, frozen, or slow warm-up intro. It never sits "
+        "down, drops to all fours, walks away, lies down, hunches over, ducks its head "
+        "down, curls forward, or leaves the frame. Keep this natural lively energy all "
+        "the way to the end of the "
         "clip — do not wind down, slow down, go still, or freeze near the end. The clip "
         "ends on a clean, fully-lit, razor-sharp frame — no fade-out, no dimming, no blur, "
         "no warping, no morphing, no freeze, and no glitch at the end."
@@ -619,11 +634,12 @@ class VeoPromptBuilder:
     # 마지막 비트는 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 불필요 — 화면 이탈·끝
     # 페이드/글리치 같은 깨짐 방지 최소 가드만 남긴다.
     _MOTION_FINAL_FREE = (
-        "The puppy stays seated and centered in frame but is free to be playful and "
-        "adorable as it talks — happy head tilts, excited ear wiggles, a joyful tail "
-        "wag, cute expressive reactions; at most one brief, small paw gesture, never "
-        "repeated or constant paw waving. Let its natural charm show; no "
-        "forced calm-down at the end. It never leaves the frame. The clip ends on a "
+        "The puppy stays standing upright on its two hind legs, centered in frame, but "
+        "is free to be playful and adorable as it talks — happy head tilts, excited ear "
+        "wiggles, a joyful tail wag, cute expressive reactions; at most one brief, small "
+        "paw gesture, never repeated or constant paw waving. Let its natural charm show; "
+        "no forced calm-down at the end. It never sits down, drops to all fours, or "
+        "leaves the frame. The clip ends on a "
         "clean, fully-lit, sharp frame — no fade-out, no dimming, no blur, no warping, "
         "and no glitch at the end."
     )
@@ -795,7 +811,7 @@ class VideoStudio:
         # 편별 스타일(의상·장소)은 여기서 정확히 한 번 계산해 프레임과 비트 클립에
         # 같은 값을 명시적으로 전달한다 — 두 곳에서 독립 계산하면 향후 호출 경로가
         # 갈릴 때 프레임과 클립의 장면이 어긋날 수 있다(리뷰 지적, PR #52).
-        style = pick_episode_style(script.id, script.topic)
+        style = pick_episode_style(script.id, script.topic, fmt=script.episode_format or None)
         frame_path = self._generate_frame(script, style)
         # 실 경로의 총길이는 위 사전 추정 대신 veo_fal이 돌려준 실측값(비트 클립 앞뒤
         # 침묵 트림 반영)으로 덮어쓴다.

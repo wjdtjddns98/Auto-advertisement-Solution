@@ -531,7 +531,7 @@ def test_factcheck_regenerates_with_issue_feedback_then_rejects(monkeypatch):
 
     real_gen = orch.ai.generate_script
 
-    def capturing_gen(topic, feedback=""):
+    def capturing_gen(topic, feedback="", episode_format=""):
         feedbacks.append(feedback)
         return real_gen(topic, feedback=feedback)
 

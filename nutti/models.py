@@ -52,6 +52,10 @@ class Script(BaseModel):
     # 클립이 된다(veo: 8초 고정, kling: 내레이션 길이에 맞춘 5/10초).
     # 비면 body 전체를 단일 클립 대사로 쓴다(하위호환·단일컷 폴백).
     beats: list[str] = Field(default_factory=list)
+    # 이번 편 포맷(vlog/interview/vet). 오케스트레이터가 직전 편 회피를 반영해 확정한
+    # 값 — 대본(ai_text)·영상(video)이 이 필드를 단일 소스로 공유한다(2026-07-21).
+    # 비면 주제 해시 폴백(하위호환 — 레거시 경로·테스트).
+    episode_format: str = ""
     created_at: datetime = Field(default_factory=_utcnow)
 
 

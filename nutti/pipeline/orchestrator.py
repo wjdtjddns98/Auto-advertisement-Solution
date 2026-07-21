@@ -127,7 +127,15 @@ class Orchestrator:
         # _fact_check가 FactCheckFailed를 던져 로깅에 도달하지 않으며, 거절 사실은
         # factcheck.rejected 로그로 남는다.
         run.current_stage = Stage.SCRIPT
-        run.script = self.ai.generate_script(topic, feedback=feedback)
+        # 편 포맷 확정: 주제 해시 + 직전 편 포맷 회피(연속 중복 방지, 2026-07-21 PO).
+        # 회피 결과는 해시로 재현 불가라 state에 저장해 다음 편이 참조한다.
+        from nutti.integrations.ai_text import pick_episode_format
+
+        episode_format = pick_episode_format(topic, avoid=self.state.get_last_format())
+        self.state.save_format(episode_format)
+        run.script = self.ai.generate_script(
+            topic, feedback=feedback, episode_format=episode_format
+        )
         self._fact_check(run, topic, feedback)
         self.store.log_script(run.script)
         # REVISE: 수정 내용이 있으면 script.body에 반영하고 비트를 재분할 후 시트를 업데이트한다.
@@ -268,7 +276,10 @@ class Orchestrator:
             retry_feedback = feedback + "\n[팩트체크 지적 — 아래 문제를 반드시 수정]\n" + "\n".join(
                 f"- {issue}" for issue in result.issues
             )
-            run.script = self.ai.generate_script(topic, feedback=retry_feedback)
+            # 재생성도 같은 편 포맷을 유지한다(회피 확정값 — run()에서 최초 결정).
+            run.script = self.ai.generate_script(
+                topic, feedback=retry_feedback, episode_format=run.script.episode_format
+            )
             result = self.ai.fact_check_script(run.script)
 
         run.script.fact_checked = result.passed
