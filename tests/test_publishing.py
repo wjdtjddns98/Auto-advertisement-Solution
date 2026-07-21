@@ -984,6 +984,20 @@ def test_youtube_fetch_traffic_sources_http_error_returns_empty():
     assert client.fetch_traffic_sources("v1") == {}
 
 
+def test_youtube_fetch_traffic_sources_token_failure_returns_empty():
+    """리뷰 지적 회귀 핀: exchange_token의 PublishError도 soft-fail로 삼켜 빈 dict.
+
+    analytics용 1차 토큰 교환이 성공한 뒤 traffic-sources용 2차 교환이 401로 실패해도
+    이미 확보한 본체 지표를 버리지 않아야 한다(_fetch_youtube_performance 보호).
+    """
+    http = FakeHttpClient(
+        [FakeHttpResponse(status_code=401, body={"error": "invalid_grant"})]  # 토큰 교환 실패
+    )
+    client = YouTubeClient(_yt_live_settings(), http=http)
+
+    assert client.fetch_traffic_sources("v1") == {}
+
+
 def test_youtube_fetch_analytics_no_rows_returns_empty():
     """rows가 없으면(업로드 직후 등) 빈 dict를 반환한다(상위에서 0 정규화)."""
     http = FakeHttpClient(

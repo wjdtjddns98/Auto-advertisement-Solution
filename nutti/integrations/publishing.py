@@ -301,13 +301,15 @@ class YouTubeClient:
     def fetch_traffic_sources(self, external_id: str) -> dict[str, int]:
         """영상별 유입 경로(SHORTS 피드/검색/채널 등)별 조회수를 조회한다.
 
-        dimensions=insightTrafficSourceType. 보조 지표이므로 실패(HTTP 오류·전송 오류·
-        빈 응답)는 경고 로그 후 빈 dict — 성과 수집 본체를 죽이지 않는다.
+        dimensions=insightTrafficSourceType. 보조 지표이므로 모든 실패(토큰 교환 실패
+        포함 HTTP 오류·전송 오류·빈 응답)는 경고 로그 후 빈 dict — 성과 수집 본체를
+        죽이지 않는다(exchange_token의 PublishError까지 잡아야 계약이 지켜진다 —
+        리뷰 지적 반영). 로그는 예외 타입명만(redaction — 토큰·URL 미노출).
         """
         import httpx  # lazy import — dry_run 경로에서는 불필요
 
-        access_token = self.exchange_token()
         try:
+            access_token = self.exchange_token()
             resp = self.http.get(
                 "https://youtubeanalytics.googleapis.com/v2/reports",
                 params={
@@ -320,8 +322,12 @@ class YouTubeClient:
                 },
                 headers={"Authorization": f"Bearer {access_token}"},
             )
-        except (httpx.TransportError, httpx.TooManyRedirects):
-            log.warning("youtube.traffic_sources.transport_error", video_id=external_id)
+        except (PublishError, httpx.TransportError, httpx.TooManyRedirects) as exc:
+            log.warning(
+                "youtube.traffic_sources.fetch_failed",
+                video_id=external_id,
+                err=type(exc).__name__,
+            )
             return {}
         if resp.status_code != 200:
             log.warning(
