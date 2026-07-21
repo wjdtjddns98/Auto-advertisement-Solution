@@ -530,12 +530,19 @@ def test_generate_metadata_live_without_key_uses_claude_code(monkeypatch):
     settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
     client = AITextClient(settings)
     url = "https://example.com/calc/"
-    monkeypatch.setattr(
-        client,
-        "_claude_cli",
-        lambda _full: '{"title": "강아지 사과 급여 꿀팁", "description": "본문", "hashtags": ["#사과"]}',
-    )
+    sent: list[str] = []
+
+    def _fake_cli(full):
+        sent.append(full)
+        return '{"title": "강아지 사과 급여 꿀팁", "description": "본문", "hashtags": ["#사과"]}'
+
+    monkeypatch.setattr(client, "_claude_cli", _fake_cli)
     meta = client.generate_metadata(Script(topic="강아지 사과", body="b"), url)
+    # 회귀 핀: 폴백(라이브 운영 기본) 프롬프트에도 SEO 지시가 실려야 한다 —
+    # 과거엔 폴백에 최적화 지시가 전혀 없었다(2026-07-21 조회수 최적화).
+    from nutti.integrations.ai_text import METADATA_GUIDE
+
+    assert METADATA_GUIDE in sent[0]
     assert meta.title == "강아지 사과 급여 꿀팁"
     assert "강아지 건강 간식 꿀팁" not in meta.title  # 정적 더미가 아님
     assert url in meta.description
