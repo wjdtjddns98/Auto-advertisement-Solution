@@ -106,7 +106,7 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     static = builder.build_beat("안녕", motion_release=False)
     # lively: 자연스러운 제스처 허용, 정적 고정 문구는 없음.
     assert "moves naturally and expressively" in lively
-    assert "stays in the exact same upright standing position" not in lively
+    assert "stays in the exact same upright seated position" not in lively
     # 화면 이탈 방지는 lively에도 유지(막판 이상행동 방어).
     assert "leaves the frame" in lively
     # 끝 진정(wind-down) 강제는 제거하고 끝까지 에너지 유지를 지시한다(2026-07-10 PO).
@@ -117,7 +117,7 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     assert "completely frozen and motionless" not in lively
     assert "no fade-out" in lively and "no freeze" in lively
     # 기본(static)은 기존 _MOTION_HOLD 유지(하위호환).
-    assert "stays in the exact same upright standing position" in static
+    assert "stays in the exact same upright seated position" in static
     assert "moves naturally and expressively" not in static
 
 
@@ -232,9 +232,9 @@ def test_frame_prompt_sanitizes_topic():
     assert "간식’" in prompt
     # 주제 잘림 경계 핀 — 고정 템플릿(페르소나·마이크·의상·장소·소품) 길이를 더한 상한.
     # 핀의 목적은 "주제가 _MAX_TOPIC_CHARS로 잘린다"이므로 템플릿이 길어지면 함께 올린다.
-    # 2026-07-21: 첫 1초 가독성 문장(+90)과 2족보행 외형 확장(+190)으로 1400→1700 상향
-    # (실측 최장 1795, 여유 ~105).
-    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1700
+    # 2026-07-21: 첫 1초 가독성 문장 추가로 1400→1500 상향(2족보행 외형 확장분은 당일
+    # 철회로 원복 — 실측 최장 1604, 여유 ~96).
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1500
     # 금지 요소 지시는 주입과 무관하게 유지된다(자막·코스튬·타 동물 금지 강화 문구).
     assert "No people, no humans in costume, no other animals." in prompt
 
@@ -1767,7 +1767,7 @@ def test_build_beat_final_cta_frees_motion():
     mid = b.build_beat("대사", motion_release=True, final_cta=False)
     assert "free to be playful" in final
     assert "winding down its gestures" not in final  # 진정 강제 해제
-    assert "leaves the frame" in final  # 최소 깨짐 가드는 유지(2족보행 문구로 재구성됨)
+    assert "never leaves the frame" in final  # 최소 깨짐 가드는 유지
     assert "no fade-out" in final
     assert "winding down its gestures" not in mid  # 중간 비트도 진정 강제 제거(2026-07-10)
     assert "do not wind down" in mid  # 끝까지 에너지 유지 지시
