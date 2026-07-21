@@ -253,7 +253,15 @@ class YouTubeClient:
         import httpx  # lazy import — dry_run 경로에서는 불필요
 
         access_token = self.exchange_token()
-        metrics = ["views", "likes", "comments", "averageViewDuration"]
+        metrics = [
+            "views",
+            "engagedViews",
+            "likes",
+            "comments",
+            "shares",
+            "averageViewDuration",
+            "averageViewPercentage",
+        ]
         try:
             resp = self.http.get(
                 "https://youtubeanalytics.googleapis.com/v2/reports",
@@ -289,6 +297,49 @@ class YouTubeClient:
             )
             return {}
         return dict(zip(headers, row))
+
+    def fetch_traffic_sources(self, external_id: str) -> dict[str, int]:
+        """영상별 유입 경로(SHORTS 피드/검색/채널 등)별 조회수를 조회한다.
+
+        dimensions=insightTrafficSourceType. 보조 지표이므로 실패(HTTP 오류·전송 오류·
+        빈 응답)는 경고 로그 후 빈 dict — 성과 수집 본체를 죽이지 않는다.
+        """
+        import httpx  # lazy import — dry_run 경로에서는 불필요
+
+        access_token = self.exchange_token()
+        try:
+            resp = self.http.get(
+                "https://youtubeanalytics.googleapis.com/v2/reports",
+                params={
+                    "ids": "channel==MINE",
+                    "startDate": "2005-02-14",
+                    "endDate": date.today().isoformat(),
+                    "metrics": "views",
+                    "dimensions": "insightTrafficSourceType",
+                    "filters": f"video=={external_id}",
+                },
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+        except (httpx.TransportError, httpx.TooManyRedirects):
+            log.warning("youtube.traffic_sources.transport_error", video_id=external_id)
+            return {}
+        if resp.status_code != 200:
+            log.warning(
+                "youtube.traffic_sources.http_error",
+                video_id=external_id,
+                status=resp.status_code,
+            )
+            return {}
+        rows = resp.json().get("rows") or []
+        # 각 행 = [소스 타입(str), 조회수(number)]. 형태가 어긋난 행은 건너뛴다.
+        result: dict[str, int] = {}
+        for row in rows:
+            if isinstance(row, list) and len(row) == 2 and isinstance(row[0], str):
+                try:
+                    result[row[0]] = int(row[1])
+                except (TypeError, ValueError):
+                    continue
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -440,9 +491,13 @@ class Publisher:
                 platform=upload.platform,
                 external_id=upload.external_id,
                 views=1234,
+                engaged_views=567,
                 likes=88,
                 comments=12,
+                shares=4,
                 avg_view_duration_sec=31.5,
+                avg_view_percentage=87.5,
+                traffic_sources={"SHORTS": 900, "YT_SEARCH": 234, "YT_CHANNEL": 100},
             )
 
         if upload.platform == "youtube":
@@ -458,6 +513,7 @@ class Publisher:
         client = self._yt_client or YouTubeClient(self.settings)
         try:
             data = client.fetch_analytics(upload.external_id)
+            traffic = client.fetch_traffic_sources(upload.external_id)
         finally:
             if _own_yt:
                 client.close()
@@ -466,9 +522,13 @@ class Publisher:
             platform="youtube",
             external_id=upload.external_id,
             views=int(data.get("views", 0)),
+            engaged_views=int(data.get("engagedViews", 0)),
             likes=int(data.get("likes", 0)),
             comments=int(data.get("comments", 0)),
+            shares=int(data.get("shares", 0)),
             avg_view_duration_sec=float(data.get("averageViewDuration", 0)),
+            avg_view_percentage=float(data.get("averageViewPercentage", 0)),
+            traffic_sources=traffic,
         )
 
     def _fetch_instagram_performance(self, upload: UploadResult) -> PerformanceReport:

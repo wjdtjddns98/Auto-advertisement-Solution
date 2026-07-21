@@ -572,6 +572,19 @@ def test_build_metadata_algo_optimization():
     assert "#Shorts" in meta.description
 
 
+def test_build_metadata_appends_utm_tracked_link():
+    """계산기 링크에 UTM 추적 파라미터(utm_content=script.id)가 붙는다 — 편별 유입 분석용."""
+    from nutti.integrations.ai_text import AITextClient
+
+    script = Script(topic="강아지 사과", body="b")
+    url = "https://nutti.co.kr/calculator.html"
+    meta = AITextClient._build_metadata(script, url, "제목", "설명 본문", ["#강아지"])
+    assert (
+        f"{url}?utm_source=youtube&utm_medium=shorts&utm_content={script.id}"
+        in meta.description
+    )
+
+
 def test_build_metadata_does_not_duplicate_shorts():
     """이미 #shorts가 있으면(대소문자 무관) 중복 추가하지 않는다."""
     from nutti.integrations.ai_text import AITextClient
