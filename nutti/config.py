@@ -261,9 +261,10 @@ class Settings(BaseSettings):
     instagram_access_token: str = Field(default="", alias="INSTAGRAM_ACCESS_TOKEN")
     instagram_account_id: str = Field(default="", alias="INSTAGRAM_ACCOUNT_ID")
 
-    # 간식계산기 고정 링크
+    # 간식계산기 고정 링크(2026-07-21 nutti.co.kr DNS 전환 — PO 지시).
+    # UTM 추적 파라미터는 여기 넣지 않는다 — _build_metadata가 편별(utm_content=script.id)로 붙인다.
     calculator_url: str = Field(
-        default="https://wjdtjddns98.github.io/Nutti-Calculator/",
+        default="https://nutti.co.kr/calculator.html",
         alias="NUTTI_CALCULATOR_URL",
     )
 
