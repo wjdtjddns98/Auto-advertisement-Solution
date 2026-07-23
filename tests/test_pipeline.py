@@ -599,16 +599,23 @@ def test_rejected_run_does_not_persist_format(tmp_path):
     assert state.get_last_format() == ""
 
 
-def test_next_run_avoids_last_published_format(tmp_path):
-    """다음 런은 직전 게시 편의 포맷을 회피한다(오케스트레이터 배선 핀)."""
-    from nutti.integrations.ai_text import pick_episode_format
+def test_next_run_avoids_last_published_format(tmp_path, monkeypatch):
+    """다음 런은 직전 게시 편의 포맷을 회피한다(오케스트레이터 배선 핀).
 
+    2026-07-23 먹방 단일 컨셉으로 실제 목록은 1종이지만, 회피 배선은 포맷이 다시
+    늘어날 때를 위해 유지한다 — 가짜 다포맷 목록으로 배선만 핀한다.
+    """
+    from nutti.integrations import ai_text
+
+    monkeypatch.setattr(ai_text, "EPISODE_FORMATS", ["fmt-a", "fmt-b", "fmt-c"])
     state = _tmp_state(tmp_path)
     orch = Orchestrator(_dry_settings(), telegram=AutoApproveGate(), state=state)
     first = orch.run("주제 하나")
     fmt1 = first.script.episode_format
     # 해시가 직전 편과 같은 포맷으로 떨어지는 주제를 골라, 회피 시프트를 강제 검증.
-    clash = next(f"주제-{i}" for i in range(100) if pick_episode_format(f"주제-{i}") == fmt1)
+    clash = next(
+        f"주제-{i}" for i in range(100) if ai_text.pick_episode_format(f"주제-{i}") == fmt1
+    )
     second = orch.run(clash)
     assert second.script.episode_format != fmt1
 

@@ -94,8 +94,13 @@ def test_script_system_prompt_pins_strong_hook():
     # 2026-07-16 KR 쇼츠 트렌드 반영(PO 지시) 핀: 훅 첫 문장 2초 컷 + 패턴 다양화 +
     # 15초 지점 2차 훅. 지워지면 실패(리버트 가드).
     assert "15자 이내" in SCRIPT_SYSTEM_PROMPT
-    assert "고정하지 말고" in SCRIPT_SYSTEM_PROMPT
+    assert "문형 반복" in SCRIPT_SYSTEM_PROMPT  # 태도는 고정, 문장 반복은 금지
     assert "2차 훅" in SCRIPT_SYSTEM_PROMPT
+    # 2026-07-23 PO 싸가지 먹방 컨셉 핀: 디스·명령형 훅("야 너는 이런 거 먹지 마라")이
+    # 대표 패턴 + 먹으면서 말하는 상황 + 건방·뻔뻔 캐릭터. 지워지면 실패(리버트 가드).
+    assert "먹지 마라" in SCRIPT_SYSTEM_PROMPT
+    assert "건방" in SCRIPT_SYSTEM_PROMPT
+    assert "먹으면서 말하는" in SCRIPT_SYSTEM_PROMPT
 
 
 def test_pick_beat_count_deterministic_and_both_variants():
@@ -160,18 +165,24 @@ def test_vlog_format_rule_has_fail_twist():
     assert "반전" in FORMAT_SCRIPT_RULES["vlog"]
 
 
-def test_pick_episode_format_avoid_shifts_to_next():
-    """avoid(직전 편 포맷)와 같으면 다음 포맷으로 밀린다 — 연속 중복 방지(2026-07-21 PO)."""
-    from nutti.integrations.ai_text import EPISODE_FORMATS, pick_episode_format
+def test_pick_episode_format_avoid_shifts_to_next(monkeypatch):
+    """avoid(직전 편 포맷)와 같으면 다음 포맷으로 밀린다 — 연속 중복 방지(2026-07-21 PO).
 
+    2026-07-23 먹방 단일 컨셉으로 실제 목록은 1종이지만, 회피 인프라는 포맷이 다시
+    늘어날 때를 위해 유지한다 — 가짜 다포맷 목록으로 로직만 핀한다.
+    """
+    from nutti.integrations import ai_text
+
+    monkeypatch.setattr(ai_text, "EPISODE_FORMATS", ["a", "b", "c"])
+    formats = ai_text.EPISODE_FORMATS
     topic = "주제-중복테스트"
-    base = pick_episode_format(topic)
-    shifted = pick_episode_format(topic, avoid=base)
+    base = ai_text.pick_episode_format(topic)
+    shifted = ai_text.pick_episode_format(topic, avoid=base)
     assert shifted != base
-    assert shifted == EPISODE_FORMATS[(EPISODE_FORMATS.index(base) + 1) % len(EPISODE_FORMATS)]
+    assert shifted == formats[(formats.index(base) + 1) % len(formats)]
     # avoid와 다르면 그대로.
-    other = next(f for f in EPISODE_FORMATS if f != base)
-    assert pick_episode_format(topic, avoid=other) == base
+    other = next(f for f in formats if f != base)
+    assert ai_text.pick_episode_format(topic, avoid=other) == base
 
 
 def test_generate_script_carries_episode_format():
@@ -196,34 +207,27 @@ def test_pick_episode_format_deterministic_and_valid():
     )
 
     assert pick_episode_format("고구마") == pick_episode_format("고구마")
-    assert set(FORMAT_SCRIPT_RULES) <= set(EPISODE_FORMATS)
+    # 2026-07-23 먹방 단일 컨셉: vet/vlog 룰은 복원 대비 휴면 엔트리로 남는다 —
+    # 룰 dict는 활성 포맷 + 휴면 포맷 범위 안이어야 한다(오타 키 방지).
+    assert set(FORMAT_SCRIPT_RULES) <= set(EPISODE_FORMATS) | {"vet", "vlog"}
     seen = {pick_episode_format(f"주제-{i}") for i in range(300)}
     assert seen == set(EPISODE_FORMATS)
 
 
 def test_generate_script_injects_format_rule_into_prompt():
-    """포맷 규칙이 있는 편(vet/vlog)은 유저 프롬프트에 [이번 편 포맷] 블록이 붙고(대본
-    구조 지시), interview 편은 붙지 않는다 — dry_run이 Script.prompt를 보존하므로
-    무네트워크 검증. (2026-07-20 PO 3종 축소로 quiz/direct → vet/interview로 교체)"""
-    from nutti.integrations.ai_text import (
-        FORMAT_SCRIPT_RULES,
-        AITextClient,
-        pick_episode_format,
-    )
+    """포맷 규칙이 있는 편(휴면 vet 명시 지정)은 유저 프롬프트에 [이번 편 포맷] 블록이
+    붙고, 기본(mukbang — 룰 없음) 편은 붙지 않는다 — dry_run이 Script.prompt를
+    보존하므로 무네트워크 검증. (2026-07-23 먹방 단일 컨셉: vet은 명시 지정으로만 활성)"""
     from nutti.config import Settings
+    from nutti.integrations.ai_text import FORMAT_SCRIPT_RULES, AITextClient
 
     client = AITextClient(Settings(NUTTI_DRY_RUN="true"))
-    vet_topic = next(
-        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "vet"
-    )
-    interview_topic = next(
-        f"주제-{i}" for i in range(300) if pick_episode_format(f"주제-{i}") == "interview"
-    )
-    vet_script = client.generate_script(vet_topic)
-    interview_script = client.generate_script(interview_topic)
+    vet_script = client.generate_script("주제-포맷룰", episode_format="vet")
+    default_script = client.generate_script("주제-포맷룰")
     assert "[이번 편 포맷" in vet_script.prompt
     assert FORMAT_SCRIPT_RULES["vet"] in vet_script.prompt
-    assert "[이번 편 포맷" not in interview_script.prompt
+    assert default_script.episode_format == "mukbang"
+    assert "[이번 편 포맷" not in default_script.prompt
 
 
 def test_script_system_prompt_enforces_banmal():
@@ -239,9 +243,9 @@ def test_script_system_prompt_bans_brand_in_last_beat():
 
 
 def test_script_system_prompt_cta_calm_tone():
-    """CTA 비트를 차분한 권유체로 쓰게 가이드한다(2026-06-29 PO: 마지막 비트 음성이
-    들뜨며 화자가 바뀌는 경향 완화 — 입력 대사 톤 균일화)."""
-    assert "차분한 권유체" in SCRIPT_SYSTEM_PROMPT
+    """CTA 비트를 들뜨지 않은 톤으로 쓰게 가이드한다(2026-06-29 PO: 마지막 비트 음성이
+    들뜨며 화자가 바뀌는 경향 완화 — 2026-07-23 싸가지 컨셉에선 '심드렁한 무심한 권유')."""
+    assert "무심한 권유" in SCRIPT_SYSTEM_PROMPT
     assert "느낌표를 쓰지 말 것" in SCRIPT_SYSTEM_PROMPT
 
 
@@ -445,6 +449,8 @@ def test_generate_script_regenerates_on_hard_rule_violation(monkeypatch):
         return next(bodies)
 
     monkeypatch.setattr(client, "_llm_text", fake_llm)
+    # 간식 선정도 _llm_text를 쓰므로 페이크 iterator를 소모하지 않게 고정값으로 대체.
+    monkeypatch.setattr(client, "suggest_food", lambda _t: ("고구마 스틱", "sweet potato"))
     # _valid_body()는 4줄이므로 4비트 버킷 주제로 고정(A/B 도입 후 3비트 주제면 반려됨).
     from nutti.integrations.ai_text import pick_beat_count
 
@@ -471,6 +477,7 @@ def test_generate_script_gives_up_after_max_tries(monkeypatch):
         return "항상 위반하는 짧은 대사"
 
     monkeypatch.setattr(client, "_llm_text", fake_llm)
+    monkeypatch.setattr(client, "suggest_food", lambda _t: ("고구마 스틱", "sweet potato"))
     script = client.generate_script("간식 적정량")
     assert calls["n"] == _SCRIPT_MAX_TRIES
     assert script.body == "항상 위반하는 짧은 대사"  # 마지막 결과 유지, 예외 없음
@@ -812,6 +819,101 @@ def test_suggest_topic_live_empty_falls_back_to_seed():
     # 모델이 빈 응답을 주면 시드로 폴백(파이프라인이 멈추지 않도록).
     client = _live_topic_client(_Msg([_Block("text", text="   ")]))
     assert client.suggest_topic().strip()
+
+
+# --- 싸가지 먹방: 간식 선정·안전 하드가드(2026-07-23 PO) ---
+
+
+def test_suggest_food_dry_run_deterministic_and_safe():
+    """dry_run: 무네트워크로 안전 간식을 결정적으로 고른다."""
+    from nutti.integrations.ai_text import _SAFE_SNACKS
+
+    client = _client()
+    pair = client.suggest_food("강아지 수박 먹어도 되나요")
+    assert pair == client.suggest_food("강아지 수박 먹어도 되나요")
+    assert pair in _SAFE_SNACKS
+
+
+def test_guard_food_rejects_dangerous_and_malformed():
+    """위험 음식(한/영)·프롬프트 불가 형태는 안전 간식 폴백, 정상 값은 통과."""
+    from nutti.integrations.ai_text import _SAFE_SNACKS, _guard_food
+
+    topic = "강아지 초콜릿 위험성"
+    assert _guard_food("초콜릿 조각", "small brown snack pieces", topic) in _SAFE_SNACKS
+    assert _guard_food("달콤한 간식", "dark chocolate chunks", topic) in _SAFE_SNACKS
+    assert _guard_food("고구마", "고구마 스틱", topic) in _SAFE_SNACKS  # 비ASCII visual
+    assert _guard_food("고구마", "puppy's sweet potato", topic) in _SAFE_SNACKS  # 작은따옴표
+    assert _guard_food("", "", topic) in _SAFE_SNACKS  # 빈 응답
+    assert _guard_food("당근", "fresh carrot sticks", topic) == ("당근", "fresh carrot sticks")
+
+
+def test_guard_food_no_false_positive_on_partial_korean_match():
+    """'파' 한 글자 부분일치 오탐 방지 핀 — 파프리카(안전식품)는 통과해야 한다."""
+    from nutti.integrations.ai_text import _guard_food
+
+    assert _guard_food("파프리카", "fresh bell pepper slices", "t") == (
+        "파프리카",
+        "fresh bell pepper slices",
+    )
+
+
+def test_generate_script_carries_food():
+    """generate_script가 간식을 확정해 프롬프트 주입 + Script 필드로 영상 단계에 전달."""
+    client = _client()
+    script = client.generate_script("강아지 간식 적정량")
+    assert script.food_name and script.food_visual
+    assert "[이번 편 간식" in script.prompt
+    assert script.food_name in script.prompt
+
+
+def test_suggest_food_live_guards_llm_answer(monkeypatch):
+    """라이브 경로: LLM이 위험 음식을 골라와도 코드 하드가드가 안전 간식으로 폴백."""
+    from nutti.integrations.ai_text import _SAFE_SNACKS
+
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    monkeypatch.setattr(
+        client,
+        "_claude_cli",
+        lambda _f: '{"name_kr": "포도 젤리", "visual_en": "grape jelly cubes"}',
+    )
+    assert client.suggest_food("강아지 포도 위험성") in _SAFE_SNACKS
+
+
+def test_guard_food_english_word_boundary_no_false_positive():
+    """영어 토큰은 접두 단어경계 매칭 — 리뷰 확정 오탐(legumes→gum, sleek→leek)은
+    통과하고, 파생·복수형(chocolate·grapes·초코·브라우니·fudge)은 여전히 잡는다."""
+    from nutti.integrations.ai_text import _SAFE_SNACKS, _guard_food
+
+    # 오탐이었던 안전 표현은 그대로 통과.
+    ok = ("야채 간식", "a bowl of legumes and rice")
+    assert _guard_food(*ok, "t") == ok
+    ok2 = ("간식", "served in a sleek modern bowl")
+    assert _guard_food(*ok2, "t") == ok2
+    # 파생·복수형 미탐은 폴백으로 잡힌다.
+    assert _guard_food("초코 과자", "small brown pieces", "t") in _SAFE_SNACKS
+    assert _guard_food("과자", "a piece of choco snack", "t") in _SAFE_SNACKS
+    assert _guard_food("브라우니 조각", "small square pieces", "t") in _SAFE_SNACKS
+    assert _guard_food("과자", "fudge brownie bites", "t") in _SAFE_SNACKS
+    assert _guard_food("달콤 간식", "chocolate covered treats", "t") in _SAFE_SNACKS
+    assert _guard_food("과일", "a few fresh grapes", "t") in _SAFE_SNACKS
+
+
+def test_suggest_food_sdk_exception_falls_back():
+    """SDK 직접 호출(self._client) 분기의 API 예외도 안전 폴백 — 편 생성이 죽지 않는다
+    (리뷰 확정: anthropic APIError는 RuntimeError/ValueError 미상속)."""
+    from nutti.integrations.ai_text import _SAFE_SNACKS
+
+    class _Boom:
+        class messages:
+            @staticmethod
+            def create(**_kw):
+                raise ConnectionError("api down")  # RuntimeError/ValueError 미상속 예외
+
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    client._client = _Boom()
+    assert client.suggest_food("강아지 간식 적정량") in _SAFE_SNACKS
 
 
 # --- 주제 문형 중복 하드룰(_topic_too_similar, 2026-07-23 PO "영상 중복도") ---
