@@ -70,14 +70,13 @@ def test_prompt_builder_includes_dialogue_in_quotes():
     assert "'누띠 간식은 하루 두 개면 충분해요!'" in prompt
 
 
-def test_prompt_builder_includes_camera_directives():
-    """고정 카메라 지시(locked-off·무빙 없음)가 포함된다 — 흔들림/컷 전환 방지.
-
-    단 "tripod" 단어는 Veo가 화면에 삼각대로 렌더하므로(2026-06-29 실측) 제외한다.
+def test_prompt_builder_camera_allows_dynamic_but_guards_warp():
+    """카메라는 자유롭게 움직여도 됨(2026-07-23 PO: 화면 고정 불필요·클로즈업 OK) —
+    단 캐릭터 일관성·무일그러짐이 하드 요건, "tripod" 단어는 삼각대 렌더라 제외한다.
     """
     prompt = VeoPromptBuilder().build_beat("누띠 간식은 하루 두 개면 충분해요!")
-    assert "locked-off" in prompt
-    assert "no camera movement" in prompt
+    assert "does not need to be a locked-off static shot" in prompt  # 고정 완화
+    assert "never warp, morph, stretch, or deform" in prompt  # 일그러짐 방지 유지
     assert "tripod" not in prompt  # 화면에 삼각대 렌더 방지
 
 

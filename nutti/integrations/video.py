@@ -571,9 +571,10 @@ class VeoPromptBuilder:
         "Voice (must be EXACTLY the same single voice in every clip of this series, like "
         "one specific recognizable person with a fixed vocal fingerprint): a little-girl "
         "Korean voice, sounding about 6 years old, slightly high-pitched, but delivered "
-        "with a cocky, smug, unbothered and slightly bratty attitude — dry and deadpan, "
-        "talking down to the listener like a sassy kid who is sure she knows better, "
-        "never sweet, eager, gentle, or cheerful, at a consistent speaking rhythm. "
+        "with a blunt, curt, cocky and smug attitude — dry, flat and deadpan, clearly "
+        "unbothered and a little annoyed, talking down to the listener like a bratty kid "
+        "who is sure she knows better and cannot be bothered to be nice, never sweet, "
+        "eager, gentle, cheerful, or sing-songy, at a consistent speaking rhythm. "
         # 발음 교정(2026-07-06 PO 실측: 쉬운 단어도 발음이 뭉개짐 — 아이 페르소나의
         # 혀 짧은 딕션 재현이 유력 원인). 톤은 아이답게 유지하되 발음만 성인급 정확도로.
         "Her Korean PRONUNCIATION however is flawlessly clear and precise: perfect "
@@ -600,9 +601,16 @@ class VeoPromptBuilder:
     )
     _SPEAKING_OFF = "speaking in Korean to an off-screen interviewer"
     _SPEAKING_DIRECT = "speaking in Korean directly to the camera"
-    # "tripod" 단어를 넣으면 Veo가 화면에 삼각대를 렌더한다(2026-06-29 실측) — 단어를
-    # 빼고 "고정 카메라"는 fixed/static/no movement로만 지시한다.
-    _CAMERA = "Camera: locked-off static shot, fixed framing, no camera movement."
+    # 2026-07-23 PO: 화면 고정 불필요 — 클로즈업·무빙 다 OK, 캐릭터 일관성·무일그러짐만
+    # 지키면 된다. 그래서 정적 고정 대신 자유로운 카메라를 허용하되, 일그러짐 방지 요건을
+    # 카메라 지시 안에 함께 못박는다(_NEGATIVE·_CONTINUITY와 삼중 방어).
+    # "tripod" 단어는 Veo가 화면에 삼각대로 렌더하므로(2026-06-29 실측) 절대 넣지 않는다.
+    _CAMERA = (
+        "Camera work can be dynamic and lively — free to push in, pull back, change angle, "
+        "or hold a close-up on the puppy; it does not need to be a locked-off static shot. "
+        "Whatever the camera does, the puppy stays the exact same character and its face and "
+        "body never warp, morph, stretch, or deform."
+    )
     # 비트 클립이 독립 생성돼 끝 자세가 제각각이면 다음 클립과 점프가 생긴다(PO 피드백
     # 2026-06-29). 자세를 처음부터 끝까지 고정하고, 끝을 페이드 없이 또렷한 프레임으로
     # 마무리하게 해 프레임 체이닝(끝 프레임→다음 시작 프레임)이 안정적으로 물리도록 한다.
