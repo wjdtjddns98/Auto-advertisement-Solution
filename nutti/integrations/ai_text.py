@@ -221,13 +221,14 @@ _SEED_TOPICS = [
 _DANGEROUS_FOOD_TOKENS = [
     # 한국어(간식명 검사용)
     # "파"는 한 글자 부분일치 오탐("파프리카"·"파인애플" 등 안전식품)이 커서 대파/쪽파로만.
-    "초콜릿", "초콜렛", "코코아", "포도", "건포도", "양파", "마늘", "대파", "쪽파", "부추",
-    "자일리톨", "마카다미아", "아보카도", "술", "맥주", "와인", "커피", "카페인",
-    "카카오", "사탕", "껌",
-    # 영어(시각 묘사구 검사용)
-    "chocolate", "cocoa", "cacao", "grape", "raisin", "onion", "garlic", "chive",
-    "leek", "xylitol", "macadamia", "avocado", "alcohol", "beer", "wine", "coffee",
-    "caffeine", "candy", "gum",
+    "초콜릿", "초콜렛", "초코", "브라우니", "모카", "코코아", "포도", "건포도", "양파",
+    "마늘", "대파", "쪽파", "부추", "자일리톨", "마카다미아", "아보카도", "술", "맥주",
+    "와인", "커피", "카페인", "카카오", "사탕", "껌",
+    # 영어(시각 묘사구 검사용) — 접두 단어경계 매칭: 단어 시작만 일치하면 잡는다
+    # (grapes·chocolates 같은 복수·파생형 커버, legumes의 gum·sleek의 leek 오탐 배제).
+    "choco", "cocoa", "cacao", "fudge", "brownie", "mocha", "grape", "raisin", "onion",
+    "garlic", "chive", "leek", "xylitol", "macadamia", "avocado", "alcohol", "beer",
+    "wine", "coffee", "caffeine", "candy", "gum",
 ]
 # 안전 간식 폴백 목록 — (한국어 이름, 영어 시각 묘사구). AI 선정이 실패·위험 판정일 때
 # 주제 해시로 결정적으로 고른다. 전부 강아지 급여 안전 식품만 넣을 것.
@@ -262,7 +263,10 @@ def _guard_food(name_kr: str, visual_en: str, topic: str) -> tuple[str, str]:
         return _fallback_food(topic)
     lowered = f"{name} {visual}".lower()
     for token in _DANGEROUS_FOOD_TOKENS:
-        if token in lowered:
+        # 영어는 접두 단어경계(\b)로 오탐 방지(legumes→gum, sleek→leek), 한국어는
+        # 띄어쓰기 경계가 불규칙해 부분일치 유지("파" 단독 같은 초단문 토큰만 목록에서 배제).
+        hit = re.search(rf"\b{token}", lowered) if token.isascii() else token in lowered
+        if hit:
             log.warning("food.dangerous_rejected", name=name, token=token)
             return _fallback_food(topic)
     if "'" in visual or not visual.isascii() or len(visual) > 80:
@@ -563,7 +567,8 @@ class AITextClient:
             if isinstance(data, dict):
                 name = str(data.get("name_kr") or "")
                 visual = str(data.get("visual_en") or "")
-        except (RuntimeError, ValueError):
+        except Exception:  # noqa: BLE001 — 간식 선정은 부가 기능: 어떤 실패(SDK API
+            # 예외 포함 — RuntimeError/ValueError 미상속)든 안전 폴백으로 편 생성을 계속한다.
             log.warning("food.suggest_failed", topic=topic)
         return _guard_food(name, visual, topic)
 

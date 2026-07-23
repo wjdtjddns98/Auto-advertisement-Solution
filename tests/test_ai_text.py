@@ -880,6 +880,42 @@ def test_suggest_food_live_guards_llm_answer(monkeypatch):
     assert client.suggest_food("강아지 포도 위험성") in _SAFE_SNACKS
 
 
+def test_guard_food_english_word_boundary_no_false_positive():
+    """영어 토큰은 접두 단어경계 매칭 — 리뷰 확정 오탐(legumes→gum, sleek→leek)은
+    통과하고, 파생·복수형(chocolate·grapes·초코·브라우니·fudge)은 여전히 잡는다."""
+    from nutti.integrations.ai_text import _SAFE_SNACKS, _guard_food
+
+    # 오탐이었던 안전 표현은 그대로 통과.
+    ok = ("야채 간식", "a bowl of legumes and rice")
+    assert _guard_food(*ok, "t") == ok
+    ok2 = ("간식", "served in a sleek modern bowl")
+    assert _guard_food(*ok2, "t") == ok2
+    # 파생·복수형 미탐은 폴백으로 잡힌다.
+    assert _guard_food("초코 과자", "small brown pieces", "t") in _SAFE_SNACKS
+    assert _guard_food("과자", "a piece of choco snack", "t") in _SAFE_SNACKS
+    assert _guard_food("브라우니 조각", "small square pieces", "t") in _SAFE_SNACKS
+    assert _guard_food("과자", "fudge brownie bites", "t") in _SAFE_SNACKS
+    assert _guard_food("달콤 간식", "chocolate covered treats", "t") in _SAFE_SNACKS
+    assert _guard_food("과일", "a few fresh grapes", "t") in _SAFE_SNACKS
+
+
+def test_suggest_food_sdk_exception_falls_back():
+    """SDK 직접 호출(self._client) 분기의 API 예외도 안전 폴백 — 편 생성이 죽지 않는다
+    (리뷰 확정: anthropic APIError는 RuntimeError/ValueError 미상속)."""
+    from nutti.integrations.ai_text import _SAFE_SNACKS
+
+    class _Boom:
+        class messages:
+            @staticmethod
+            def create(**_kw):
+                raise ConnectionError("api down")  # RuntimeError/ValueError 미상속 예외
+
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    client._client = _Boom()
+    assert client.suggest_food("강아지 간식 적정량") in _SAFE_SNACKS
+
+
 # --- 주제 문형 중복 하드룰(_topic_too_similar, 2026-07-23 PO "영상 중복도") ---
 
 
