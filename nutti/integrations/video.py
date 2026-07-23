@@ -673,7 +673,9 @@ class VeoPromptBuilder:
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
         "costume, person in a costume, or plush toy. Strictly no additional animals, no "
         "people. Absolutely no text, subtitles, captions, letters, numbers, words, logos, "
-        "brand names, watermarks, or UI overlays anywhere in the frame."
+        "brand names, watermarks, or UI overlays anywhere in the frame — in particular no "
+        "Hangul or Korean characters, no subtitle bar, and no caption text along the bottom "
+        "of the screen."
     )
     # 먹방 연출(2026-07-23 PO): 간식 그릇을 앞에 두고, 클립 "시작"에 앞발로 간식을 집어
     # 입에 넣어 먹은 뒤 말한다. 시작에 두는 이유 — 끝 잉여 트림(_generate_and_trim_clip)이
@@ -756,6 +758,13 @@ class VeoPromptBuilder:
         prompt = (
             f"A photorealistic shot of {self._PERSONA}, {speaking}, "
             f"saying (as spoken audio only, no on-screen text): '{dialogue}'. "
+            # 자막 환각 억제의 핵심 방어(2026-07-23 PO): 위 대사가 한글로 프롬프트에 들어가면
+            # Veo가 그 글자를 화면 하단 자막으로 그리는 경향이 있다(깨진 한글 = 외계어 자막).
+            # 대사 '바로 뒤'에 Hangul을 콕 집은 강한 부정을 붙인다 — 프롬프트 끝 _NEGATIVE보다
+            # 트리거(대사)에 인접해 가중치가 높다. 재생성을 줄여 시드·보이스 일관성도 지킨다.
+            "These spoken words must never be shown as written text on screen — no captions, "
+            "no subtitles, no Hangul or Korean letters, no subtitle bar, and no text along "
+            "the bottom of the frame; the line exists only as the spoken voice. "
             f"{scene}{mic}"
             f"{self._VOICE} {cta}"
             f"{self._LIPSYNC} "
