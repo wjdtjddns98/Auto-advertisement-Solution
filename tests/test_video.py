@@ -105,7 +105,7 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     static = builder.build_beat("안녕", motion_release=False)
     # lively: 자연스러운 제스처 허용, 정적 고정 문구는 없음.
     assert "moves naturally and expressively" in lively
-    assert "stays in the exact same upright seated position" not in lively
+    assert "stays standing upright on its two hind legs" in lively  # 의인화 직립(2026-07-23 PO)
     # 화면 이탈 방지는 lively에도 유지(막판 이상행동 방어).
     assert "leaves the frame" in lively
     # 끝 진정(wind-down) 강제는 제거하고 끝까지 에너지 유지를 지시한다(2026-07-10 PO).
@@ -115,8 +115,8 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     assert "no still, frozen, or slow warm-up intro" in lively
     assert "completely frozen and motionless" not in lively
     assert "no fade-out" in lively and "no freeze" in lively
-    # 기본(static)은 기존 _MOTION_HOLD 유지(하위호환).
-    assert "stays in the exact same upright seated position" in static
+    # 기본(static) _MOTION_HOLD도 직립 기준(2026-07-23 PO 의인화) — 앉음 문구 없음.
+    assert "stays standing upright on its two hind legs" in static
     assert "moves naturally and expressively" not in static
 
 
@@ -234,9 +234,9 @@ def test_frame_prompt_sanitizes_topic():
     assert "간식’" in prompt
     # 주제 잘림 경계 핀 — 고정 템플릿(페르소나·마이크·의상·장소·소품) 길이를 더한 상한.
     # 핀의 목적은 "주제가 _MAX_TOPIC_CHARS로 잘린다"이므로 템플릿이 길어지면 함께 올린다.
-    # 2026-07-23: 먹방 간식 그릇 문장(+food_visual 80자) 추가로 1500→1700 상향
-    # (실측 최장 1743, 여유 ~157).
-    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1700
+    # 2026-07-23: 먹방 간식 그릇 문장(+food_visual 80자) 추가로 1500→1700, 이어서 의인화
+    # 직립 외형 확장 + 개밤티 의상(더 김)으로 1700→1900 상향(실측 최장 1988, 여유 ~112).
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1900
     # 금지 요소 지시는 주입과 무관하게 유지된다(자막·코스튬·타 동물 금지 강화 문구).
     assert "No people, no humans in costume, no other animals." in prompt
 

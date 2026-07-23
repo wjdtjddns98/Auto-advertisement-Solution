@@ -369,12 +369,15 @@ class EpisodeStyle(NamedTuple):
 # 2026-07-16 소품·포맷 추가 — 매번 다른 옷·소품·연출). 항목을 추가/삭제하면 조합 수가
 # 바뀐다(현재 의상5×장소6×소품6×포맷3 = 540 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
 # 대사 인용 구분자와 충돌해 주입 방어 검증이 깨진다(U+2019는 허용).
+# 2026-07-23 PO "개밤티": 의상을 일부러 촌스럽고 과하고 안 어울리게 — 밤티(못생김·촌스러움·
+# 어설픔을 유머로 소비하는 밈, 라인플레이 아바타 유래). 클래싱 색·요란한 무늬·과잉 장식·
+# 안 맞는 핏의 우스꽝스러운 조합으로 "귀여운 비숑 × 개촌스러운 옷"의 갭 유머를 노린다.
 _EPISODE_OUTFITS = [
-    "a tiny yellow raincoat",
-    "a cozy cream knitted sweater",
-    "a sporty grey hoodie",
-    "a light blue denim jacket",
-    "a fluffy red scarf with a matching beanie",
+    "a garish clashing neon tracksuit with mismatched lime-green and hot-pink stripes",
+    "an oversized loud leopard-print coat paired with a clashing red tartan scarf",
+    "a gaudy gold sequined jacket that is comically too big and sags off its shoulders",
+    "a tacky mustard-yellow knit vest layered over a clashing purple floral shirt",
+    "a shiny turquoise tracksuit jacket studded with garish rhinestones and a clashing orange collar",
 ]
 # 소품 로테이션(2026-07-16 PO — 옷만 바뀌어 단조로움, 모자·머리 위 선글라스 같은 소품
 # 추가). 빈 문자열=소품 없음(2/6 확률 — "조금씩" 추가라 매편 소품은 과함). 규칙:
@@ -404,17 +407,20 @@ _VET_OUTFIT = (
     "silver chest piece draped around its neck"
 )
 _VET_SETTING = "sitting at the examination desk of a bright, tidy veterinary clinic room"
-# 전 항목 sitting 계열로 통일(2026-07-06 PO) — standing 시작 프레임이 뽑히면 클립 전체가
-# 이족보행 인형탈 느낌이 되고, 모션 지시(_MOTION_HOLD/_MOTION_LIVELY의 "stays seated")와
-# 모순돼 드리프트를 유발한다. 새 장소를 추가할 때도 sitting 자세로 쓸 것.
-# (2026-07-21 2족보행 전환을 시도했다가 PO 지시로 당일 철회 — 복원 시 PR #117 diff 참조.)
+# 2026-07-23 PO "의인화 — 사람 아기처럼": 전 항목 standing(직립)으로 통일 —
+# _MASCOT_APPEARANCE(anthropomorphic 직립)·_MOTION_*(standing)과 일치시켜 드리프트를
+# 막는다. 직립이 "인형탈 느낌"으로 새는 건 실사·해부학 문구 + 직립 레퍼런스 이미지
+# (NUTTI_MASCOT_IMAGE) 앵커가 담당한다. 새 장소도 standing으로 쓸 것.
+# (2026-07-21 PR #117에서 같은 전환을 했다가 철회한 이력 있음 — 레시피는 PR #117 diff.)
+# 2026-07-23 PO "의인화 — 사람 아기처럼" 전환: 앉은 자세 → 직립(standing) 상황으로 통일
+# (외형·모션도 직립으로 일치). 사람 아기처럼 서서 말하는 상황들. ASCII 작은따옴표 금지.
 _EPISODE_SETTINGS = [
-    "sitting on a busy city sidewalk like a street interview",
-    "sitting on a cozy living room sofa under warm lamps",
-    "sitting on a park bench on a sunny afternoon",
-    "sitting on a bright modern kitchen floor",
-    "sitting in front of a cute pet shop entrance",
-    "sitting at a tidy home office desk like a news anchor",
+    "standing on a busy city sidewalk like a street interview",
+    "standing in a cozy living room under warm lamps",
+    "standing in a sunny park on a nice afternoon",
+    "standing in a bright modern kitchen",
+    "standing in front of a cute pet shop entrance",
+    "standing at a tidy home office like a news anchor",
 ]
 # 시작 프레임 구도·표정 로테이션(2026-07-20 PO — "썸네일이 전부 같은 자세"): Shorts
 # 썸네일은 영상 프레임에서 자동 추출되므로 시작 프레임 구도가 곧 썸네일이다. 종전엔
@@ -494,14 +500,20 @@ def pick_episode_style(
 # 텍스트로 외형을 고정하는 것이 일관성의 핵심 수단 — 비워 두면 생성기가 매 편 다른
 # 강아지를 지어낸다(실제 증상). 반드시 레퍼런스 이미지(assets/mascot.png,
 # NUTTI_MASCOT_IMAGE)의 실제 모습과 일치시킬 것 — 텍스트와 이미지가 어긋나면 둘을
-# 섞어 오히려 더 들쭉날쭉해진다. 현재 값은 assets/mascot.png(흰 비숑프리제, PO 제공
-# 마스코트.png 1254x1254) 기준의 "얌전하고 귀여운 puppy". ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
+# 섞어 오히려 더 들쭉날쭉해진다. 2026-07-23 PO "의인화 — 사람 아기처럼" 전환: 외형을
+# anthropomorphic 직립(사람 아기 같은 이족보행)으로 바꾼다. Kontext는 포즈 프롬프트를
+# 무시하고 레퍼런스 이미지에 앵커하므로(2026-07-20 실측) 레퍼런스도 직립 변형이 있어야
+# 한다 — mascot.png(4족)로 첫 프레임을 뽑아 직립 후보를 만들고(anthropomorphic 명시+
+# 해부학 가드 제거가 직립을 뚫는 레시피, PR #117 실측), PO 승인 후 그 이미지를
+# NUTTI_MASCOT_IMAGE로 앵커한다. ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
 _MASCOT_APPEARANCE = (
     "a real, photorealistic, live small white Bichon Frise puppy with a soft, fluffy, "
     "rounded pure-white powder-puff coat groomed into a round teddy-bear face, round dark "
-    "eyes, a small black nose, and a normal four-legged small dog body — a real live "
-    "animal, never a person in an animal costume, never a mascot suit or fursuit, never a "
-    "plush toy or stuffed animal"
+    "eyes, and a small black nose, anthropomorphic and humanlike — it stands and moves "
+    "upright on its two hind legs like a chubby little human baby, with its front paws "
+    "used freely like little arms and hands; still a real live animal with real fur and a "
+    "real dog face, never a person in an animal costume, never a mascot suit or fursuit, "
+    "never a plush toy, stuffed animal, or cartoon"
 )
 # ==================== PO 수정 구역 끝 (마스코트 외형) ====================
 
@@ -624,11 +636,11 @@ class VeoPromptBuilder:
         "fur color, markings, and overall appearance from the first frame to the last."
     )
     _MOTION_HOLD = (
-        "The puppy stays in the exact same upright seated position for the entire shot, "
-        "sitting still and centered, holding the same pose from the first frame to the "
-        "last frame; it does not lie down, stand up, walk, or leave the frame. The clip "
-        "ends on a clean, fully-lit, sharp frame with the puppy seated and centered — no "
-        "fade-out, no dimming, no blur at the end."
+        "The puppy stays standing upright on its two hind legs, centered in frame, holding "
+        "the same steady upright stance from the first frame to the last; it does not sit "
+        "down, drop onto all fours, walk, or leave the frame. The clip ends on a clean, "
+        "fully-lit, sharp frame with the puppy standing and centered — no fade-out, no "
+        "dimming, no blur at the end."
     )
     # 끝프레임 고정(lock) 모드 전용 모션 지시(2026-06-29 PO: "모션홀드 풀어 생동감").
     # first-last-frame 모델이 시작·끝 프레임을 동일 마스코트 프레임으로 강제하므로, 중간에
@@ -646,30 +658,31 @@ class VeoPromptBuilder:
     # "클립당 최대 1회, 반복 금지"로 제한하고 고개·귀·꼬리·무게 이동·표정 중심으로 전환
     # (_MOTION_FINAL_FREE 동일). 어휘 목록 앞쪽의 paw waves를 Veo가 과도 샘플링한 부작용.
     _MOTION_LIVELY = (
-        "The puppy stays seated and centered in frame the whole time but moves naturally "
-        "and expressively as it talks — gentle head tilts, small ear twitches, a joyful "
-        "tail wag, subtle shifts of body weight, leaning slightly toward the camera, and "
-        "lively facial expressions that bring real energy and charm to the shot. Its "
-        "front paws stay relaxed on the ground almost the entire time — at most one "
-        "brief, small paw gesture in the whole clip, never repeated or constant paw "
-        "waving. It is already "
+        "The puppy stays standing upright on its two hind legs, centered in frame, and "
+        "moves naturally and expressively like a lively human baby as it talks — gentle "
+        "head tilts, small ear twitches, a happy little bounce, subtle shifts of weight, "
+        "leaning slightly toward the camera, and lively facial expressions that bring real "
+        "energy and charm to the shot. It uses its front paws freely like little hands but "
+        "keeps gestures small — at most one brief hand gesture in the whole clip, never "
+        "repeated or constant waving. It is already "
         "in lively motion from the very first moments of the clip — it starts talking and "
         "moving right away, with no still, frozen, or slow warm-up intro. It never "
-        "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
-        "leaves the frame. Keep this natural lively energy all the way to the end of the "
-        "clip — do not wind down, slow down, go still, or freeze near the end. The clip "
-        "ends on a clean, fully-lit, razor-sharp frame — no fade-out, no dimming, no blur, "
-        "no warping, no morphing, no freeze, and no glitch at the end."
+        "sits down, drops onto all fours, walks, hunches over, ducks its head down, curls "
+        "forward, or leaves the frame. Keep this natural lively energy all the way to the "
+        "end of the clip — do not wind down, slow down, go still, or freeze near the end. "
+        "The clip ends on a clean, fully-lit, razor-sharp frame — no fade-out, no dimming, "
+        "no blur, no warping, no morphing, no freeze, and no glitch at the end."
     )
     # 마지막 비트(CTA) 전용 모션 — 진정(wind-down) 강제 없이 귀여운 행동을 자유롭게
     # 허용한다(2026-07-06 PO: "마지막 비트는 제한 걸지 말고 귀여운 행동 하게 냅둬").
     # 마지막 비트는 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 불필요 — 화면 이탈·끝
     # 페이드/글리치 같은 깨짐 방지 최소 가드만 남긴다.
     _MOTION_FINAL_FREE = (
-        "The puppy stays seated and centered in frame but is free to be playful and "
-        "adorable as it talks — happy head tilts, excited ear wiggles, a joyful tail "
-        "wag, cute expressive reactions; at most one brief, small paw gesture, never "
-        "repeated or constant paw waving. Let its natural charm show; no "
+        "The puppy stays standing upright on its two hind legs, centered in frame, but is "
+        "free to be playful and adorable like a lively human baby as it talks — happy head "
+        "tilts, excited little bounces, cute expressive reactions; it uses its front paws "
+        "freely like little hands, at most one brief hand gesture, never repeated or "
+        "constant waving. Let its natural charm show; no "
         "forced calm-down at the end. It never leaves the frame. The clip ends on a "
         "clean, fully-lit, sharp frame — no fade-out, no dimming, no blur, no warping, "
         "and no glitch at the end."
