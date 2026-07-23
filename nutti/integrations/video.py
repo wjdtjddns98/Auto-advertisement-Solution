@@ -352,13 +352,16 @@ class EpisodeStyle(NamedTuple):
     시각 일관성을 유지하고, 편이 바뀌면 다른 조합이 나와 채널이 단조롭지 않게 한다.
     `prop`(빈 문자열=소품 없음)·`fmt`("direct"=정면 정보전달 | "interview"=화면 밖
     인터뷰어+마이크 연출)는 2026-07-16 PO 지시(영상 다양성) — 기본값이 있어 기존
-    2-필드 생성 코드와 호환된다.
+    2-필드 생성 코드와 호환된다. `shot`(시작 프레임 구도·표정)은 2026-07-23 연속 편
+    중복 방지를 위해 스타일로 승격 — 빈 문자열이면 _frame_prompt가 종전 해시 선택으로
+    폴백한다(레거시 생성 코드 호환).
     """
 
     outfit: str
     setting: str
     prop: str = ""
     fmt: str = "direct"
+    shot: str = ""
 
 
 # ======================= PO 수정 구역 (편별 연출 로테이션) =======================
@@ -433,31 +436,51 @@ _FRAME_SHOTS = [
 # ===================== PO 수정 구역 끝 (편별 연출 로테이션) =====================
 
 
-def pick_episode_style(
-    script_id: str, topic: str | None = None, fmt: str | None = None
-) -> EpisodeStyle:
-    """script.id의 CRC32로 의상·장소·소품을, 주제 해시로 포맷을 결정적으로 고른다.
+def _pick_rotation(salt: str, key: str, options: list[str], avoid: str = "") -> str:
+    """CRC32 결정 선택 + 직전 편 값 회피(같으면 다음 인덱스 — pick_episode_format과 동일 패턴).
 
-    의상·장소·소품은 서로 다른 salt로 해시해 독립적으로 조합된다 — 같은 salt를 쓰면
+    avoid가 빈 문자열이면 회피하지 않는다 — 소품 로테이션의 "소품 없음"("")은 연속돼도
+    자연스러우므로 회피 대상이 아니다.
+    """
+    idx = zlib.crc32(f"{salt}:{key}".encode()) % len(options)
+    if avoid and options[idx] == avoid:
+        idx = (idx + 1) % len(options)
+    return options[idx]
+
+
+def pick_episode_style(
+    script_id: str,
+    topic: str | None = None,
+    fmt: str | None = None,
+    avoid: dict[str, str] | None = None,
+) -> EpisodeStyle:
+    """script.id의 CRC32로 의상·장소·소품·구도를, 주제 해시로 포맷을 결정적으로 고른다.
+
+    각 축은 서로 다른 salt로 해시해 독립적으로 조합된다 — 같은 salt를 쓰면
     리스트 길이가 같을 때 인덱스가 동기화돼 조합 다양성이 리스트 길이로 줄어든다.
     fmt가 오면(오케스트레이터가 직전 편 회피를 반영해 확정한 Script.episode_format)
     그걸 그대로 쓴다 — 해시 재계산으로는 회피 결과를 복원할 수 없기 때문. 없으면
     주제 해시, topic도 없으면(레거시 호출·테스트) script_id 폴백(결정성 유지).
-    "vet" 포맷은 의상·장소를 수의사 세트로 고정하고 소품을 뽑지 않는다(콘셉트 보호).
+    "vet" 포맷은 의상·장소를 수의사 세트로 고정하고 소품을 뽑지 않는다(콘셉트 보호) —
+    구도(shot)만 로테이션해 vet 편끼리도 썸네일이 달라지게 한다.
+
+    avoid(직전 게시 편의 축별 사용값, state 저장분)와 같게 나오면 그 축만 다음
+    인덱스로 민다 — 연속 편 시각 중복 방지(2026-07-23 PO "영상 중복도"). 포맷 축의
+    PR #117과 같은 계약: 저장은 업로드 성공 시에만(오케스트레이터).
     """
     from nutti.integrations.ai_text import pick_episode_format
 
+    avoid = avoid or {}
     fmt = fmt or pick_episode_format(topic if topic is not None else script_id)
+    shot = _pick_rotation("shot", script_id, _FRAME_SHOTS, avoid.get("shot", ""))
     if fmt == "vet":
-        return EpisodeStyle(_VET_OUTFIT, _VET_SETTING, "", fmt)
-    outfit_idx = zlib.crc32(f"outfit:{script_id}".encode()) % len(_EPISODE_OUTFITS)
-    setting_idx = zlib.crc32(f"setting:{script_id}".encode()) % len(_EPISODE_SETTINGS)
-    prop_idx = zlib.crc32(f"prop:{script_id}".encode()) % len(_EPISODE_PROPS)
+        return EpisodeStyle(_VET_OUTFIT, _VET_SETTING, "", fmt, shot)
     return EpisodeStyle(
-        _EPISODE_OUTFITS[outfit_idx],
-        _EPISODE_SETTINGS[setting_idx],
-        _EPISODE_PROPS[prop_idx],
+        _pick_rotation("outfit", script_id, _EPISODE_OUTFITS, avoid.get("outfit", "")),
+        _pick_rotation("setting", script_id, _EPISODE_SETTINGS, avoid.get("setting", "")),
+        _pick_rotation("prop", script_id, _EPISODE_PROPS, avoid.get("prop", "")),
         fmt,
+        shot,
     )
 
 
@@ -769,13 +792,18 @@ class VideoStudio:
                 "FAL_KEY가 비어 있습니다 — veo_fal 백엔드(dry_run=False) 시 필수입니다."
             )
 
-    def produce(self, script: Script) -> VideoAsset:
+    def produce(
+        self, script: Script, style_avoid: dict[str, str] | None = None
+    ) -> VideoAsset:
         """시작 프레임 → 비트별 fal.ai Veo 클립 → 스티칭 → VideoAsset 반환.
 
         veo_fal 경로: 대본 비트(`script.beats`)가 N개면 같은 시작 프레임에서 비트마다
         8초 클립을 만들어 ffmpeg로 이어붙인다. 비트가 없으면 body 단일컷(8초)으로 폴백한다.
         실 경로의 정확한 길이는 _produce_clips_veo_fal이 돌려준 값(트림 실측)으로 덮어쓰고,
         아래 duration은 dry_run·사전 추정용 계산이다(비트당 8초 가정).
+
+        style_avoid: 직전 게시 편의 시각 축 사용값(오케스트레이터가 state에서 읽어 전달)
+        — 연속 편 의상·장소·구도 중복 방지. None이면 회피 없이 종전 해시 선택과 동일.
         """
         # 실 경로면 시작 전에 필수 키를 검증(미설정 시 빠르게 실패).
         self.validate_config()
@@ -798,7 +826,9 @@ class VideoStudio:
         # 편별 스타일(의상·장소)은 여기서 정확히 한 번 계산해 프레임과 비트 클립에
         # 같은 값을 명시적으로 전달한다 — 두 곳에서 독립 계산하면 향후 호출 경로가
         # 갈릴 때 프레임과 클립의 장면이 어긋날 수 있다(리뷰 지적, PR #52).
-        style = pick_episode_style(script.id, script.topic, fmt=script.episode_format or None)
+        style = pick_episode_style(
+            script.id, script.topic, fmt=script.episode_format or None, avoid=style_avoid
+        )
         frame_path = self._generate_frame(script, style)
         # 실 경로의 총길이는 위 사전 추정 대신 veo_fal이 돌려준 실측값(비트 클립 앞뒤
         # 침묵 트림 반영)으로 덮어쓴다.
@@ -2184,10 +2214,12 @@ class VideoStudio:
         # 조립한다. interview 편은 마이크가 프레임에도 있어야 클립 시작·끝에서 마이크가
         # 나타났다 사라지는 점프가 없다.
         prop = f", with {style.prop}" if style.prop else ""
-        # 구도·표정은 script.id 해시로 결정적 선택(의상·장소·소품과 같은 패턴, 독립 salt).
-        # 매편 다른 썸네일 구도가 나오게 하는 핵심 — 고정 문구였던 시절의 "전부 같은
-        # 자세" 문제(2026-07-20 PO)를 로테이션으로 해소한다.
-        shot = _FRAME_SHOTS[zlib.crc32(f"shot:{script.id}".encode()) % len(_FRAME_SHOTS)]
+        # 구도·표정은 style.shot(선택 로직은 pick_episode_style로 일원화 — 연속 편 회피
+        # 반영, 2026-07-23). 빈 문자열이면(레거시 EpisodeStyle 생성 코드·테스트) 종전
+        # script.id 해시 선택으로 폴백해 결정성을 유지한다.
+        shot = style.shot or (
+            _FRAME_SHOTS[zlib.crc32(f"shot:{script.id}".encode()) % len(_FRAME_SHOTS)]
+        )
         if style.fmt == "interview":
             mic = (
                 "A handheld interview microphone reaches into the frame from off-screen, "

@@ -12,7 +12,7 @@ from nutti.config import Settings, get_settings
 from nutti.integrations.ai_text import AITextClient
 from nutti.integrations.publishing import Publisher
 from nutti.integrations.telegram import TelegramClient
-from nutti.integrations.video import VideoStudio
+from nutti.integrations.video import VideoStudio, pick_episode_style
 from nutti.logging import get_logger
 from nutti.models import (
     ContentFormat,
@@ -160,7 +160,10 @@ class Orchestrator:
 
         # 2단계: 영상 (REVISE 시 대본 수정 → 영상 재생성 루프)
         run.current_stage = Stage.VIDEO
-        run.video = self.studio.produce(run.script)
+        # 직전 게시 편의 시각 축 사용값(의상·장소·구도) — 연속 편 시각 중복 방지.
+        # last_format과 같은 계약: 읽기는 여기, 저장은 업로드 성공 후에만.
+        style_avoid = self.state.get_last_style()
+        run.video = self.studio.produce(run.script, style_avoid=style_avoid)
         while True:
             video_review = ReviewRequest(
                 stage=Stage.VIDEO,
@@ -175,7 +178,7 @@ class Orchestrator:
                 run.script.body = video_review.revised_content
                 run.script.beats = self.ai.split_beats(run.script.body, run.script.topic)  # 수정본 → 비트 재분할
                 self.store.update_script(run.script)
-                run.video = self.studio.produce(run.script)
+                run.video = self.studio.produce(run.script, style_avoid=style_avoid)
                 continue
             log.warning(
                 "pipeline.gate_blocked", stage=Stage.VIDEO.value, decision=video_decision.value
@@ -195,6 +198,19 @@ class Orchestrator:
         run.uploads.append(self.publisher.upload_youtube(run.video, run.metadata))
         # 업로드 성공 = 편이 실제 게시됨 → 이제서야 last_format 갱신(위 포맷 확정 주석 참조).
         self.state.save_format(run.script.episode_format)
+        # 시각 스타일도 같은 계약으로 저장 — pick_episode_style은 순수 함수라 produce가
+        # 쓴 것과 동일한 값이 재계산된다(같은 script.id·fmt·avoid 입력).
+        used_style = pick_episode_style(
+            run.script.id, topic, fmt=run.script.episode_format or None, avoid=style_avoid
+        )
+        self.state.save_style(
+            {
+                "outfit": used_style.outfit,
+                "setting": used_style.setting,
+                "prop": used_style.prop,
+                "shot": used_style.shot,
+            }
+        )
         if content_format == ContentFormat.REELS:
             # 인스타 핸드오프는 best-effort 부수효과 — 유튜브 업로드는 이미 성공했으므로,
             # 텔레그램 전송 실패(설정 오류·전송 오류)가 아래 비용·원장·스토어 기록을 막지

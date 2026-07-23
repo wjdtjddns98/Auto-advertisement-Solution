@@ -611,3 +611,34 @@ def test_next_run_avoids_last_published_format(tmp_path):
     clash = next(f"주제-{i}" for i in range(100) if pick_episode_format(f"주제-{i}") == fmt1)
     second = orch.run(clash)
     assert second.script.episode_format != fmt1
+
+
+# --- 시각 축 연속 중복 방지(2026-07-23): last_style도 업로드 성공 시에만 저장 ---
+
+
+def test_run_persists_style_only_after_upload(tmp_path):
+    """업로드까지 완주한 런만 last_style을 남긴다 — produce가 쓴 값과 동일한 재계산분."""
+    from nutti.integrations.video import pick_episode_style
+
+    state = _tmp_state(tmp_path)
+    orch = Orchestrator(_dry_settings(), telegram=AutoApproveGate(), state=state)
+    run = orch.run("강아지 간식 스타일저장")
+    saved = state.get_last_style()
+    assert saved.get("shot")  # shot은 전 포맷 공통이라 항상 저장된다
+    expected = pick_episode_style(
+        run.script.id, "강아지 간식 스타일저장",
+        fmt=run.script.episode_format or None, avoid={},
+    )
+    assert saved["shot"] == expected.shot
+    assert saved["outfit"] == expected.outfit
+
+
+def test_rejected_run_does_not_persist_style(tmp_path):
+    """게이트 반려로 죽은 런은 last_style을 남기지 않는다(last_format과 동일 계약)."""
+    state = _tmp_state(tmp_path)
+    orch = Orchestrator(_dry_settings(), telegram=_RejectGate(), state=state)
+    try:
+        orch.run("반려될 주제")
+    except GateRejected:
+        pass
+    assert state.get_last_style() == {}

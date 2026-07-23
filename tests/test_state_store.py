@@ -94,3 +94,15 @@ def test_format_round_trip_and_blank_ignored(tmp_path):
     assert s.get_last_format() == "vet"
     s.save_format("")  # 빈 값은 무시
     assert s.get_last_format() == "vet"
+
+
+def test_last_style_roundtrip(tmp_path):
+    """last_style 저장·조회 왕복 + 빈 값 축 제외·빈 dict 무시(연속 시각 중복 방지)."""
+    from nutti.storage.state_store import PipelineState
+
+    s = PipelineState(str(tmp_path / "state.json"))
+    assert s.get_last_style() == {}
+    s.save_style({"outfit": "노란 우비", "prop": "", "shot": "정면 응시"})
+    assert s.get_last_style() == {"outfit": "노란 우비", "shot": "정면 응시"}  # 빈 축 제외
+    s.save_style({})  # 전체 빈 dict는 무시
+    assert s.get_last_style() == {"outfit": "노란 우비", "shot": "정면 응시"}
