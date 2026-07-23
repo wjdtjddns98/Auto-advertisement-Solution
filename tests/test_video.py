@@ -1602,6 +1602,47 @@ def test_pick_episode_style_varies_across_ids():
     assert len({s.setting for s in styles}) > 1
 
 
+def test_pick_episode_style_includes_shot():
+    """구도(shot)가 스타일로 승격됐다 — _FRAME_SHOTS 로테이션에서 결정적으로 선택."""
+    s = pick_episode_style("abc", fmt="vlog")
+    assert s.shot in video_module._FRAME_SHOTS
+    assert pick_episode_style("abc", fmt="vlog").shot == s.shot  # 결정성
+
+
+def test_pick_episode_style_avoids_previous_axis_values():
+    """직전 편 사용값(avoid)과 같게 나오면 그 축만 다음 인덱스로 민다(연속 시각 중복 방지)."""
+    base = pick_episode_style("id-x", fmt="vlog")
+    avoided = pick_episode_style(
+        "id-x",
+        fmt="vlog",
+        avoid={"outfit": base.outfit, "setting": base.setting, "shot": base.shot},
+    )
+    assert avoided.outfit != base.outfit
+    assert avoided.setting != base.setting
+    assert avoided.shot != base.shot
+    # avoid에 없는 축(prop)은 종전 선택 그대로.
+    assert avoided.prop == base.prop
+
+
+def test_pick_episode_style_empty_prop_not_avoided():
+    """'소품 없음'("")은 연속돼도 자연스러우므로 회피 대상이 아니다."""
+    for i in range(50):
+        s = pick_episode_style(f"id-{i}", fmt="vlog")
+        if s.prop == "":
+            again = pick_episode_style(f"id-{i}", fmt="vlog", avoid={"prop": ""})
+            assert again.prop == ""
+            return
+    pytest.fail("표본 50개에서 소품 없음(prop='') 케이스가 안 나옴 — 로테이션 확률 확인 필요")
+
+
+def test_pick_episode_style_vet_keeps_fixed_set_but_rotates_shot():
+    """vet 편은 의상·장소 고정을 유지하되(콘셉트 보호) 구도는 회피 로테이션된다."""
+    a = pick_episode_style("id-1", fmt="vet")
+    b = pick_episode_style("id-1", fmt="vet", avoid={"shot": a.shot, "outfit": a.outfit})
+    assert b.shot != a.shot
+    assert b.outfit == a.outfit == video_module._VET_OUTFIT  # 고정 의상은 회피 대상 아님
+
+
 def test_pick_episode_style_outfit_setting_independent():
     """의상과 장소는 다른 salt로 해시된다 — 인덱스 동기화로 조합이 줄지 않는다.
 

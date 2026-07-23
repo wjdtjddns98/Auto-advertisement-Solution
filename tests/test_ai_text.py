@@ -679,6 +679,24 @@ def test_build_metadata_appends_utm_tracked_link():
     )
 
 
+def test_build_metadata_cta_line_rotates_by_script_id():
+    """계산기 링크 줄 문구가 편별 로테이션된다(고정 문자열 반복 회피) — URL은 그대로."""
+    from nutti.integrations.ai_text import _CTA_LINE_VARIANTS, AITextClient
+
+    url = "https://example.com/calc"
+    seen = set()
+    for _ in range(20):
+        script = Script(topic="t", body="b")  # id=랜덤 UUID → 표본별 다른 해시
+        meta = AITextClient._build_metadata(script, url, "제목", "본문", ["#a"])
+        line = next(ln for ln in meta.description.splitlines() if url in ln)
+        prefix = next(v for v in _CTA_LINE_VARIANTS if line.startswith(v))
+        seen.add(prefix)
+        # 같은 script면 항상 같은 문구(결정성).
+        again = AITextClient._build_metadata(script, url, "제목", "본문", ["#a"])
+        assert next(ln for ln in again.description.splitlines() if url in ln) == line
+    assert len(seen) > 1  # 4종 로테이션이 20표본에서 전부 같을 확률은 사실상 0
+
+
 def test_build_metadata_does_not_duplicate_shorts():
     """이미 #shorts가 있으면(대소문자 무관) 중복 추가하지 않는다."""
     from nutti.integrations.ai_text import AITextClient
@@ -794,6 +812,73 @@ def test_suggest_topic_live_empty_falls_back_to_seed():
     # 모델이 빈 응답을 주면 시드로 폴백(파이프라인이 멈추지 않도록).
     client = _live_topic_client(_Msg([_Block("text", text="   ")]))
     assert client.suggest_topic().strip()
+
+
+# --- 주제 문형 중복 하드룰(_topic_too_similar, 2026-07-23 PO "영상 중복도") ---
+
+
+def test_topic_too_similar_catches_boilerplate_trigram():
+    """3연속 어절 겹침 = 문형 보일러플레이트 반복(실측된 '수의사가 알려주는 … 구별법' 틀)."""
+    from nutti.integrations.ai_text import _topic_too_similar
+
+    recent = ["강아지 사료 거부한다면? 수의사가 알려주는 단순 입맛과 위험 신호 구별법"]
+    cand = "강아지 눈곱 낀다면? 수의사가 알려주는 단순 눈곱과 위험 신호 구별법"
+    assert _topic_too_similar(cand, recent) is True
+
+
+def test_topic_too_similar_catches_jaccard_overlap():
+    """어절 집합이 절반 이상 겹치면 같은 소재의 말바꾸기로 본다."""
+    from nutti.integrations.ai_text import _topic_too_similar
+
+    recent = ["강아지 고구마 간식 하루 적정량"]
+    assert _topic_too_similar("강아지 고구마 간식 적정량", recent) is True
+
+
+def test_topic_not_similar_when_structure_differs():
+    """소재·문형이 다르면 통과 — 2어절 검색 질문형('먹어도 되나요')은 막지 않는다."""
+    from nutti.integrations.ai_text import _topic_too_similar
+
+    recent = [
+        "강아지 사료 거부한다면? 수의사가 알려주는 단순 입맛과 위험 신호 구별법",
+        "강아지 수박 먹어도 되나요? 씨와 껍질 주의점",
+    ]
+    assert _topic_too_similar("여름철 산책 후 발바닥 관리, 간식으로 수분 보충까지", recent) is False
+
+
+def test_suggest_topic_regenerates_on_pattern_dup(monkeypatch):
+    """문형 중복 주제는 반려 사유를 붙여 재생성한다(회복형 재생성 하드룰)."""
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    answers = iter(
+        [
+            "강아지 눈곱 낀다면? 수의사가 알려주는 단순 눈곱과 위험 신호 구별법",
+            "여름철 강아지 수박 급여, 씨만 빼면 될까",
+        ]
+    )
+    calls = {"n": 0}
+
+    def fake_cli(_full):
+        calls["n"] += 1
+        return next(answers)
+
+    monkeypatch.setattr(client, "_claude_cli", fake_cli)
+    recent = ["강아지 사료 거부한다면? 수의사가 알려주는 단순 입맛과 위험 신호 구별법"]
+    topic = client.suggest_topic(recent_topics=recent)
+    assert topic == "여름철 강아지 수박 급여, 씨만 빼면 될까"
+    assert calls["n"] == 2  # 1회 반려 → 1회 재생성
+
+
+def test_suggest_topic_all_dups_falls_back_to_seed(monkeypatch):
+    """재생성 2회까지 전부 중복이면 시드로 폴백(무한 루프·중복 게시 방지)."""
+    settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
+    client = AITextClient(settings)
+    dup = "강아지 눈곱 낀다면? 수의사가 알려주는 단순 눈곱과 위험 신호 구별법"
+    monkeypatch.setattr(client, "_claude_cli", lambda _full: dup)
+    recent = ["강아지 사료 거부한다면? 수의사가 알려주는 단순 입맛과 위험 신호 구별법"]
+    topic = client.suggest_topic(recent_topics=recent)
+    from nutti.integrations.ai_text import _SEED_TOPICS
+
+    assert topic in _SEED_TOPICS
 
 
 # --- _clean_topic 정리 로직 ---

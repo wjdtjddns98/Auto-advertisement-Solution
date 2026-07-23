@@ -169,6 +169,15 @@ TOPIC_SYSTEM_PROMPT = (
     "주제 문안에 브랜드명('Nutti'·'누띠')은 절대 넣지 않는다 — 주제는 영상 장면 묘사에 "
     "그대로 삽입되며 브랜드명 리터럴은 화면 자막으로 렌더되는 실측 사고가 있다."
 )
+# 설명 말미 계산기 링크 줄의 문구 로테이션(2026-07-23 PO "영상 중복도") — 매 편 글자
+# 단위로 동일한 고정 문자열이 채널 전체에 반복되는 것을 피한다. URL·UTM은 코드 강제
+# 그대로(_build_metadata), 문구만 script.id 해시로 돌린다. 항목 수정/추가 자유.
+_CTA_LINE_VARIANTS = [
+    "🐾 간식 계산기 →",
+    "🐶 우리 아이 하루 간식량 계산해보기 →",
+    "👉 간식 얼마나 줘야 할지 궁금하면 →",
+    "🦴 우리 아이 맞춤 간식량 확인 →",
+]
 # ================== PO 수정 구역 끝 (주제·메타데이터 SEO) ==================
 
 # dry_run 및 폴백용 주제 시드(외부 호출 없이 매 사이클 다른 주제가 나오도록).
@@ -184,6 +193,35 @@ _SEED_TOPICS = [
     "강아지 단백질 간식 제대로 고르는 기준",
     "수제간식 보관, 이렇게 하면 안 상해요",
 ]
+
+
+def _topic_tokens(text: str) -> list[str]:
+    """주제 문자열을 어절 토큰으로 쪼갠다(한글·영문·숫자만, 구두점 제거)."""
+    return re.findall(r"[0-9A-Za-z가-힣]+", text)
+
+
+def _topic_too_similar(candidate: str, recent: list[str]) -> bool:
+    """최근 주제와의 소재·문형 중복을 코드로 판정한다(hard-rule-over-prompt).
+
+    프롬프트의 '문형 반복 금지' 지시만으로는 안 지켜진다 — 실측: 주제 원장의 최근
+    주제 대부분이 "~라면? 수의사가 알려주는 … 구별법" 동일 틀(2026-07-23 PO "영상
+    중복도" 지시의 직접 원인). 두 신호로 잡는다:
+    - 소재 중복: 어절 집합 자카드 유사도 ≥ 0.5 (같은 소재를 말만 바꿔 반복)
+    - 문형 반복: 3연속 어절이 최근 주제와 겹침 ("수의사가 알려주는 단순" 같은
+      보일러플레이트). 2어절 겹침은 허용 — "먹어도 되나요"류 검색 질문형은 의도된
+      SEO 패턴이라 막으면 안 된다.
+    """
+    cand = _topic_tokens(candidate)
+    cand_set = set(cand)
+    cand_tri = {tuple(cand[i : i + 3]) for i in range(len(cand) - 2)}
+    for prev in recent:
+        toks = _topic_tokens(prev)
+        union = cand_set | set(toks)
+        if union and len(cand_set & set(toks)) / len(union) >= 0.5:
+            return True
+        if cand_tri & {tuple(toks[i : i + 3]) for i in range(len(toks) - 2)}:
+            return True
+    return False
 
 # 팩트체커 역할 정의(공통). 출력 형식 지시는 경로별로 덧붙인다 — Anthropic은 도구
 # (record_fact_check), claude -p 폴백은 마커. '도구를 써라'를 공통부에 두면 도구가
@@ -671,6 +709,9 @@ class AITextClient:
         generate_script와 동일한 3-way 분기:
         dry_run→시드 주제, API 키 있음→Anthropic API, 없음→Claude Code(claude -p).
         recent_topics와 겹치지 않게 하고, feedback(직전 성과 분석)이 있으면 반영한다.
+        생성 주제가 최근 주제와 소재·문형이 겹치면(_topic_too_similar) 반려 사유를
+        붙여 최대 2회 재생성한다 — 회복형 재생성(hard-rule-over-prompt). 끝내 겹치면
+        시드 폴백(시드는 문형이 서로 달라 안전).
         """
         recent = recent_topics or []
 
@@ -678,46 +719,57 @@ class AITextClient:
             log.info("dry_run.suggest_topic", n_recent=len(recent))
             return self._dry_topic(recent)
 
-        prompt = "아래 조건으로 새 쇼츠 주제를 딱 한 개만 제안해줘.\n"
+        base_prompt = "아래 조건으로 새 쇼츠 주제를 딱 한 개만 제안해줘.\n"
         if recent:
-            prompt += "\n[최근 다룬 주제 — 겹치지 말 것]\n" + "\n".join(
+            base_prompt += "\n[최근 다룬 주제 — 겹치지 말 것]\n" + "\n".join(
                 f"- {t}" for t in recent
             ) + "\n"
         if feedback:
-            prompt += f"\n[직전 성과 분석 — 다음 주제에 반영]\n{feedback}\n"
-        prompt += "\n주제 문장 한 줄만 출력해줘. 따옴표·번호·머리말·설명 없이 제목 텍스트만."
+            base_prompt += f"\n[직전 성과 분석 — 다음 주제에 반영]\n{feedback}\n"
+        base_prompt += "\n주제 문장 한 줄만 출력해줘. 따옴표·번호·머리말·설명 없이 제목 텍스트만."
 
-        if self._client is None:
-            # Anthropic 키 없음 → claude -p(Claude Code)로 주제 생성.
-            # 호출 실패(타임아웃 등)는 시드 주제로 폴백 — 주제를 못 만들었다고
-            # 파이프라인 전체를 크래시시키지 않는다(analyze_performance와 동일 페일세이프).
-            try:
-                raw = self._llm_text(f"{TOPIC_SYSTEM_PROMPT}\n\n{prompt}", max_tokens=128)
-            except RuntimeError:
-                log.warning("topic.suggest.fallback_failed")
+        reject_note = ""
+        for _attempt in range(3):  # 최초 1회 + 문형 중복 재생성 2회
+            prompt = base_prompt + reject_note
+            if self._client is None:
+                # Anthropic 키 없음 → claude -p(Claude Code)로 주제 생성.
+                # 호출 실패(타임아웃 등)는 시드 주제로 폴백 — 주제를 못 만들었다고
+                # 파이프라인 전체를 크래시시키지 않는다(analyze_performance와 동일 페일세이프).
+                try:
+                    raw = self._llm_text(f"{TOPIC_SYSTEM_PROMPT}\n\n{prompt}", max_tokens=128)
+                except RuntimeError:
+                    log.warning("topic.suggest.fallback_failed")
+                    return self._dry_topic(recent)
+            else:
+                msg = self._client.messages.create(
+                    model=self.settings.script_model,
+                    max_tokens=128,
+                    system=[
+                        {
+                            "type": "text",
+                            "text": TOPIC_SYSTEM_PROMPT,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = _first_text(msg)
+
+            topic = _clean_topic(raw)
+            # 모델이 빈 응답/형식 깨짐을 주면 시드로 폴백(파이프라인이 멈추지 않도록).
+            if not topic:
+                log.warning("topic.suggest.empty_fallback")
                 return self._dry_topic(recent)
-        else:
-            msg = self._client.messages.create(
-                model=self.settings.script_model,
-                max_tokens=128,
-                system=[
-                    {
-                        "type": "text",
-                        "text": TOPIC_SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                messages=[{"role": "user", "content": prompt}],
+            if not _topic_too_similar(topic, recent):
+                log.info("topic.suggested", topic=topic)
+                return topic
+            log.warning("topic.suggest.pattern_dup", topic=topic)
+            reject_note = (
+                f"\n[반려됨] 직전 제안 '{topic}'은 최근 주제와 소재 또는 문장 구조가 "
+                "겹친다. 소재와 문형(문장 틀)을 완전히 바꿔 다시 제안하라.\n"
             )
-            raw = _first_text(msg)
-
-        topic = _clean_topic(raw)
-        # 모델이 빈 응답/형식 깨짐을 주면 시드로 폴백(파이프라인이 멈추지 않도록).
-        if not topic:
-            log.warning("topic.suggest.empty_fallback")
-            return self._dry_topic(recent)
-        log.info("topic.suggested", topic=topic)
-        return topic
+        log.warning("topic.suggest.similar_fallback")
+        return self._dry_topic(recent)
 
     def _dry_topic(self, recent: list[str]) -> str:
         """외부 호출 없이 최근 주제와 겹치지 않는 시드 주제를 고른다(결정적)."""
@@ -879,8 +931,12 @@ class AITextClient:
                 f"{calculator_url}{joiner}"
                 f"utm_source=youtube&utm_medium=shorts&utm_content={script.id}"
             )
+            # 문구는 편별 로테이션(_CTA_LINE_VARIANTS) — 고정 문자열 반복 회피.
+            cta = _CTA_LINE_VARIANTS[
+                zlib.crc32(f"cta:{script.id}".encode()) % len(_CTA_LINE_VARIANTS)
+            ]
             sep = "\n\n" if description.strip() else ""
-            description = f"{description.rstrip()}{sep}🐾 간식 계산기 → {tracked_url}"
+            description = f"{description.rstrip()}{sep}{cta} {tracked_url}"
         # 설명 끝에 클릭가능 해시태그 블록 추가(중복 방지).
         tag_line = " ".join(hashtags)
         if tag_line and tag_line not in description:

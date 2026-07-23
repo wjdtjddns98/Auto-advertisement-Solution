@@ -95,6 +95,25 @@ class PipelineState:
         data["last_format"] = fmt
         self._save(data)
 
+    # --- 직전 편 시각 스타일(연속 중복 회피) ---
+    # last_format과 동일 계약(2026-07-23 PO "영상 중복도"): 의상·장소·구도도 script.id
+    # 해시라 연속 편이 같은 값에 걸릴 수 있다. 실제 게시된 편의 축별 사용값을 저장해
+    # 다음 편의 pick_episode_style(avoid=...)가 회피한다. 저장은 업로드 성공 시에만.
+
+    def get_last_style(self) -> dict[str, str]:
+        """직전 게시 편의 시각 축 사용값({outfit, setting, prop, shot}, 없으면 빈 dict)."""
+        raw = self._load().get("last_style", {})
+        return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+    def save_style(self, style: dict[str, str]) -> None:
+        """이번 편 시각 스타일을 저장한다(빈 값 축은 제외, 전체 빈 dict는 무시)."""
+        cleaned = {str(k): str(v) for k, v in (style or {}).items() if v}
+        if not cleaned:
+            return
+        data = self._load()
+        data["last_style"] = cleaned
+        self._save(data)
+
     # --- 성과 수집 대기 큐(업로드 → 며칠 숙성 후 조회) ---
     # YouTube Analytics 지연 때문에 업로드 직후 조회하면 조회수가 0으로 나온다. 업로드를
     # 여기 쌓아두고(add_pending_upload), 오케스트레이터가 get_pending_uploads로 읽어
