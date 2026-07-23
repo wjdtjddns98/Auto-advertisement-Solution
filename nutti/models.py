@@ -56,6 +56,11 @@ class Script(BaseModel):
     # 값 — 대본(ai_text)·영상(video)이 이 필드를 단일 소스로 공유한다(2026-07-21).
     # 비면 주제 해시 폴백(하위호환 — 레거시 경로·테스트).
     episode_format: str = ""
+    # 이번 편에 마스코트가 먹는 간식(싸가지 먹방 컨셉, 2026-07-23 PO). name은 한국어
+    # (대본 프롬프트·검수용), visual은 영어 시각 묘사구(영상 프롬프트용). 안전 하드가드
+    # (_guard_food)를 통과한 값만 실린다. 비면 영상은 음식 없이 기존 연출(하위호환).
+    food_name: str = ""
+    food_visual: str = ""
     created_at: datetime = Field(default_factory=_utcnow)
 
 

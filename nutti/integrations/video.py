@@ -421,17 +421,21 @@ _EPISODE_SETTINGS = [
 # "정면 응시·차분한 표정" 한 가지 고정이라 매편 똑같아 보였다. 전 항목 sitting 유지
 # (기립 드리프트 가드 보존)·얼굴 정면 가시(립싱크 가독) 범위에서 앵글·표정만 바꾼다.
 # FLF 앵커 특성상 영상 전체 구도도 이 프레임을 따라간다. ASCII 작은따옴표(') 금지.
+# 2026-07-23 PO "싸가지 먹방" 컨셉: 차분·친근 계열 → 건방·심드렁 계열로 교체(레퍼런스:
+# 충주맨 낮은 자세 토크). sitting 유지(기립 드리프트 가드)·얼굴 정면 가시(립싱크 가독)
+# 범위에서 태도만 바꾼다. 과장 표정 단어(cheeky/exaggerated)는 얼굴 왜곡 실측이 있어
+# unbothered/unimpressed/deadpan/smug 계열의 절제 어휘만 사용 — 라이브 프레임 렌더로 검증.
 _FRAME_SHOTS = [
-    "looking straight at the camera with a calm, gentle, friendly face, ready to talk "
-    "directly to the camera",
-    "framed in a close-up from the chest up, its head slightly tilted to one side with a "
-    "curious, bright expression, looking straight into the camera",
-    "captured from a slight three-quarter angle, its body turned a little sideways while "
-    "its face turns back toward the camera with a playful open-mouth smile",
-    "seen from a slightly high camera angle looking down as the puppy looks up at the "
-    "camera with big round pleading eyes",
-    "captured from a slightly low camera angle as the puppy leans eagerly toward the "
-    "camera with an excited, joyful expression, mouth open as if mid-sentence",
+    "sitting back with a relaxed, unbothered slouch, chin slightly raised, giving the "
+    "camera a confident, unimpressed look as if mildly annoyed to be filmed",
+    "framed in a close-up from the chest up, head tilted back a little with half-lidded, "
+    "unimpressed eyes looking down toward the camera in a deadpan way",
+    "captured from a slight three-quarter angle, giving the camera a sassy sideways "
+    "glance while its face stays clearly visible and turned toward the lens",
+    "seen from a slightly low camera angle so the puppy appears to look down on the "
+    "viewer, chin up, with a smug, self-assured expression",
+    "leaning back lazily as if lounging, one front paw resting near its snack, staring "
+    "at the camera with a deadpan, unimpressed face",
 ]
 # ===================== PO 수정 구역 끝 (편별 연출 로테이션) =====================
 
@@ -550,9 +554,13 @@ class VeoPromptBuilder:
     # 주의: 브랜드명("Nutti")·치수("9:16") 같은 리터럴을 넣지 말 것 — Veo가 그 글자를
     # 화면 자막으로 렌더한다(실측: "Nutti"·"9:16" 자막 박힘). "mascot"도 금지 — 인형탈
     # 코스튬으로 해석된다(실측). 캐릭터는 항상 "진짜 실사 강아지"로 못박는다.
+    # 2026-07-23 PO "싸가지 먹방" 컨셉(레퍼런스: 충주맨 낮은 자세 토크): 차분·친근 →
+    # 건방·심드렁. 단 cheeky/exaggerated 같은 과장 표정 단어는 얼굴 왜곡 실측이 있어
+    # 쓰지 않는다 — unbothered/confident/deadpan 계열의 절제된 어휘로만 태도를 만든다.
     _PERSONA = (
-        f"{_MASCOT_APPEARANCE}, calm and gentle, talking to the camera in a relaxed, "
-        "friendly way, with soft, natural, subtle facial expressions and no "
+        f"{_MASCOT_APPEARANCE}, confident, unbothered and nonchalant, talking to the "
+        "camera in a relaxed, self-assured way like it slightly looks down on the "
+        "viewer, with subtle, natural, deadpan facial expressions and no "
         "exaggerated or distorted faces"
     )
     _VOICE = (
@@ -667,6 +675,20 @@ class VeoPromptBuilder:
         "people. Absolutely no text, subtitles, captions, letters, numbers, words, logos, "
         "brand names, watermarks, or UI overlays anywhere in the frame."
     )
+    # 먹방 연출(2026-07-23 PO): 간식 그릇을 앞에 두고, 클립 "시작"에 한 입만 먹고
+    # 말한다. 시작에 두는 이유 — 끝 잉여 트림(_generate_and_trim_clip)이 발화 이후
+    # 구간을 잘라내므로 발화 뒤 베어무는 액션은 잘려나간다. 발화 중 씹기는 립싱크
+    # 붕괴라 금지, 클립당 한 입 제한(팔흔들기 1회 제한과 같은 과도 샘플링 방어).
+    # ponytail: 씹는 소리(ASMR)는 _VOICE의 무음 정책·발화 끝 트림 로직과 충돌해 비주얼만
+    # — 소리까지 원하면 트림 로직 개편이 선행돼야 한다.
+    _EATING_TEMPLATE = (
+        "A small snack bowl with {food} sits right in front of the puppy. The very "
+        "first action of the clip is the puppy taking one quick, nonchalant bite of the "
+        "snack, chewing it briefly with an unimpressed face — this opening bite counts "
+        "as the immediate lively start of the clip — and then it immediately starts "
+        "speaking. At most this one bite in the whole clip, never chewing or holding "
+        "food while speaking words, and the food never blocks or covers its face."
+    )
     # 마지막 비트(CTA) 전용 음성 앵커 — CTA 대사가 권유·느낌표 톤이라 Veo가 음성을 더
     # 들뜨거나 아나운서처럼 바꾸는 경향이 강하다(2026-06-29 PO 실측). 마지막 비트
     # 프롬프트에만 추가로 박아 앞 비트와 동일 화자·톤으로 못박는다(_VOICE와 이중 방어).
@@ -686,6 +708,7 @@ class VeoPromptBuilder:
         style: EpisodeStyle | None = None,
         motion_release: bool = False,
         final_cta: bool = False,
+        food: str = "",
     ) -> str:
         """비트 대사 한 토막으로 8초 단일컷 Veo 프롬프트를 만든다.
 
@@ -702,6 +725,8 @@ class VeoPromptBuilder:
         중간 모션을 풀어도 경계는 매끄럽다.
         `final_cta=True`(마지막 비트 전용)면 _CTA_VOICE_ANCHOR를 덧붙여 CTA 대사에서
         음성이 들뜨거나 화자가 바뀌는 경향을 추가로 억제한다(2026-06-29 PO).
+        `food`(영어 시각 묘사구, Script.food_visual)가 오면 간식 그릇+클립 시작 한 입
+        먹방 연출(_EATING_TEMPLATE)이 붙는다 — 비면 기존 연출 그대로(하위호환).
         """
         dialogue = _sanitize_prompt_text(dialogue_text.strip() or "", _MAX_DIALOGUE_CHARS)
         speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
@@ -709,6 +734,8 @@ class VeoPromptBuilder:
         if style is not None:
             prop = f", with {style.prop}" if style.prop else ""
             scene = f"The puppy wears {style.outfit}{prop}, {style.setting}. "
+        if food:
+            scene += self._EATING_TEMPLATE.format(food=food) + " "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
         # 마지막 비트는 진정 강제 없이 귀여운 행동 자유(_MOTION_FINAL_FREE, 2026-07-06 PO) —
         # 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 필요 없다. 중간 비트는 기존 로직 유지.
@@ -832,7 +859,9 @@ class VideoStudio:
         frame_path = self._generate_frame(script, style)
         # 실 경로의 총길이는 위 사전 추정 대신 veo_fal이 돌려준 실측값(비트 클립 앞뒤
         # 침묵 트림 반영)으로 덮어쓴다.
-        video_path, duration = self._produce_clips_veo_fal(frame_path, beats, style)
+        video_path, duration = self._produce_clips_veo_fal(
+            frame_path, beats, style, food=script.food_visual
+        )
         return VideoAsset(
             script_id=script.id,
             frame_image_path=frame_path,
@@ -853,7 +882,7 @@ class VideoStudio:
         return [script.body.strip() or script.topic]
 
     def _produce_clips_veo_fal(
-        self, frame_path: str, beats: list[str], style: EpisodeStyle
+        self, frame_path: str, beats: list[str], style: EpisodeStyle, food: str = ""
     ) -> tuple[str, float]:
         """fal.ai Veo 3.1로 비트마다 같은 시작 프레임에서 클립을 생성하고 스티칭한다.
 
@@ -903,6 +932,7 @@ class VideoStudio:
                     style=style,
                     motion_release=lock,
                     final_cta=(i == len(beats)),
+                    food=food,
                 )
                 # 생성 + 끝 잉여 고정 트림(글리치 온상 제거, 8초→약7초, 2026-06-29 PO).
                 # QC 재생성이 같은 단계를 다시 밟도록 헬퍼로 묶었다.
@@ -2220,6 +2250,14 @@ class VideoStudio:
         shot = style.shot or (
             _FRAME_SHOTS[zlib.crc32(f"shot:{script.id}".encode()) % len(_FRAME_SHOTS)]
         )
+        # 먹방 간식 그릇(2026-07-23 PO): 프레임은 FLF 앵커라 비트 클립과 그릇 유무가
+        # 일치해야 경계에서 그릇이 나타났다 사라지는 점프가 없다(마이크와 동일 원리).
+        food = (
+            f"A small snack bowl with {script.food_visual} sits right in front of the "
+            "puppy, clearly visible. "
+            if script.food_visual
+            else ""
+        )
         if style.fmt == "interview":
             mic = (
                 "A handheld interview microphone reaches into the frame from off-screen, "
@@ -2231,7 +2269,7 @@ class VideoStudio:
             "A photorealistic tall vertical portrait-orientation starting frame for a "
             f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}{prop}, "
             f"{style.setting}, "
-            f"{shot}. {_CINEMATIC_LOOK} "
+            f"{shot}. {food}{_CINEMATIC_LOOK} "
             f"{scene_context}"
             # 첫 1초 무음 가독성(2026-07-21 쇼츠 트렌드): 0초 프레임만 보고도 상황이
             # 읽혀야 스와이프를 이긴다 — 배경·소품이 또렷이 보이는 상황 전달형 구도.

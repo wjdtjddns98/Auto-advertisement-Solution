@@ -30,7 +30,12 @@ _BEAT_STRUCTURES = {
 
 
 def build_script_system_prompt(n_beats: int = 4) -> str:
-    """비트 수에 맞는 대본 시스템 프롬프트를 조립한다(3/4비트 완료율 A/B)."""
+    """비트 수에 맞는 대본 시스템 프롬프트를 조립한다(3/4비트 완료율 A/B).
+
+    2026-07-23 PO 컨셉 전환("싸가지 먹방", 레퍼런스: 충주맨 낮은 자세 토크): 친근한
+    반말 → 건방지고 뻔뻔한 반말 + 매 편 주제 간식을 심드렁하게 먹으면서 말하는 상황.
+    귀여운 아이 목소리(영상 고정) × 싸가지 태도의 갭이 유머 코어다.
+    """
     structure = _BEAT_STRUCTURES.get(n_beats, _BEAT_STRUCTURES[4])
     return (
         "너는 애견 수제간식 브랜드 'Nutti'의 콘텐츠 작가다. "
@@ -38,24 +43,33 @@ def build_script_system_prompt(n_beats: int = 4) -> str:
         "급여와 반드시 연결한다(브랜드 정체성 — 2026-07-07 PO). 건강 이상 신호를 다루는 주제라면 "
         "실용 팁 비트에서 그 상황의 간식·급여 관리 요령(양 줄이기·재료 바꾸기·수분 보충 등)으로 "
         "자연스럽게 잇는다. 단, 간식으로 질병을 치료·예방한다는 식의 근거 없는 효능 주장은 금지. "
+        "캐릭터 설정(2026-07-23 PO 확정): 화자는 건방지고 뻔뻔한 강아지다 — 자기 간식을 "
+        "먹으면서 시청자(보호자)를 살짝 깔보는 능청스러운 반말로 정보를 던진다. 잘난 척하되 "
+        "말하는 내용(사실)은 전부 정확하다는 게 캐릭터의 매력이다. 예: '이것도 몰랐어?', "
+        "'너네가 맨날 틀리는 거야', '나니까 알려주는 거다'. 무례하되 저속한 욕설·비하는 금지. "
+        "마스코트는 지금 이번 편 간식을 앞에 두고 먹으면서 말하는 상황이다 — 대사에 먹는 "
+        "상황이 자연스럽게 묻어나게 쓰되(예: '일단 나 먹을게', '이건 내 거야'), 씹는 소리 "
+        "의성어는 금지 규칙 그대로 지킨다. "
         f"약 {n_beats * 8 + 3}초 분량의 쇼츠/릴스 대본을 '정확히 {n_beats}개의 비트'로 쓴다: "
         f"{structure}"
         "①훅이 가장 중요하다 — 첫 1초 안에 스크롤을 멈춰 세워야 한다. 훅 비트의 첫 문장은 "
         "공백 포함 15자 이내의 한 방으로 짧게 끊는다(발화 2초 안에 끝나야 스와이프 판단을 "
-        "이긴다 — 2026-07-16 KR 쇼츠 트렌드 반영). 패턴은 ⓐ뜨끔한 질문 ⓑ구체적 숫자·충격 "
-        "사실('열에 아홉은 잘못…') ⓒ통념을 뒤집는 반전 ⓓ문장을 중간에 끊어 궁금하게 만드는 "
-        "호기심형 중 주제에 가장 맞는 것을 고르되, 한 패턴('~다면 넘기지 마세요'류 경고형)에 "
-        "고정하지 말고 편마다 다양하게 쓴다. 그 숫자·반전·질문이 첫 문장 맨 앞에 바로 나와야 "
-        "한다 — 배경 설명을 먼저 깔고 뒤에 등장시키면 안 된다. "
+        "이긴다 — 2026-07-16 KR 쇼츠 트렌드 반영). 대표 패턴은 시청자(보호자·강아지)를 "
+        "겨냥한 싸가지 디스·명령형이다(2026-07-23 PO: '야 너는 이런 거 먹지 마라' 같은 "
+        "느낌) — 이 태도를 기본으로 하되 문장 자체는 편마다 다르게 쓴다(같은 문형 반복 "
+        "금지). 그 외 ⓐ뜨끔한 질문 ⓑ구체적 숫자·충격 사실 ⓒ통념을 뒤집는 반전도 디스 "
+        "태도에 얹어 섞어 쓴다. 그 디스·숫자·반전이 첫 문장 맨 앞에 바로 나와야 한다 — "
+        "배경 설명을 먼저 깔고 뒤에 등장시키면 안 된다. "
         "밋밋한 인사·자기소개·일반적 주제 소개, '오늘은 ~에 대해'식 도입, '혹시 ~하시나요'류 "
         "완곡한 질문, 누구나 아는 뻔한 말은 절대 금지한다. 설명하듯 풀지 말고 "
         "시청자(우리 아이)를 곧장 찌르는 한 방으로 시작해 끝까지 긴장을 끌고 간다. "
-        "두 번째 비트는 앞 비트를 반복·요약하며 열지 말고 반전·상승 전환('근데 진짜 문제는 따로 "
-        "있어요'식)으로 열어 영상 중반의 2차 훅을 만든다(알고리즘이 중반 잔존을 확산 기준으로 "
-        "본다). "
+        "두 번째 비트는 앞 비트를 반복·요약하며 열지 말고 반전·상승 전환('근데 진짜 문제는 "
+        "따로 있거든'식)으로 열어 영상 중반의 2차 훅을 만든다(알고리즘이 중반 잔존을 확산 "
+        "기준으로 본다). "
         "마지막 비트(CTA)에서는 브랜드 이름('Nutti'·'누띠')을 절대 언급하지 않는다. 또한 "
-        "느낌표·외침 같은 들뜬 톤 대신 앞 비트와 같은 차분한 권유체로 쓴다(영상에서 마지막 "
-        "비트 음성이 들뜨며 화자가 바뀌는 경향을 줄이기 위함 — 끝에 느낌표를 쓰지 말 것). — "
+        "느낌표·외침 같은 들뜬 톤 대신 앞 비트와 같은 심드렁한 톤을 유지한 무심한 권유로 "
+        "쓴다(예: '궁금하면 계산기나 써보든가' 느낌 — 영상에서 마지막 비트 음성이 들뜨며 "
+        "화자가 바뀌는 경향을 줄이기 위함, 끝에 느낌표를 쓰지 말 것). — "
         "각 비트는 강아지 마스코트가 말하는 8초짜리 한 클립이 된다 — 발화가 약 7초 안에 끝나 "
         "끝에 약간 여유가 남도록 한국어 2문장, 공백 포함 38~44자로 쓴다(너무 짧으면 비트 사이가 "
         "비고, 44자를 넘겨 8초 가까이 채우면 발화 끝~클립 끝 여유가 줄어 비트 경계 스티칭이 "
@@ -64,9 +78,9 @@ def build_script_system_prompt(n_beats: int = 4) -> str:
         "연달아 붙는 표현, 예: '귀진드기' 같은 전문 복합어)는 자연스러운 일상어로 풀어 쓴다"
         "('귀에 사는 진드기', '외이염' 등 또박또박 읽히는 형태). 의학 용어가 꼭 필요하면 짧고 "
         "발음이 명확한 단어를 고르고, 긴 복합어는 쉼표로 끊어 읽기 쉽게 나눈다. "
-        "말투는 전 비트 친근한 반말로 쓴다(예: '~해', '~야', '~거든') — 존댓말 어미"
-        "('~요', '~습니다', '~하세요')는 쓰지 않는다(2026-07-20 PO 반말 컨셉 확정, CTA의 "
-        "차분한 권유도 반말로: '간식 줄 땐 이것만 기억해' 식). "
+        "말투는 전 비트 반말이다(예: '~해', '~야', '~거든', '~마라') — 존댓말 어미"
+        "('~요', '~습니다', '~하세요')는 쓰지 않는다(2026-07-20 PO 반말 확정 + 2026-07-23 "
+        "싸가지 톤 전환). "
         "반드시 팩트체크 가능한 내용만 포함하고, 과장·근거 없는 의학 주장은 금지한다. "
         f"출력은 각 비트를 줄바꿈으로 구분해 정확히 {n_beats}줄로 — 머리말·번호·따옴표 없이 "
         "대사 문장만."
@@ -85,12 +99,17 @@ SCRIPT_SYSTEM_PROMPT = build_script_system_prompt(4)
 # 2026-07-20 PO: vlog 편("수박" 5xssukr9mN0) 톤 확인 후 3종으로 확정 — direct/quiz/
 # ranking 제거(성과 데이터 없는 상태의 감 기반 킬임을 인지하고 결정), 전 포맷 반말
 # 컨셉(반말 지시는 SCRIPT_SYSTEM_PROMPT 공통 규칙). 복원은 이 리스트에 다시 추가만.
-EPISODE_FORMATS = ["vlog", "interview", "vet"]
+# 2026-07-23 PO: "싸가지 먹방" 단일 컨셉으로 전환(레퍼런스: 충주맨 낮은 자세 토크) —
+# vlog/interview/vet을 리스트에서 제거(휴면). 먹방 지시는 포맷 룰이 아니라
+# SCRIPT_SYSTEM_PROMPT(대본)·video.py(연출) 공통 규칙이다. 복원은 다시 추가만 —
+# vet 세트·인터뷰 마이크 등 연출 코드는 video.py에 휴면 상태로 남아 있다.
+EPISODE_FORMATS = ["mukbang"]
 
 # 포맷별 대본 추가 지시. 하드룰 파서(4비트·글자수·의성어 금지 등)는 그대로 적용되므로
-# 구조·톤만 지시한다. direct·interview는 현행 대본 규칙 그대로(추가 지시 없음 —
-# interview는 영상 연출만 다름). 줄 머리에 '3.' 같은 숫자+구두점을 쓰지 말 것
+# 구조·톤만 지시한다. 줄 머리에 '3.' 같은 숫자+구두점을 쓰지 말 것
 # (_split_into_beats가 번호 매김으로 오인해 제거한다).
+# 2026-07-23: vet/vlog는 휴면 엔트리 — EPISODE_FORMATS에서 빠져 선택되지 않지만
+# 컨셉 복원 대비로 룰은 남긴다(mukbang은 별도 룰 없음 — 공통 규칙이 전부 커버).
 FORMAT_SCRIPT_RULES = {
     "vet": (
         "이번 편은 수의사 상황극이다: 마스코트가 동물병원 진료실의 수의사 선생님인데, "
@@ -193,6 +212,63 @@ _SEED_TOPICS = [
     "강아지 단백질 간식 제대로 고르는 기준",
     "수제간식 보관, 이렇게 하면 안 상해요",
 ]
+
+
+# ==================== PO 수정 구역 (먹방 간식 안전 가드) ====================
+# 싸가지 먹방 컨셉(2026-07-23 PO): 매 편 주제에 맞는 간식을 마스코트가 먹는다.
+# 강아지에게 위험한 음식은 어떤 경우에도 화면에서 먹이지 않는다 — AI가 골라와도
+# 코드가 막고 안전 간식으로 폴백한다(hard-rule-over-prompt). 항목 추가 자유.
+_DANGEROUS_FOOD_TOKENS = [
+    # 한국어(간식명 검사용)
+    # "파"는 한 글자 부분일치 오탐("파프리카"·"파인애플" 등 안전식품)이 커서 대파/쪽파로만.
+    "초콜릿", "초콜렛", "코코아", "포도", "건포도", "양파", "마늘", "대파", "쪽파", "부추",
+    "자일리톨", "마카다미아", "아보카도", "술", "맥주", "와인", "커피", "카페인",
+    "카카오", "사탕", "껌",
+    # 영어(시각 묘사구 검사용)
+    "chocolate", "cocoa", "cacao", "grape", "raisin", "onion", "garlic", "chive",
+    "leek", "xylitol", "macadamia", "avocado", "alcohol", "beer", "wine", "coffee",
+    "caffeine", "candy", "gum",
+]
+# 안전 간식 폴백 목록 — (한국어 이름, 영어 시각 묘사구). AI 선정이 실패·위험 판정일 때
+# 주제 해시로 결정적으로 고른다. 전부 강아지 급여 안전 식품만 넣을 것.
+_SAFE_SNACKS = [
+    ("닭가슴살 육포", "small strips of dried chicken breast jerky"),
+    ("고구마 스틱", "golden baked sweet potato sticks"),
+    ("오리 안심 간식", "small pieces of dried duck breast"),
+    ("당근 스틱", "fresh crunchy carrot sticks"),
+    ("블루베리 몇 알", "a few fresh blueberries"),
+    ("사과 조각", "small fresh apple slices without seeds"),
+    ("단호박 큐브", "soft steamed pumpkin cubes"),
+    ("바나나 조각", "small fresh banana slices"),
+]
+# ================== PO 수정 구역 끝 (먹방 간식 안전 가드) ==================
+
+
+def _fallback_food(topic: str) -> tuple[str, str]:
+    """주제 해시로 안전 간식을 결정적으로 고른다(AI 선정 실패·위험 판정 폴백)."""
+    pair = _SAFE_SNACKS[zlib.crc32(f"food:{topic}".encode()) % len(_SAFE_SNACKS)]
+    return pair
+
+
+def _guard_food(name_kr: str, visual_en: str, topic: str) -> tuple[str, str]:
+    """간식 선정 결과의 안전 하드가드 — 위반 시 안전 간식 폴백을 반환한다.
+
+    검사: ①비어 있음 ②위험 음식 토큰(한/영) ③visual이 영상 프롬프트에 못 들어가는
+    형태(ASCII 아님·작은따옴표 포함·과길이 — _validate_visual_prompt 충돌 방지).
+    """
+    name = (name_kr or "").strip()
+    visual = (visual_en or "").strip()
+    if not name or not visual:
+        return _fallback_food(topic)
+    lowered = f"{name} {visual}".lower()
+    for token in _DANGEROUS_FOOD_TOKENS:
+        if token in lowered:
+            log.warning("food.dangerous_rejected", name=name, token=token)
+            return _fallback_food(topic)
+    if "'" in visual or not visual.isascii() or len(visual) > 80:
+        log.warning("food.visual_rejected", visual=visual[:40])
+        return _fallback_food(topic)
+    return name, visual
 
 
 def _topic_tokens(text: str) -> list[str]:
@@ -454,6 +530,43 @@ class AITextClient:
         """
         return _split_into_beats(body, n=pick_beat_count(topic))
 
+    def suggest_food(self, topic: str) -> tuple[str, str]:
+        """주제에 어울리는 '마스코트가 먹을 안전 간식'을 고른다(싸가지 먹방 컨셉).
+
+        (한국어 이름, 영어 시각 묘사구) 쌍을 반환한다. dry_run·호출 실패 → 주제 해시
+        폴백(결정적·무네트워크). 라이브 → LLM이 JSON 한 줄로 제안하되, 어떤 경로든
+        결과는 _guard_food 하드가드(위험 음식·프롬프트 형식)를 통과한 값만 나간다.
+        """
+        if self.settings.dry_run:
+            return _fallback_food(topic)
+        import json as _json
+
+        ask = (
+            "다음 쇼츠 주제에 어울리는, 강아지가 실제로 먹어도 안전한 간식 1개를 골라줘. "
+            "주제가 위험·금지 음식(초콜릿·포도·양파 등)에 관한 것이면 그 음식은 절대 "
+            "고르지 말고 주제와 연관되는 안전한 간식을 골라라. JSON 한 줄로만 출력: "
+            '{"name_kr": "한국어 간식명", "visual_en": "english visual phrase, 3-8 words"}. '
+            f"코드블록·설명 금지.\n\n주제: {topic}"
+        )
+        name = visual = ""
+        try:
+            if self._client is None:
+                raw = self._llm_text(ask, max_tokens=128)
+            else:
+                msg = self._client.messages.create(
+                    model=self.settings.script_model,
+                    max_tokens=128,
+                    messages=[{"role": "user", "content": ask}],
+                )
+                raw = _first_text(msg)
+            data = _json.loads(raw)
+            if isinstance(data, dict):
+                name = str(data.get("name_kr") or "")
+                visual = str(data.get("visual_en") or "")
+        except (RuntimeError, ValueError):
+            log.warning("food.suggest_failed", topic=topic)
+        return _guard_food(name, visual, topic)
+
     def generate_script(
         self, topic: str, feedback: str = "", episode_format: str = ""
     ) -> Script:
@@ -461,12 +574,15 @@ class AITextClient:
 
         episode_format은 오케스트레이터가 직전 편 회피를 반영해 확정한 포맷 — 비면
         주제 해시 폴백(레거시 경로·테스트 하위호환). 확정값은 Script.episode_format으로
-        영상 단계에 전달된다.
+        영상 단계에 전달된다. 이번 편 간식(싸가지 먹방)도 여기서 확정해 대본 프롬프트와
+        Script(food_name/food_visual — 영상 단계)로 전달한다.
         """
         # 편별 비트 수(완료율 A/B, 2026-07-21 PO): 주제 해시로 3/4비트 결정.
         n_beats = pick_beat_count(topic)
         fmt = episode_format or pick_episode_format(topic)
+        food_name, food_visual = self.suggest_food(topic)
         prompt = f"주제: {topic}\n"
+        prompt += f"\n[이번 편 간식 — 마스코트가 지금 앞에 두고 먹는 것]\n{food_name}\n"
         if feedback:
             prompt += f"\n[이전 사이클 개선 포인트]\n{feedback}\n"
         # 편별 포맷(2026-07-16 PO): 시스템 프롬프트가 아닌 유저 프롬프트에 붙여
@@ -481,11 +597,12 @@ class AITextClient:
 
         if self.settings.dry_run:
             log.info("dry_run.generate_script", topic=topic)
+            # 더미도 싸가지 먹방 톤(2026-07-23 PO)으로 유지 — 게이트 미리보기 일관성.
             body = (
-                "강아지 간식, 대부분 잘못 주고 있다는 거 아세요?\n"
-                f"'{topic}' — 수의학적으로 안전한 재료와 적정량만 골라 알려드릴게요.\n"
-                "핵심은 양이에요. 아이 체중에 맞춰 주는 게 제일 중요해요.\n"
-                "프로필 링크의 간식계산기로 우리 아이 맞춤량을 확인하세요!"
+                "야, 너 이거 잘못 주고 있더라.\n"
+                f"'{topic}' — 나니까 알려주는 거다, 잘 들어.\n"
+                "핵심은 양이야. 체중에 맞춰 주는 게 제일 중요하거든.\n"
+                "궁금하면 프로필 링크 계산기나 써보든가."
             )
             # dry_run은 팩트체크 통과를 시뮬레이션. 비트는 편별 비트 수로 분할.
             # 마지막 줄은 시스템 프롬프트의 'CTA에 브랜드명 금지' 규칙과 동일하게 유지한다.
@@ -495,6 +612,8 @@ class AITextClient:
                 prompt=prompt,
                 beats=_split_into_beats(body, n=n_beats),
                 episode_format=fmt,
+                food_name=food_name,
+                food_visual=food_visual,
                 fact_checked=True,
             )
 
@@ -526,6 +645,8 @@ class AITextClient:
             prompt=prompt,
             beats=_split_into_beats(body, n=n_beats),
             episode_format=fmt,
+            food_name=food_name,
+            food_visual=food_visual,
             fact_checked=False,
         )
 
