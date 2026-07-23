@@ -1609,16 +1609,20 @@ def test_frame_prompt_includes_food_bowl_matching_beats():
     assert "snack bowl" not in VideoStudio._frame_prompt(without_food, style)
 
 
-def test_produce_clips_passes_food_into_beat_prompts(tmp_path, monkeypatch):
-    """produce 경로가 Script.food_visual을 전 비트 프롬프트에 배선한다(리버트 가드)."""
+def test_produce_clips_feeds_only_first_beat(tmp_path, monkeypatch):
+    """먹방은 첫 비트에서만 집어 먹는다(2026-07-23 PO: 한 번이면 충분·여러 번은 충돌·
+    2번째부터 그릇에 간식이 도로 차오름). 2번 비트부터는 food 텍스트가 빠져 그릇을 다시
+    그리지 않는다 — 시각 연속성은 체이닝이 잇는다."""
     prompts: list[str] = []
     studio = _wiring_capture_studio(tmp_path, monkeypatch, prompts)
     style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
     studio._produce_clips_veo_fal(
-        "frame.png", ["비트1", "비트2"], style, food="fresh carrot sticks"
+        "frame.png", ["비트1", "비트2", "비트3"], style, food="fresh carrot sticks"
     )
-    assert len(prompts) == 2
-    assert all("snack bowl with fresh carrot sticks" in p for p in prompts)
+    assert len(prompts) == 3
+    assert "snack bowl with fresh carrot sticks" in prompts[0]  # 첫 비트만 집어 먹기
+    assert "pick up a single piece" in prompts[0]
+    assert all("snack bowl" not in p for p in prompts[1:])  # 이후 비트는 그릇 리필 없음
 
 
 def test_produce_clips_food_unlocks_and_chains(tmp_path, monkeypatch):
@@ -1782,6 +1786,17 @@ def test_build_beat_always_includes_persona_and_fixed_voice():
         assert video_module._MASCOT_APPEARANCE in prompt  # 고정 외형은 항상 포함
         assert "EXACTLY the same single voice" in prompt
         assert "Korean voice" in prompt
+
+
+def test_voice_delivery_is_sassy_but_consistent():
+    """목소리 딜리버리가 건방·심드렁(2026-07-23 PO: 대사만 싸가지·목소리는 안 바뀜 →
+    톤 교체)이되, 비트 간 동일 목소리 일관성 통제 문구는 유지된다(드리프트 방지)."""
+    v = VeoPromptBuilder._VOICE
+    assert "smug" in v and "deadpan" in v  # 싸가지 딜리버리
+    assert "never sweet" in v  # 귀엽고 명랑 톤 배제
+    assert "EXACTLY the same single voice" in v  # 일관성 통제 유지
+    # CTA 앵커도 같은 심드렁 톤으로 못박아 마지막 비트 화자 변경을 억제한다.
+    assert "sassy tone" in VeoPromptBuilder._CTA_VOICE_ANCHOR
 
 
 def test_persona_is_calm_and_pins_fixed_appearance():

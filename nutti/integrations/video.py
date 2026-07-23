@@ -563,25 +563,30 @@ class VeoPromptBuilder:
         "viewer, with subtle, natural, deadpan facial expressions and no "
         "exaggerated or distorted faces"
     )
+    # 2026-07-23 PO: 대사만 싸가지 있고 목소리 딜리버리가 안 싸가지라는 실측 피드백 →
+    # 톤을 건방·심드렁·냉소(cocky/smug/deadpan/bratty)로 바꾼다. 단 '같은 목소리 일관성'은
+    # 유지가 최우선(비트별 독립 생성이라 이 묘사가 유일한 통제 수단) — 아래 EXACTLY 문구·
+    # 발음 교정 블록·CTA 앵커는 그대로 두고 태도 어휘만 교체한다.
     _VOICE = (
         "Voice (must be EXACTLY the same single voice in every clip of this series, like "
-        "one specific recognizable person with a fixed vocal fingerprint): a bright, "
-        "cute Little girl Korean voice, sounding about 6 years old, slightly high-pitched, "
-        "cheeky and energetic, with a warm soft timbre and a consistent speaking rhythm at "
-        "a lively natural pace. "
+        "one specific recognizable person with a fixed vocal fingerprint): a little-girl "
+        "Korean voice, sounding about 6 years old, slightly high-pitched, but delivered "
+        "with a cocky, smug, unbothered and slightly bratty attitude — dry and deadpan, "
+        "talking down to the listener like a sassy kid who is sure she knows better, "
+        "never sweet, eager, gentle, or cheerful, at a consistent speaking rhythm. "
         # 발음 교정(2026-07-06 PO 실측: 쉬운 단어도 발음이 뭉개짐 — 아이 페르소나의
         # 혀 짧은 딕션 재현이 유력 원인). 톤은 아이답게 유지하되 발음만 성인급 정확도로.
         "Her Korean PRONUNCIATION however is flawlessly clear and precise: perfect "
         "standard Korean diction, every syllable fully and accurately articulated, "
         "never slurred, never mumbled, never babyish or lisping — like a professional "
         "child voice actor whose enunciation is adult-level crisp and correct. "
-        "Keep the identical timbre, pitch, accent, and speaking speed "
-        "in every clip. Keep this exact same voice even on excited, exclamatory, or "
-        "call-to-action lines: do not raise the pitch, do not get louder, do not turn into "
-        "an excited announcer or a promotional voice-over, and never switch to a different "
-        "speaker or a different age — every line, including the final call-to-action, must "
-        "sound like the exact same little girl speaking in the same calm, even tone as the "
-        "earlier lines. "
+        "Keep the identical timbre, pitch, accent, speaking speed, and this same dry "
+        "sassy attitude in every clip. Keep this exact same voice even on excited, "
+        "exclamatory, or call-to-action lines: do not raise the pitch, do not get louder, "
+        "do not turn into an excited announcer or a promotional voice-over, and never "
+        "switch to a different speaker or a different age — every line, including the "
+        "final call-to-action, must sound like the exact same sassy little girl in the "
+        "same dry, unbothered tone as the earlier lines. "
         # 발화 후 잉여 구간 BGM 채움 억제 — Veo가 대사가 끝난 뒤 남는 시간을 배경음악으로
         # 채우면 무음 트림이 발화 끝을 못 잡아 끝부분 헛짓이 남는다(2026-06-29 PO 실측).
         "This single spoken voice is the only audio: there is no background music, "
@@ -703,9 +708,9 @@ class VeoPromptBuilder:
     # 프롬프트에만 추가로 박아 앞 비트와 동일 화자·톤으로 못박는다(_VOICE와 이중 방어).
     _CTA_VOICE_ANCHOR = (
         "This is the final line of the series. Speak it in the exact same voice, pitch, "
-        "age, and calm even tone as the previous clips — the same little girl, not louder, "
-        "not more excited, not an announcer or promo voice. Do not change the speaker for "
-        "this call to action."
+        "age, and same dry, unbothered sassy tone as the previous clips — the same little "
+        "girl, not louder, not more excited, not an announcer or promo voice. Do not "
+        "change the speaker for this call to action."
     )
     # ========================= PO 수정 구역 끝 (영상 연출) =========================
 
@@ -952,13 +957,18 @@ class VideoStudio:
                 # KR "AI 강아지 인터뷰" 유행에 맞춰 로테이션으로 부활.)
                 # lock 모드는 끝 프레임이 모델로 고정되므로 모션 제약을 풀어(_MOTION_LIVELY)
                 # 생동감을 준다(2026-06-29 PO). 기본 image-to-video 경로는 _MOTION_HOLD 유지.
+                # 먹방은 첫 비트에서만 집어 먹는다(2026-07-23 PO: 한 번이면 충분·여러 번은
+                # 충돌). 2번 비트부터는 food 텍스트를 아예 빼 그릇을 다시 그리지 않는다 —
+                # 안 그러면 매 비트가 "당근 가득한 그릇"을 다시 렌더해 먹은 간식이 도로
+                # 차오른다(PO 실측). 그릇의 시각적 연속성은 체이닝된 끝 프레임이 잇는다.
+                beat_food = food if i == 1 else ""
                 prompt = builder.build_beat(
                     beat,
                     off_screen_interviewer=(style.fmt == "interview"),
                     style=style,
                     motion_release=(use_lock or eating),
                     final_cta=(i == len(beats)),
-                    food=food,
+                    food=beat_food,
                 )
                 # 생성 + 끝 잉여 고정 트림(글리치 온상 제거, 8초→약7초, 2026-06-29 PO).
                 # QC 재생성이 같은 단계를 다시 밟도록 헬퍼로 묶었다.
