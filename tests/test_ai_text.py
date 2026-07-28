@@ -50,10 +50,10 @@ def test_generate_script_dry_run():
     assert script.fact_checked is True
 
 
-def test_generate_script_dry_run_fills_four_beats():
-    """dry_run 대본은 영상 비트 4개(훅·핵심·팁·마무리)로 분할돼 채워진다."""
+def test_generate_script_dry_run_fills_beats():
+    """dry_run 대본은 영상 비트 3개(훅·핵심/팁·마무리)로 분할돼 채워진다."""
     script = _client().generate_script("강아지 닭가슴살 간식 적정량")
-    assert len(script.beats) == 4
+    assert len(script.beats) == 3
     assert all(b.strip() for b in script.beats)
 
 
@@ -103,13 +103,11 @@ def test_script_system_prompt_pins_strong_hook():
     assert "먹으면서 말하는" in SCRIPT_SYSTEM_PROMPT
 
 
-def test_pick_beat_count_deterministic_and_both_variants():
-    """완료율 A/B: 주제 해시로 3/4비트가 결정적으로 갈리고, 두 변형이 모두 나온다."""
+def test_pick_beat_count_is_three():
+    """비트 수는 3 고정(2026-07-28 PO — 4비트는 길어서 완료율 저하)."""
     from nutti.integrations.ai_text import pick_beat_count
 
-    assert pick_beat_count("고구마") == pick_beat_count("고구마")
-    seen = {pick_beat_count(f"주제-{i}") for i in range(100)}
-    assert seen == {3, 4}
+    assert {pick_beat_count(f"주제-{i}") for i in range(100)} == {3}
 
 
 def test_build_script_system_prompt_three_beats():
@@ -146,15 +144,10 @@ def test_generate_script_dry_run_beats_follow_ab():
 
 
 def test_split_beats_uses_topic_beat_count():
-    """REVISE 재분할도 주제 해시 비트 수를 따른다(대본 생성과 단일 소스)."""
-    from nutti.integrations.ai_text import pick_beat_count
-
+    """REVISE 재분할도 pick_beat_count를 따른다(대본 생성과 단일 소스)."""
     client = _client()
     body = "1문장이야.\n2문장이야.\n3문장이야.\n4문장이야."
-    topic3 = next(f"주제-{i}" for i in range(100) if pick_beat_count(f"주제-{i}") == 3)
-    topic4 = next(f"주제-{i}" for i in range(100) if pick_beat_count(f"주제-{i}") == 4)
-    assert len(client.split_beats(body, topic3)) == 3
-    assert len(client.split_beats(body, topic4)) == 4
+    assert len(client.split_beats(body, "주제-0")) == 3
 
 
 def test_vlog_format_rule_has_fail_twist():
@@ -405,6 +398,12 @@ def _valid_body() -> str:
     return "\n".join(lines)
 
 
+def _valid_body3() -> str:
+    """운영 기본인 3비트(훅·핵심·CTA) 통과 본문 — _valid_body에서 설명 1줄 제거."""
+    lines = _valid_body().splitlines()
+    return "\n".join([lines[0], lines[1], lines[3]])
+
+
 def test_validate_script_body_passes_clean_script():
     """하드룰 전부 통과하는 대본은 위반 0건."""
     from nutti.integrations.ai_text import validate_script_body
@@ -441,7 +440,8 @@ def test_generate_script_regenerates_on_hard_rule_violation(monkeypatch):
     """하드룰 위반 대본 → 위반 사유를 붙여 자동 재생성, 통과본으로 확정."""
     settings = Settings(NUTTI_DRY_RUN=False, ANTHROPIC_API_KEY="", NUTTI_ENV="test")
     client = AITextClient(settings)  # _client=None → 폴백(_llm_text) 경로
-    bodies = iter(["강아지가 콜록콜록 짧은 대사", _valid_body()])
+    good = _valid_body3()
+    bodies = iter(["강아지가 콜록콜록 짧은 대사", good])
     prompts: list[str] = []
 
     def fake_llm(full, **_kw):
@@ -451,17 +451,11 @@ def test_generate_script_regenerates_on_hard_rule_violation(monkeypatch):
     monkeypatch.setattr(client, "_llm_text", fake_llm)
     # 간식 선정도 _llm_text를 쓰므로 페이크 iterator를 소모하지 않게 고정값으로 대체.
     monkeypatch.setattr(client, "suggest_food", lambda _t: ("고구마 스틱", "sweet potato"))
-    # _valid_body()는 4줄이므로 4비트 버킷 주제로 고정(A/B 도입 후 3비트 주제면 반려됨).
-    from nutti.integrations.ai_text import pick_beat_count
-
-    topic = next(
-        t for t in (f"간식 적정량-{i}" for i in range(50)) if pick_beat_count(t) == 4
-    )
-    script = client.generate_script(topic)
+    script = client.generate_script("간식 적정량")
     assert len(prompts) == 2  # 1회 위반 → 1회 재생성
     assert "하드룰 위반" in prompts[1] and "의성어" in prompts[1]  # 위반 사유가 피드백으로
-    assert script.body == _valid_body()
-    assert len(script.beats) == 4
+    assert script.body == good
+    assert len(script.beats) == 3
 
 
 def test_generate_script_gives_up_after_max_tries(monkeypatch):
@@ -493,9 +487,9 @@ def test_fact_check_parse_failure_fails_safe():
 
 def test_generate_script_live_populates_beats():
     """라이브 Anthropic 경로도 beats를 채운다(되돌리면 영상이 8초 단일컷으로 퇴화 → 회귀 핀)."""
-    msg = _Msg([_Block("text", text="훅 문장\n핵심 문장\n팁 문장\n마무리 문장")])
+    msg = _Msg([_Block("text", text="훅 문장\n핵심 문장\n마무리 문장")])
     script = _live_client(msg).generate_script("강아지 간식")
-    assert len(script.beats) == 4
+    assert len(script.beats) == 3
     assert script.beats[0] == "훅 문장"
     assert script.beats[-1] == "마무리 문장"
     # 안전 불변식: 생성 단계는 fact_checked=False여야 한다(오직 fact_check_script만 승격).
