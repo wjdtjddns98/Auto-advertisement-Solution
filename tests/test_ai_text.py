@@ -408,14 +408,14 @@ def test_validate_script_body_passes_clean_script():
     """하드룰 전부 통과하는 대본은 위반 0건."""
     from nutti.integrations.ai_text import validate_script_body
 
-    assert validate_script_body(_valid_body()) == []
+    assert validate_script_body(_valid_body3()) == []
 
 
 def test_validate_script_body_catches_each_rule():
     """규칙별 검출: 비트 수·글자수·의성어·발음 리스크·브랜드명·마지막 느낌표."""
     from nutti.integrations.ai_text import validate_script_body
 
-    base = _valid_body().splitlines()
+    base = _valid_body3().splitlines()
 
     def swapped(idx: int, line: str) -> str:
         lines = base[:]
@@ -425,12 +425,12 @@ def test_validate_script_body_catches_each_rule():
     # (교체할 줄, 기대 위반 키워드) — 규칙별 1케이스씩.
     cases = [
         (0, "강아지가 콜록콜록 기침하면 열에 아홉은 놓치는 위험 신호가 있어요", "의성어"),
-        (1, "짧은 대사", "38~44자"),
-        (2, "귀진드기 감염은 초기에 잡아야 해요 가려움 신호를 놓치지 마세요 꼭", "발음"),
-        (3, "Nutti 계산기로 우리 아이 맞춤 급여량을 오늘 바로 확인해 보세요", "브랜드"),
-        (3, "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인하세요!", "느낌표"),
+        (1, "짧은 대사", "28~48자"),
+        (1, "귀진드기 감염은 초기에 잡아야 해요 가려움 신호를 놓치지 마세요 꼭", "발음"),
+        (2, "Nutti 계산기로 우리 아이 맞춤 급여량을 오늘 바로 확인해 보세요", "브랜드"),
+        (2, "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인하세요!", "느낌표"),
     ]
-    assert any("4줄" in v for v in validate_script_body("\n".join(base[:3])))
+    assert any("3줄" in v for v in validate_script_body("\n".join(base[:2])))
     for idx, line, keyword in cases:
         violations = validate_script_body(swapped(idx, line))
         assert any(keyword in v for v in violations), (keyword, violations)

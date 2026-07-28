@@ -458,11 +458,14 @@ def _split_into_beats(text: str, n: int = 4) -> list[str]:
 # 프롬프트 지시는 모델이 "참고사항"으로 취급해 간헐적으로 어긴다(실측: 의성어·발음
 # 리스크 단어 잔존). 아래 규칙은 코드 레벨로 강제하고, 위반 시 위반 사유를 붙여
 # 자동 재생성한다. 목록은 실측 축적 — 새 사례가 나오면 여기에 추가.
-_BEAT_COUNT = 4
+_BEAT_COUNT = 3
 # 지시상 38~44자지만 하드룰은 완충(재생성 무한루프 방지). 이 범위 밖만 반려.
 # 2026-07-10 PO 지시로 상한을 타이트하게(40~46→38~44) — 발화가 8초를 덜 채울수록
 # 비트 경계 유사도 매칭 여유(발화 끝~클립 끝)가 커져 스티칭이 더 매끄럽다(실측).
-_BEAT_MIN_CHARS, _BEAT_MAX_CHARS = 33, 46
+# 2026-07-28 PO: 실측상 재시도 3회를 다 쓰고도 글자수만으로 포기하는 편이 반복돼
+# 하한을 28자로 완화(짧으면 무음 트림으로 흡수). 상한은 8초 클립 안에 발화가 들어가야
+# 하므로(한국어 ≈5.5자/초) 48자까지만 — 더 올리면 대사가 잘린다.
+_BEAT_MIN_CHARS, _BEAT_MAX_CHARS = 28, 48
 # 의성어 — 대사에 들어가면 Veo가 효과음을 내며 입모양이 어긋난다(립싱크 붕괴 실측:
 # '콜록콜록'). 서술("기침을 한다면")로 풀어 쓰게 강제한다.
 _BANNED_ONOMATOPOEIA = [
@@ -487,7 +490,8 @@ def validate_script_body(body: str, n_beats: int = _BEAT_COUNT) -> list[str]:
     for i, ln in enumerate(lines, start=1):
         if not (_BEAT_MIN_CHARS <= len(ln) <= _BEAT_MAX_CHARS):
             violations.append(
-                f"{i}번 비트가 {len(ln)}자 — 공백 포함 38~44자로 다시 쓸 것"
+                f"{i}번 비트가 {len(ln)}자 — 공백 포함 "
+                f"{_BEAT_MIN_CHARS}~{_BEAT_MAX_CHARS}자로 다시 쓸 것"
             )
         for word in _BANNED_ONOMATOPOEIA:
             if word in ln:
