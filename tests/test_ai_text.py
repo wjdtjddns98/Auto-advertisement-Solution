@@ -429,6 +429,8 @@ def test_validate_script_body_catches_each_rule():
         (1, "귀진드기 감염은 초기에 잡아야 해요 가려움 신호를 놓치지 마세요 꼭", "발음"),
         (2, "Nutti 계산기로 우리 아이 맞춤 급여량을 오늘 바로 확인해 보세요", "브랜드"),
         (2, "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인하세요!", "느낌표"),
+        # 2026-07-28 PO: 마지막 비트는 계산기 사용 유도가 하드룰.
+        (2, "궁금하면 프로필 링크나 한번 눌러보든가 어차피 알아서 하겠지만", "계산기"),
     ]
     assert any("3줄" in v for v in validate_script_body("\n".join(base[:2])))
     for idx, line, keyword in cases:
