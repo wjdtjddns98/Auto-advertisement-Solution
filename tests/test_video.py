@@ -70,14 +70,13 @@ def test_prompt_builder_includes_dialogue_in_quotes():
     assert "'누띠 간식은 하루 두 개면 충분해요!'" in prompt
 
 
-def test_prompt_builder_includes_camera_directives():
-    """고정 카메라 지시(locked-off·무빙 없음)가 포함된다 — 흔들림/컷 전환 방지.
-
-    단 "tripod" 단어는 Veo가 화면에 삼각대로 렌더하므로(2026-06-29 실측) 제외한다.
+def test_prompt_builder_camera_allows_dynamic_but_guards_warp():
+    """카메라는 자유롭게 움직여도 됨(2026-07-23 PO: 화면 고정 불필요·클로즈업 OK) —
+    단 캐릭터 일관성·무일그러짐이 하드 요건, "tripod" 단어는 삼각대 렌더라 제외한다.
     """
     prompt = VeoPromptBuilder().build_beat("누띠 간식은 하루 두 개면 충분해요!")
-    assert "locked-off" in prompt
-    assert "no camera movement" in prompt
+    assert "does not need to be a locked-off static shot" in prompt  # 고정 완화
+    assert "never warp, morph, stretch, or deform" in prompt  # 일그러짐 방지 유지
     assert "tripod" not in prompt  # 화면에 삼각대 렌더 방지
 
 
@@ -106,7 +105,7 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     static = builder.build_beat("안녕", motion_release=False)
     # lively: 자연스러운 제스처 허용, 정적 고정 문구는 없음.
     assert "moves naturally and expressively" in lively
-    assert "stays in the exact same upright seated position" not in lively
+    assert "stays standing upright on its two hind legs" in lively  # 의인화 직립(2026-07-23 PO)
     # 화면 이탈 방지는 lively에도 유지(막판 이상행동 방어).
     assert "leaves the frame" in lively
     # 끝 진정(wind-down) 강제는 제거하고 끝까지 에너지 유지를 지시한다(2026-07-10 PO).
@@ -116,8 +115,8 @@ def test_prompt_builder_motion_release_uses_lively_motion():
     assert "no still, frozen, or slow warm-up intro" in lively
     assert "completely frozen and motionless" not in lively
     assert "no fade-out" in lively and "no freeze" in lively
-    # 기본(static)은 기존 _MOTION_HOLD 유지(하위호환).
-    assert "stays in the exact same upright seated position" in static
+    # 기본(static) _MOTION_HOLD도 직립 기준(2026-07-23 PO 의인화) — 앉음 문구 없음.
+    assert "stays standing upright on its two hind legs" in static
     assert "moves naturally and expressively" not in static
 
 
@@ -235,9 +234,9 @@ def test_frame_prompt_sanitizes_topic():
     assert "간식’" in prompt
     # 주제 잘림 경계 핀 — 고정 템플릿(페르소나·마이크·의상·장소·소품) 길이를 더한 상한.
     # 핀의 목적은 "주제가 _MAX_TOPIC_CHARS로 잘린다"이므로 템플릿이 길어지면 함께 올린다.
-    # 2026-07-23: 먹방 간식 그릇 문장(+food_visual 80자) 추가로 1500→1700 상향
-    # (실측 최장 1743, 여유 ~157).
-    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1700
+    # 2026-07-23: 먹방 간식 그릇 문장(+food_visual 80자) 추가로 1500→1700, 이어서 의인화
+    # 직립 외형 확장 + 개밤티 의상(더 김)으로 1700→1900 상향(실측 최장 1988, 여유 ~112).
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1900
     # 금지 요소 지시는 주입과 무관하게 유지된다(자막·코스튬·타 동물 금지 강화 문구).
     assert "No people, no humans in costume, no other animals." in prompt
 
@@ -1583,14 +1582,19 @@ def test_produce_clips_direct_format_keeps_mic_out_of_beat_prompts(tmp_path, mon
 # --- 싸가지 먹방 연출(2026-07-23 PO): 간식 그릇 + 클립 시작 한 입 ---
 
 
-def test_build_beat_food_adds_bowl_and_single_bite():
-    """food가 오면 간식 그릇+한 입 먹방 연출이 붙고, 비면 붙지 않는다(하위호환)."""
+def test_build_beat_food_adds_bowl_and_paw_pickup():
+    """food가 오면 간식 그릇+앞발로 집어 먹는 연출이 붙고, 비면 붙지 않는다(하위호환).
+
+    2026-07-23 PO: "공중에서 닭이 생김" 실측 → 먹는 동작을 '앞발로 집어 입에 넣기'로
+    명시하고 "food never appears out of thin air"로 공중 생성 환각을 이중 방어한다.
+    """
     b = VeoPromptBuilder()
     style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
     p = b.build_beat("대사", style=style, food="golden baked sweet potato sticks")
     assert "snack bowl with golden baked sweet potato sticks" in p
-    assert "one quick, nonchalant bite" in p
-    assert "never chewing or holding food while speaking" in p  # 립싱크 보호
+    assert "pick up a single piece" in p and "paw" in p  # 집어 먹기
+    assert "food never appears out of thin air" in p  # 공중 생성 환각 방어
+    assert "no longer chewing or holding food" in p  # 립싱크 보호
     p2 = b.build_beat("대사", style=style)
     assert "snack bowl" not in p2
 
@@ -1604,16 +1608,72 @@ def test_frame_prompt_includes_food_bowl_matching_beats():
     assert "snack bowl" not in VideoStudio._frame_prompt(without_food, style)
 
 
-def test_produce_clips_passes_food_into_beat_prompts(tmp_path, monkeypatch):
-    """produce 경로가 Script.food_visual을 전 비트 프롬프트에 배선한다(리버트 가드)."""
+def test_produce_clips_feeds_only_first_beat(tmp_path, monkeypatch):
+    """먹방은 첫 비트에서만 집어 먹는다(2026-07-23 PO: 한 번이면 충분·여러 번은 충돌·
+    2번째부터 그릇에 간식이 도로 차오름). 2번 비트부터는 food 텍스트가 빠져 그릇을 다시
+    그리지 않는다 — 시각 연속성은 체이닝이 잇는다."""
     prompts: list[str] = []
     studio = _wiring_capture_studio(tmp_path, monkeypatch, prompts)
     style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
     studio._produce_clips_veo_fal(
-        "frame.png", ["비트1", "비트2"], style, food="fresh carrot sticks"
+        "frame.png", ["비트1", "비트2", "비트3"], style, food="fresh carrot sticks"
     )
-    assert len(prompts) == 2
-    assert all("snack bowl with fresh carrot sticks" in p for p in prompts)
+    assert len(prompts) == 3
+    assert "snack bowl with fresh carrot sticks" in prompts[0]  # 첫 비트만 집어 먹기
+    assert "pick up a single piece" in prompts[0]
+    assert all("snack bowl" not in p for p in prompts[1:])  # 이후 비트는 그릇 리필 없음
+
+
+def test_produce_clips_food_unlocks_and_chains(tmp_path, monkeypatch):
+    """먹방(food 있음)은 endframe lock을 끄고 체이닝으로 돌린다 — 집어 먹는 동작이
+    앵커로 되돌려져 간식이 공중에서 생기는 환각을 막는다(2026-07-23 PO 지시). food
+    없는 편은 기존 lock 동작 그대로(하위호환)."""
+    clip = tmp_path / "c.mp4"
+    clip.write_bytes(b"c")
+    stitched = tmp_path / "s.mp4"
+    stitched.write_bytes(b"s")
+    locks: list[bool] = []
+    chained = {"n": 0}
+
+    monkeypatch.setattr(
+        VideoStudio,
+        "_generate_and_trim_clip",
+        lambda self, client, prompt, cf, fp, lock, seed: (locks.append(lock), str(clip))[1],
+        raising=True,
+    )
+    monkeypatch.setattr(
+        VideoStudio, "_qc_check_beat", lambda self, c, f, lock, final_beat=False: [], raising=True
+    )
+    monkeypatch.setattr(
+        VideoStudio,
+        "_chain_frame",
+        lambda self, c: (chained.__setitem__("n", chained["n"] + 1), None)[1],
+        raising=True,
+    )
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0), raising=True)
+    monkeypatch.setattr(
+        VideoStudio, "_find_similarity_cuts", lambda self, *a, **kw: None, raising=True
+    )
+    monkeypatch.setattr(
+        VideoStudio, "_stitch", lambda self, clips, durs=None, **kw: str(stitched), raising=True
+    )
+    # endframe_lock 기본 True 확인(하위호환 대조군의 전제).
+    settings = _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path))
+    assert settings.veo_fal_endframe_lock is True
+    studio = VideoStudio(settings, veo_fal_client=object())
+    style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
+
+    # food 있음 → 전 비트 lock=False + 비트 경계마다 체이닝 1회(2비트 → 1경계).
+    studio._produce_clips_veo_fal("frame.png", ["비트1", "비트2"], style, food="fresh carrot sticks")
+    assert locks == [False, False]
+    assert chained["n"] == 1
+
+    # food 없음 → 기존 lock=True 유지, 체이닝 없음.
+    locks.clear()
+    chained["n"] = 0
+    studio._produce_clips_veo_fal("frame.png", ["비트1", "비트2"], style)
+    assert locks == [True, True]
+    assert chained["n"] == 0
 
 
 def test_frame_shots_are_sassy_and_ascii_safe():
@@ -1725,6 +1785,17 @@ def test_build_beat_always_includes_persona_and_fixed_voice():
         assert video_module._MASCOT_APPEARANCE in prompt  # 고정 외형은 항상 포함
         assert "EXACTLY the same single voice" in prompt
         assert "Korean voice" in prompt
+
+
+def test_voice_delivery_is_sassy_but_consistent():
+    """목소리 딜리버리가 건방·심드렁(2026-07-23 PO: 대사만 싸가지·목소리는 안 바뀜 →
+    톤 교체)이되, 비트 간 동일 목소리 일관성 통제 문구는 유지된다(드리프트 방지)."""
+    v = VeoPromptBuilder._VOICE
+    assert "smug" in v and "deadpan" in v  # 싸가지 딜리버리
+    assert "never sweet" in v  # 귀엽고 명랑 톤 배제
+    assert "EXACTLY the same single voice" in v  # 일관성 통제 유지
+    # CTA 앵커도 같은 심드렁 톤으로 못박아 마지막 비트 화자 변경을 억제한다.
+    assert "sassy tone" in VeoPromptBuilder._CTA_VOICE_ANCHOR
 
 
 def test_persona_is_calm_and_pins_fixed_appearance():
