@@ -243,6 +243,9 @@ class Settings(BaseSettings):
     # 검수 대기 동작
     review_timeout_sec: int = Field(default=3600, alias="NUTTI_REVIEW_TIMEOUT_SEC")
     review_poll_interval_sec: float = Field(default=3.0, alias="NUTTI_REVIEW_POLL_INTERVAL_SEC")
+    # 반려 사유 한 줄 입력을 기다리는 시간(초, 2026-07-29 PO). 사유 입력은 선택이라
+    # 검수 대기(review_timeout_sec)와 달리 짧게 둔다 — 안 적으면 그냥 넘어간다.
+    reject_reason_timeout_sec: int = Field(default=180, alias="NUTTI_REJECT_REASON_TIMEOUT_SEC")
     review_store_path: str = Field(default="data/reviews.json", alias="NUTTI_REVIEW_STORE_PATH")
 
     # 4단계: 업로드

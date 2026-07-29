@@ -160,6 +160,42 @@ def test_revise_ignores_review_card_echo():
     assert review.revised_content == "진짜 수정 대본이야."
 
 
+def test_reject_collects_reason_into_note():
+    """[반려] 탭 후 한 줄 입력하면 review.note에 담긴다(2026-07-29 PO — 다음 런 반영)."""
+    review = _review()
+    batches = [
+        [_callback_update(review.id, "rejected", update_id=1)],
+        [_text_update("훅이 지겨움. 숫자부터 던져.", update_id=2)],
+    ]
+    client = FakeTelegramClient(batches)
+    decision = _gate(client).request(review)
+
+    assert decision == ReviewDecision.REJECTED
+    assert review.note == "훅이 지겨움. 숫자부터 던져."
+    assert any("반려 사유" in msg for _, msg in client.sent_messages)
+
+
+def test_reject_without_reason_still_returns():
+    """사유를 안 적어도 반려는 그대로 성립한다(입력은 선택 — 짧은 타임아웃 후 통과)."""
+    review = _review()
+    batches = [
+        [_callback_update(review.id, "rejected", update_id=1)],
+        [],  # 사유 미입력 → 타임아웃
+    ]
+    client = FakeTelegramClient(batches)
+    # 콜백 폴링은 여유, 사유 대기 루프에서 곧장 타임아웃되도록 clock 제어.
+    calls = {"n": 0}
+
+    def ticking_clock():
+        calls["n"] += 1
+        return 0.0 if calls["n"] <= 4 else 9999.0
+
+    decision = _gate(client, clock=ticking_clock).request(review)
+
+    assert decision == ReviewDecision.REJECTED
+    assert review.note == ""
+
+
 def test_revise_ignores_bot_message():
     """봇이 보낸 메시지는 수정 대본이 될 수 없다."""
     review = _review()

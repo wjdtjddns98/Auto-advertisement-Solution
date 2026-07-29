@@ -121,10 +121,25 @@ def test_approve_decision():
     assert client.answered == ["cbq1"]
 
 
+def _reject_clock():
+    """반려 후 사유 대기 루프를 즉시 타임아웃시키는 clock.
+
+    2026-07-29부터 반려 시 사유 한 줄을 기다린다 — 실제 clock을 쓰면 테스트가
+    reject_reason_timeout_sec(기본 180초)만큼 헛돈다.
+    """
+    calls = {"n": 0}
+
+    def _clock():
+        calls["n"] += 1
+        return 0.0 if calls["n"] <= 4 else 9999.0
+
+    return _clock
+
+
 def test_reject_decision():
     review = _review()
     client = FakeTelegramClient([[_callback_update(review.id, "rejected")]])
-    assert _gate(client).request(review) == ReviewDecision.REJECTED
+    assert _gate(client, clock=_reject_clock()).request(review) == ReviewDecision.REJECTED
 
 
 def test_revise_decision():
@@ -181,7 +196,7 @@ def test_json_store_roundtrip(tmp_path):
 def test_unknown_callback_value_rejected():
     review = _review()
     client = FakeTelegramClient([[_callback_update(review.id, "garbage")]])
-    assert _gate(client).request(review) == ReviewDecision.REJECTED
+    assert _gate(client, clock=_reject_clock()).request(review) == ReviewDecision.REJECTED
 
 
 # --- #2: 설정된 검수 채팅이 아닌 콜백은 무시(아무나 승인 차단) ---

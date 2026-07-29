@@ -103,6 +103,15 @@ class Orchestrator:
         - 확정된 주제는 최근 주제 목록에 기록해 다음 자동 생성 시 중복을 피한다.
         """
         effective_feedback = feedback or self.state.get_feedback()
+        # 직전 런의 검수 반려 사유를 맨 앞에 붙인다(2026-07-29 PO) — 주제 생성·대본
+        # 생성이 같은 feedback 문자열을 공유하므로 한 번만 얹으면 둘 다 반영된다.
+        # 성과 분석보다 우선순위가 높다는 걸 문안으로 명시한다(PO 직접 지시라서).
+        reject_note = self.state.get_reject_note()
+        if reject_note:
+            effective_feedback = (
+                f"[직전 편 검수 반려 사유 — 최우선 반영]\n{reject_note}\n\n"
+                f"{effective_feedback}"
+            ).strip()
         if topic and topic.strip():
             chosen = topic.strip()
         else:
@@ -146,6 +155,12 @@ class Orchestrator:
             stage=Stage.SCRIPT, title="대본 검수(클립별)", preview=_beats_preview(run.script)
         )
         script_decision = self.telegram.request(script_review)
+        # 반려 사유는 다음 런 대본·주제 프롬프트로 넘긴다(resolve_inputs가 읽는다).
+        # 통과했으면 그 지시는 반영된 것으로 보고 지운다 — 안 지우면 낡은 지시가 계속 붙는다.
+        if script_decision == ReviewDecision.REJECTED:
+            self.state.save_reject_note(script_review.note)
+        elif script_decision == ReviewDecision.APPROVED:
+            self.state.clear_reject_note()
         if script_decision == ReviewDecision.REVISE and script_review.revised_content:
             # 사용자가 텔레그램에서 직접 입력한 수정본이므로 팩트체크를 재실행하지 않는다.
             # PO가 내용을 직접 확인·수정했다는 전제 하에 신뢰하는 설계다.
@@ -180,6 +195,9 @@ class Orchestrator:
                 self.store.update_script(run.script)
                 run.video = self.studio.produce(run.script, style_avoid=style_avoid)
                 continue
+            # 영상 반려 사유도 다음 런 대본에 반영한다(연출 지적이 대본 톤과 얽혀 있다).
+            if video_decision == ReviewDecision.REJECTED:
+                self.state.save_reject_note(video_review.note)
             log.warning(
                 "pipeline.gate_blocked", stage=Stage.VIDEO.value, decision=video_decision.value
             )

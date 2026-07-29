@@ -199,6 +199,26 @@ class TelegramGate:
                     if revised is not None:
                         review.revised_content = revised
                         log.info("telegram.revised_content_received", stage=review.stage.value)
+                # REJECTED: 반려 사유를 한 줄 받아 다음 런 대본·주제 프롬프트에 넣는다
+                # (2026-07-29 PO 선택 — 대본 4연속 반려에도 사유가 코드로 안 돌아와
+                # 리드가 추측으로 프롬프트를 고치는 낭비가 있었다). 사유 입력은 선택이라
+                # 짧은 별도 타임아웃(reject_reason_timeout_sec)만 기다리고 넘어간다.
+                elif decision == ReviewDecision.REJECTED:
+                    reason = self._wait_for_text_input(
+                        client,
+                        chat_id,
+                        offset,
+                        review=review,
+                        timeout_sec=self.settings.reject_reason_timeout_sec,
+                        prompt_text=(
+                            "✏️ 반려 사유를 한 줄로 적어주세요 — 다음 대본 생성에 "
+                            "그대로 반영됩니다. (안 적으면 잠시 후 그냥 넘어갑니다)"
+                        ),
+                    )
+                    if reason:
+                        review.note = reason
+                        store.update_decision(review.id, decision, note=reason)
+                        log.info("telegram.reject_reason_received", stage=review.stage.value)
 
                 return decision
 
@@ -212,10 +232,14 @@ class TelegramGate:
         *,
         review: ReviewRequest | None = None,
         elapsed_sec: float = 0.0,
+        timeout_sec: float | None = None,
+        prompt_text: str = "✏️ 수정할 대본 내용을 입력해 주세요.",
     ) -> str | None:
-        """수정 안내 메시지를 보내고 사용자의 일반 텍스트 메시지를 수신 대기한다.
+        """안내 메시지를 보내고 사용자의 일반 텍스트 메시지를 수신 대기한다.
 
-        elapsed_sec: 콜백 폴링에서 이미 소비한 시간(초). 남은 시간 = review_timeout_sec - elapsed_sec.
+        elapsed_sec: 콜백 폴링에서 이미 소비한 시간(초). 남은 시간 = 타임아웃 - elapsed_sec.
+        timeout_sec: 이 대기의 상한(기본 review_timeout_sec). 반려 사유처럼 입력이
+        선택인 경우 짧게 줘서 안 적으면 곧장 넘어가게 한다.
         타임아웃 내에 인가된 채팅에서 텍스트 메시지가 오면 반환하고,
         타임아웃이 지나면 None을 반환한다.
 
@@ -227,14 +251,19 @@ class TelegramGate:
         시작하는 텍스트는 건너뛰고 진짜 입력을 계속 기다린다.
         """
         try:
-            client.send_message(chat_id, "✏️ 수정할 대본 내용을 입력해 주세요.")
+            client.send_message(chat_id, prompt_text)
         except Exception:  # 안내 메시지 실패는 best-effort
             log.warning("telegram.revise_prompt_failed")
 
+        limit = (
+            float(timeout_sec)
+            if timeout_sec is not None
+            else float(self.settings.review_timeout_sec)
+        )
         start = self._clock() - elapsed_sec  # elapsed만큼 앞당겨 총 타임아웃 내에서 소진
         current_offset = offset
         while True:
-            remaining = self.settings.review_timeout_sec - (self._clock() - start)
+            remaining = limit - (self._clock() - start)
             if remaining <= 0:
                 log.warning("telegram.revise_text_timeout")
                 return None

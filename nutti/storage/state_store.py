@@ -58,6 +58,32 @@ class PipelineState:
         self._save(data)
         log.info("state.feedback.saved", chars=len(text))
 
+    # --- 반려 사유(PO 지시 → 다음 런 대본·주제에 즉시 반영) ---
+
+    def get_reject_note(self) -> str:
+        """직전 런에서 PO가 남긴 검수 반려 사유(없으면 빈 문자열).
+
+        성과 분석 피드백(last_feedback)과 분리해 둔다 — 성과 수집은 며칠 뒤에야 갱신되고
+        collect_ready_feedback가 통째로 덮어쓰므로, 방금 받은 반려 사유가 묻힌다.
+        """
+        return str(self._load().get("last_reject_note", "") or "")
+
+    def save_reject_note(self, text: str) -> None:
+        """검수 반려 사유를 저장한다(빈 값은 무시 — 사유 미입력 시 종전 값 유지)."""
+        if not text or not text.strip():
+            return
+        data = self._load()
+        data["last_reject_note"] = text.strip()
+        self._save(data)
+        log.info("state.reject_note.saved", chars=len(text.strip()))
+
+    def clear_reject_note(self) -> None:
+        """반려 사유를 지운다 — 대본 검수를 통과하면 그 지시는 반영된 것으로 본다."""
+        data = self._load()
+        if data.pop("last_reject_note", None) is not None:
+            self._save(data)
+            log.info("state.reject_note.cleared")
+
     # --- 최근 주제(자동 생성 시 중복 회피) ---
 
     def get_recent_topics(self) -> list[str]:
