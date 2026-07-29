@@ -236,8 +236,9 @@ def test_frame_prompt_sanitizes_topic():
     # 핀의 목적은 "주제가 _MAX_TOPIC_CHARS로 잘린다"이므로 템플릿이 길어지면 함께 올린다.
     # 2026-07-23: 먹방 간식 그릇 문장(+food_visual 80자) 추가로 1500→1700, 이어서 의인화
     # 직립 외형 확장 + 개밤티 의상(더 김)으로 1700→1900 상향.
-    # 2026-07-29: 미드액션 오픈 문장 추가로 1900→2100(실측 최장 1955, 여유 ~145).
-    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 2100
+    # 2026-07-29: 미드액션 오픈 문장 추가로 1900→2100, 이어서 상의-only 규칙(_OUTFIT_RULE)
+    # 추가로 2100→2300(실측 최장 2138, 여유 ~162).
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 2300
     # 금지 요소 지시는 주입과 무관하게 유지된다(자막·코스튬·타 동물 금지 강화 문구).
     assert "No people, no humans in costume, no other animals." in prompt
 

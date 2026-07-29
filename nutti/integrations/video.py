@@ -402,6 +402,14 @@ class EpisodeStyle(NamedTuple):
 # ⚠️ 의상에 글자·숫자·로고·프린트를 절대 넣지 말 것 — 화면 텍스트 QC(_qc_text_overlay)가
 # 옷의 프린트도 "렌더된 글자"로 판정해 전 비트가 재시도→폴백으로 떨어진다(2026-07-29
 # 실측: "small printed number on the chest" → 3비트×3회 전부 text_overlay, 클립 9개 과금).
+# 의상은 **상의만** — 바지·전신 착장은 금지다(2026-07-29 실측). 소매·바지로 사지를 덮으면
+# 그림이 "옷 입은 사람 아기"로 읽혀 Veo 안전필터가 이미지+프롬프트를 통째로 거부한다
+# (invalid_request로 라이브 런 2건 사망). 뒷다리·발은 항상 개 그대로 보이게 둔다.
+_OUTFIT_RULE = (
+    "The outfit is only a top worn on the upper body: no trousers, no pants, no leggings, "
+    "no shoes and no full-body suit — its hind legs and paws stay bare and clearly visible "
+    "as a real dog."
+)
 _EPISODE_OUTFITS = [
     "a slim navy track jacket with two thin white side stripes, zipped up neatly",
     "a clean white collared polo shirt with thin navy trim on the collar",
@@ -615,24 +623,29 @@ class VeoPromptBuilder:
     # 발음 교정 블록·CTA 앵커는 그대로 두고 태도 어휘만 교체한다.
     _VOICE = (
         "Voice (must be EXACTLY the same single voice in every clip of this series, like "
-        "one specific recognizable person with a fixed vocal fingerprint): a little-girl "
-        "Korean voice, sounding about 6 years old, slightly high-pitched, but delivered "
+        # 2026-07-29: 아동 나이·성별 명시("little-girl", "about 6 years old")를 뺐다 —
+        # 옷을 갖춰 입은 직립 마스코트 이미지와 합쳐지면 Veo 안전필터가 아동 콘텐츠로
+        # 보고 거부한다(실측: invalid_request "Could not generate images with the given
+        # prompts and images"로 라이브 런 2건 사망). 음색(작고 높은 톤)은 나이를 말하지
+        # 않고 묘사로만 유지한다.
+        "one specific recognizable person with a fixed vocal fingerprint): a small, light, "
+        "high-pitched cartoon-character Korean voice, but delivered "
         "with a blunt, curt, cocky and smug attitude — dry, flat and deadpan, clearly "
-        "unbothered and a little annoyed, talking down to the listener like a bratty kid "
-        "who is sure she knows better and cannot be bothered to be nice, never sweet, "
+        "unbothered and a little annoyed, talking down to the listener like someone "
+        "sure they know better and cannot be bothered to be nice, never sweet, "
         "eager, gentle, cheerful, or sing-songy, at a consistent speaking rhythm. "
         # 발음 교정(2026-07-06 PO 실측: 쉬운 단어도 발음이 뭉개짐 — 아이 페르소나의
         # 혀 짧은 딕션 재현이 유력 원인). 톤은 아이답게 유지하되 발음만 성인급 정확도로.
-        "Her Korean PRONUNCIATION however is flawlessly clear and precise: perfect "
+        "The Korean PRONUNCIATION however is flawlessly clear and precise: perfect "
         "standard Korean diction, every syllable fully and accurately articulated, "
         "never slurred, never mumbled, never babyish or lisping — like a professional "
-        "child voice actor whose enunciation is adult-level crisp and correct. "
+        "voice actor whose enunciation is crisp and correct. "
         "Keep the identical timbre, pitch, accent, speaking speed, and this same dry "
         "sassy attitude in every clip. Keep this exact same voice even on excited, "
         "exclamatory, or call-to-action lines: do not raise the pitch, do not get louder, "
         "do not turn into an excited announcer or a promotional voice-over, and never "
         "switch to a different speaker or a different age — every line, including the "
-        "final call-to-action, must sound like the exact same sassy little girl in the "
+        "final call-to-action, must sound like the exact same sassy character in the "
         "same dry, unbothered tone as the earlier lines. "
         # 발화 후 잉여 구간 BGM 채움 억제 — Veo가 대사가 끝난 뒤 남는 시간을 배경음악으로
         # 채우면 무음 트림이 발화 끝을 못 잡아 끝부분 헛짓이 남는다(2026-06-29 PO 실측).
@@ -840,7 +853,7 @@ class VeoPromptBuilder:
         scene = ""
         if style is not None:
             prop = f", with {style.prop}" if style.prop else ""
-            scene = f"The puppy wears {style.outfit}{prop}, {style.setting}. "
+            scene = f"The puppy wears {style.outfit}{prop}, {style.setting}. {_OUTFIT_RULE} "
         if food:
             scene += self._EATING_TEMPLATE.format(food=food) + " "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
@@ -2464,7 +2477,7 @@ class VideoStudio:
             "A photorealistic tall vertical portrait-orientation starting frame for a "
             f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}{prop}, "
             f"{style.setting}, "
-            f"{shot}. {food}{_CINEMATIC_LOOK} "
+            f"{shot}. {_OUTFIT_RULE} {food}{_CINEMATIC_LOOK} "
             f"{scene_context}"
             # 첫 1초 무음 가독성(2026-07-21 쇼츠 트렌드): 0초 프레임만 보고도 상황이
             # 읽혀야 스와이프를 이긴다 — 배경·소품이 또렷이 보이는 상황 전달형 구도.
