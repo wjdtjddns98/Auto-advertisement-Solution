@@ -450,12 +450,12 @@ def test_stitch_punch_in_alternates_shot_scale(tmp_path, monkeypatch):
     assert "scale=720:1280" in joined
 
 
-def test_stitch_punch_in_time_stepped_by_default(tmp_path, monkeypatch):
-    """기본(period=2s)에서는 클립 **안에서** 2초마다 줌 단계가 바뀐다(zoompan).
+def test_stitch_punch_in_time_stepped_when_opted_in(tmp_path, monkeypatch):
+    """옵트인(scale>1, period=2s) 시 클립 **안에서** 2초마다 줌 단계가 바뀐다(zoompan).
 
-    2026 쇼츠 잔존 데이터의 "시각 변화 1.5~2초 주기" 요구 — 8초 원컷 한 덩어리로
-    나가면 곡선이 하강형이 된다. 클립마다 위상(+i)을 밀어 경계에서 같은 줌이
-    이어지지 않는지도 함께 고정한다.
+    기본은 비활성이다(2026-07-29 PO "화면전환이 너무 잦다") — 이 테스트는 다시 켰을 때의
+    동작 계약을 고정한다. 클립마다 위상(+i)을 밀어 경계에서 같은 줌이 이어지지 않는지도
+    함께 본다.
     """
     import subprocess as _sp
 
@@ -472,7 +472,9 @@ def test_stitch_punch_in_time_stepped_by_default(tmp_path, monkeypatch):
     monkeypatch.setattr(_sp, "run", fake_run)
     studio = VideoStudio(
         _live_settings_with_key(
-            NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_VEO_FAL_CROSSFADE_SEC="0.25"
+            NUTTI_MEDIA_DIR=str(tmp_path),
+            NUTTI_VEO_FAL_CROSSFADE_SEC="0.25",
+            NUTTI_VEO_FAL_PUNCH_IN_SCALE="1.12",
         )
     )
     studio._stitch(["a.mp4", "b.mp4", "c.mp4"], [3.0, 3.0, 3.0])
@@ -515,14 +517,12 @@ def test_stitch_punch_in_disabled_when_scale_le_1(tmp_path, monkeypatch):
     assert "scale=720:1280" in joined
 
 
-def test_punch_in_default_time_stepped():
-    """기본값 = 시간 스텝 펀치인(2026-07-29). 진폭은 작게(≤1.15) 유지한다 —
-    2026-07-10에 껐던 이유(비트마다 크기 들쭉날쭉)가 큰 진폭에서 재발한다."""
+def test_punch_in_default_disabled():
+    """펀치인 기본값은 비활성(1.0) — 2026-07-29 PO 실물 판정 "화면전환이 너무 잦아
+    눈이 아프다"로 되돌렸다. 켤 때는 env 옵트인(주기·진폭을 함께 낮춰서)."""
     from nutti.config import Settings
 
-    s = Settings(NUTTI_ENV="test")
-    assert 1.0 < s.veo_fal_punch_in_scale <= 1.15
-    assert s.veo_fal_punch_in_period_sec == 2.0
+    assert Settings(NUTTI_ENV="test").veo_fal_punch_in_scale == 1.0
 
 
 def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):

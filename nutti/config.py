@@ -138,7 +138,10 @@ class Settings(BaseSettings):
     # punch_in_period_sec마다 작은 폭으로 단계를 밟아 편집 리듬으로 읽히게 한다
     # (2026 쇼츠 잔존 데이터: 시각 변화 1.5~2초 주기가 하강 곡선을 플래토로 바꾼다).
     # 진폭이 크면 예전 지적이 재발하므로 1.10~1.15 범위를 지킬 것.
-    veo_fal_punch_in_scale: float = Field(default=1.12, alias="NUTTI_VEO_FAL_PUNCH_IN_SCALE")
+    # 2026-07-29 PO 실물 판정: 2초 주기 줌은 "화면전환이 너무 잦아 눈이 아프다" → 기본
+    # 비활성(1.0)으로 되돌림. 잔존 벤치마크(1.5~2초 주기)보다 PO 육안 판정이 우선이다.
+    # 다시 켤 때는 진폭·주기를 함께 낮춰서(예: SCALE=1.06, PERIOD=4) 시작할 것.
+    veo_fal_punch_in_scale: float = Field(default=1.0, alias="NUTTI_VEO_FAL_PUNCH_IN_SCALE")
     # 펀치인 줌 단계가 바뀌는 주기(초). 0 이하면 시간 스텝 없이 클립 전체 고정 줌
     # (= 종전 비트 단위 동작). 1.2초 미만은 노이즈로 읽히므로 1.5~2.5초 권장.
     veo_fal_punch_in_period_sec: float = Field(
