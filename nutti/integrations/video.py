@@ -206,7 +206,29 @@ def _raise_for_status(resp, what: str) -> None:
     if not isinstance(code, int):
         raise VideoRenderError(f"{what} 응답에 유효한 status_code가 없습니다")
     if code >= 400:
+        # 4xx 사유를 로그로만 남긴다(예외 메시지엔 여전히 상태코드만 — redaction 유지).
+        # 2026-07-29 실측: fal 422로 라이브 런이 두 번 연속 죽었는데 사유가 어디에도
+        # 남지 않아(본문 전면 차단) 원인 추적이 불가능했다. 안전필터 거부인지 잘못된
+        # 파라미터인지 구분하려면 fal이 준 detail이 필요하다.
+        log.warning("video.http_error", what=what, status=code, detail=_error_detail(resp))
         raise VideoRenderError(f"{what} HTTP {code}")
+
+
+# fal 오류 본문에서 사유만 뽑는 상한 길이 — 프롬프트 원문이 통째로 로그에 실리지 않게 한다.
+_ERROR_DETAIL_MAX = 300
+
+
+def _error_detail(resp) -> str:
+    """fal 오류 응답에서 사람이 읽을 사유를 짧게 뽑는다(실패해도 예외를 내지 않는다)."""
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001 - 비-JSON 오류 본문 방어
+        return (getattr(resp, "text", "") or "")[:_ERROR_DETAIL_MAX]
+    if isinstance(data, dict):
+        for key in ("detail", "error", "message"):
+            if key in data:
+                return str(data[key])[:_ERROR_DETAIL_MAX]
+    return str(data)[:_ERROR_DETAIL_MAX]
 
 
 def _safe_send(send, what: str):
