@@ -405,10 +405,14 @@ class EpisodeStyle(NamedTuple):
 # 의상은 **상의만** — 바지·전신 착장은 금지다(2026-07-29 실측). 소매·바지로 사지를 덮으면
 # 그림이 "옷 입은 사람 아기"로 읽혀 Veo 안전필터가 이미지+프롬프트를 통째로 거부한다
 # (invalid_request로 라이브 런 2건 사망). 뒷다리·발은 항상 개 그대로 보이게 둔다.
+# ⚠️ 이 문구는 FLUX(Kontext)와 Veo 양쪽 안전필터를 통과해야 한다. "bare"·"no pants"
+# 같은 탈의 뉘앙스·부정문은 쓰지 말 것 — 실측 2026-07-29: "hind legs and paws stay bare
+# / no trousers, no pants"가 has_nsfw_concepts=True를 유발해 프레임이 3연속
+# 플레이스홀더(too_small)로 나와 런이 죽었다. 원하는 그림을 긍정문으로만 서술한다.
 _OUTFIT_RULE = (
-    "The outfit is only a top worn on the upper body: no trousers, no pants, no leggings, "
-    "no shoes and no full-body suit — its hind legs and paws stay bare and clearly visible "
-    "as a real dog."
+    "The outfit is a single top worn on the upper body only, ending at the waist; below it "
+    "the puppy keeps its own natural fluffy white fur, with its dog hind legs and paws "
+    "fully visible as a real dog."
 )
 _EPISODE_OUTFITS = [
     "a slim navy track jacket with two thin white side stripes, zipped up neatly",
