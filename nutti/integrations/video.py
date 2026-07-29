@@ -375,10 +375,13 @@ class EpisodeStyle(NamedTuple):
 # 2026-07-29 PO: 개밤티(요란·과잉·오버사이즈) 폐기 — 거추장스러워 몸·표정을 가리고
 # 지저분하게 보인다. 2000년대 한국 스타일로 교체: 단정한 단색·슬림핏·레이어 최소(한 겹),
 # 무늬·장식 없음. 옷이 캐릭터를 덮지 않는 게 핵심 제약이다.
+# ⚠️ 의상에 글자·숫자·로고·프린트를 절대 넣지 말 것 — 화면 텍스트 QC(_qc_text_overlay)가
+# 옷의 프린트도 "렌더된 글자"로 판정해 전 비트가 재시도→폴백으로 떨어진다(2026-07-29
+# 실측: "small printed number on the chest" → 3비트×3회 전부 text_overlay, 클립 9개 과금).
 _EPISODE_OUTFITS = [
     "a slim navy track jacket with two thin white side stripes, zipped up neatly",
     "a clean white collared polo shirt with thin navy trim on the collar",
-    "a plain red short-sleeve tee with a small printed number on the chest",
+    "a plain red short-sleeve tee with no print or pattern of any kind",
     "a slim light-blue denim jacket worn open over a plain white tee",
     "a simple light-grey zip-up hoodie with the hood down, fitted and plain",
 ]

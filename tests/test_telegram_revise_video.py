@@ -139,6 +139,43 @@ def test_revise_then_text_input_sets_revised_content():
     assert any("수정할 대본" in msg for _, msg in client.sent_messages)
 
 
+def test_revise_ignores_review_card_echo():
+    """검수 카드 본문이 되돌아오면 수정 대본으로 채택하지 않고 계속 기다린다.
+
+    실측 사고(2026-07-29 run 805e16ea): 카드 본문(title\\n\\npreview)이 그대로
+    revised_content가 되어 "대본 검수(클립별) [대본 검수 — …]"가 영상 자막·훅
+    오버레이로 구워졌다($1.14 소모 후 PO 반려).
+    """
+    review = _review()
+    card = f"{review.title}\n\n{review.preview}"
+    batches = [
+        [_callback_update(review.id, "revise", update_id=1)],
+        [_text_update(card, update_id=2)],  # 카드 에코 — 무시돼야 한다
+        [_text_update("진짜 수정 대본이야.", update_id=3)],
+    ]
+    client = FakeTelegramClient(batches)
+    decision = _gate(client).request(review)
+
+    assert decision == ReviewDecision.REVISE
+    assert review.revised_content == "진짜 수정 대본이야."
+
+
+def test_revise_ignores_bot_message():
+    """봇이 보낸 메시지는 수정 대본이 될 수 없다."""
+    review = _review()
+    bot_msg = _text_update("봇이 쓴 안내문", update_id=2)
+    bot_msg["message"]["from"] = {"id": 1, "is_bot": True}
+    batches = [
+        [_callback_update(review.id, "revise", update_id=1)],
+        [bot_msg],
+        [_text_update("사람이 쓴 대본.", update_id=3)],
+    ]
+    client = FakeTelegramClient(batches)
+    _gate(client).request(review)
+
+    assert review.revised_content == "사람이 쓴 대본."
+
+
 def test_revise_sends_prompt_message():
     """REVISE 결정 시 수정 안내 메시지가 send_message로 전송된다."""
     review = _review()
