@@ -517,6 +517,40 @@ def test_stitch_punch_in_disabled_when_scale_le_1(tmp_path, monkeypatch):
     assert "scale=720:1280" in joined
 
 
+def test_retry_keeps_episode_seed_and_varies_prompt(tmp_path, monkeypatch):
+    """QC 재시도는 seed를 유지하고 프롬프트만 바꾼다(2026-07-29 PO '비트별 목소리 다름').
+
+    종전엔 재시도마다 seed에 오프셋을 줘, 재생성된 비트만 음색이 갈라졌다.
+    """
+    calls: list[tuple[str, int | None]] = []
+
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+
+    def fake_generate(client, prompt, cur, frame, lock, seed):
+        calls.append((prompt, seed))
+        return str(tmp_path / f"clip{len(calls)}.mp4")
+
+    # 첫 2회는 결함, 3회차에 통과 — 재시도가 2번 일어나게 한다.
+    verdicts = [["text_overlay"], ["text_overlay"], []]
+
+    monkeypatch.setattr(studio, "_generate_and_trim_clip", fake_generate)
+    monkeypatch.setattr(studio, "_qc_check_beat", lambda *a, **k: verdicts.pop(0))
+    monkeypatch.setattr(studio, "_chain_frame", lambda _c: None)
+    monkeypatch.setattr(studio, "_stitch", lambda clips, durations=None, **k: clips[0])
+    monkeypatch.setattr(studio, "_trim_to_speech", lambda clip: (clip, 8.0))
+
+    studio._produce_clips_veo_fal(
+        str(tmp_path / "frame.png"), ["대사 하나."], pick_episode_style("x")
+    )
+
+    assert len(calls) == 3
+    seeds = {seed for _p, seed in calls}
+    assert len(seeds) == 1, "재시도가 seed를 바꾸면 비트 음색이 갈라진다"
+    prompts = [p for p, _s in calls]
+    assert len(set(prompts)) == 3, "프롬프트가 같으면 같은 결함이 재현된다"
+    assert "no text" in prompts[1] and "take 2" in prompts[1]
+
+
 def test_punch_in_default_disabled():
     """펀치인 기본값은 비활성(1.0) — 2026-07-29 PO 실물 판정 "화면전환이 너무 잦아
     눈이 아프다"로 되돌렸다. 켤 때는 env 옵트인(주기·진폭을 함께 낮춰서)."""
@@ -2406,9 +2440,13 @@ def test_qc_check_beat_final_beat_skips_tail_convergence(tmp_path, monkeypatch):
     assert studio._qc_check_beat("c.mp4", "f.png", lock=True, final_beat=True) == []
 
 
-def test_produce_clips_qc_retry_offsets_seed(tmp_path, monkeypatch):
-    """QC 재생성은 seed를 오프셋한다 — 같은 seed+같은 프롬프트 재제출은 같은 결함
-    (텍스트 오버레이 등)을 그대로 재현할 수 있어 재시도가 무효가 되기 때문."""
+def test_produce_clips_qc_retry_keeps_seed(tmp_path, monkeypatch):
+    """QC 재생성이 seed를 유지한다 — seed가 음색을 좌우하므로 재생성된 비트만 목소리가
+    갈라지면 안 된다(2026-07-29 PO '비트별로 목소리가 다 다름').
+
+    2026-07-10에는 같은 seed+같은 프롬프트가 같은 결함을 재현한다는 이유로 seed를
+    오프셋했는데, 이제 결함 회피는 프롬프트 교정 문구(retry_hint)가 맡는다.
+    """
     bad = tmp_path / "bad.mp4"
     bad.write_bytes(b"bad")
     good = tmp_path / "good.mp4"
@@ -2449,7 +2487,7 @@ def test_produce_clips_qc_retry_offsets_seed(tmp_path, monkeypatch):
         VideoStudio, "_stitch", lambda self, clips, durs=None, **kw: str(tmp_path / "f.mp4")
     )
     studio._produce_clips_veo_fal("frame.png", ["비트1"], pick_episode_style("x"))
-    assert seeds == [123, 124]  # 최초 seed → 재생성 seed+1
+    assert seeds == [123, 123]  # 재생성도 같은 seed(음색 유지)
 
 
 # --- 경계별 디졸브 기록·자막 타이밍 동기화(2026-07-10 PO) ---

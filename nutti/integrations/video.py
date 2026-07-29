@@ -697,12 +697,50 @@ class VeoPromptBuilder:
     )
     # 립싱크 강제 — 간헐적으로 입을 안 움직이며 내레이션처럼 나오는 클립 방지
     # (2026-07-06 PO 실측). 모든 비트 프롬프트에 포함.
+    # 2026-07-29 PO 실측: "앞부분에 입은 안 움직이고 대사가 나옴" — FLF 앵커(정지 프레임)에서
+    # 출발하느라 Veo가 첫 순간을 정지 화면으로 물고 있고 음성만 먼저 나가는 경향. 첫 프레임
+    # 동시 시작을 명시적으로 못박는다.
     _LIPSYNC = (
         "The puppy visibly speaks every word on camera: its mouth clearly opens and moves "
         "in sync with the spoken Korean line from the first word to the last. The voice is "
         "never detached narration or voice-over — it always comes from the puppy talking "
-        "on screen with matching mouth movements."
+        "on screen with matching mouth movements. The mouth is already moving on the very "
+        "first frame of the clip: the audio and the mouth movement start together at the "
+        "same instant, with no still, frozen or silent opening moment before the puppy "
+        "starts talking."
     )
+    # QC 재시도용 교정 문구(2026-07-29). seed를 유지한 채 샘플을 흔들면서, 잡힌 결함을
+    # 콕 집어 다시 지시한다 — 같은 seed+완전히 같은 프롬프트는 같은 결함을 재현하므로
+    # 문구 변화가 재시도의 유일한 동력이다. 사유 키는 _qc_check_beat가 만드는 값과 같다.
+    _RETRY_HINTS = {
+        "text_overlay": (
+            "Critical: the previous attempt rendered letters on screen. Render absolutely "
+            "no text, captions, subtitles, numbers or written characters anywhere in the "
+            "frame, including on clothing, props and background signage."
+        ),
+        "mid_freeze": (
+            "Critical: the previous attempt froze mid-clip. Keep continuous natural motion "
+            "through the entire clip with no frozen or repeated frames."
+        ),
+        "black_frame": (
+            "Critical: the previous attempt went dark. Keep the puppy fully lit and clearly "
+            "visible for the entire clip."
+        ),
+        "tail_not_converged": (
+            "Critical: the previous attempt drifted at the end. Finish on the same calm "
+            "pose and framing the clip started from."
+        ),
+    }
+
+    def retry_hint(self, reasons: list[str], attempt: int) -> str:
+        """QC 사유별 교정 문구 + 테이크 번호를 만든다(빈 사유면 테이크 번호만).
+
+        테이크 번호는 사유가 매핑에 없을 때도 프롬프트를 반드시 달라지게 하는 최소 변화다 —
+        seed를 고정한 채 재시도하므로 프롬프트가 같으면 결함이 그대로 재현된다.
+        """
+        hints = [self._RETRY_HINTS[r] for r in reasons if r in self._RETRY_HINTS]
+        return " ".join([*hints, f"This is take {attempt + 1} of this shot."])
+
     _NEGATIVE = (
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
         "costume, person in a costume, or plush toy. Strictly no additional animals, no "
@@ -1021,12 +1059,19 @@ class VideoStudio:
                         "video.veo_fal.qc.retry", beat=i, attempt=attempt, reasons=reasons
                     )
                     Path(clip_path).unlink(missing_ok=True)
-                    # 재생성 seed는 오프셋을 준다 — 같은 seed+같은 프롬프트 재제출은 같은
-                    # 결함(텍스트 오버레이 등)을 그대로 재현할 수 있어 재시도가 무효가 된다.
-                    # 음색 seed 일관성보다 결함 제거가 우선(2026-07-10, 텍스트 QC와 함께).
-                    retry_seed = (video_seed + attempt) % (2**31)
+                    # 재시도는 **seed를 유지하고 프롬프트만 바꾼다**(2026-07-29 PO
+                    # "비트별로 목소리가 다 다름"). 종전엔 seed에 오프셋을 줘 결함 재현을
+                    # 피했는데(2026-07-10), 그 결과 재생성된 비트만 음색이 갈라졌다 —
+                    # 직전 런은 3비트가 각각 3회씩 재생성돼 비트마다 다른 목소리가 됐다.
+                    # 결함 회피는 seed가 아니라 결함을 콕 집는 교정 문구로 한다: 샘플이
+                    # 달라지면서 목소리를 결정하는 seed는 편 전체가 하나로 유지된다.
                     clip_path = self._generate_and_trim_clip(
-                        client, prompt, current_frame, frame_path, use_lock, retry_seed
+                        client,
+                        f"{prompt} {builder.retry_hint(reasons, attempt)}",
+                        current_frame,
+                        frame_path,
+                        use_lock,
+                        video_seed,
                     )
                     reasons = self._qc_check_beat(
                         clip_path, frame_path, use_lock, final_beat=final_beat
