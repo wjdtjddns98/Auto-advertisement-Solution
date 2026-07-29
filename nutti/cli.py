@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -34,6 +35,40 @@ for _stream in (sys.stdout, sys.stderr):
 
 app = typer.Typer(help="Nutti 애견간식 콘텐츠 자동화 파이프라인")
 
+# 동시 실행 방지 락(2026-07-29 실측 사고). 검수 게이트에서 대기 중인 런이 있는데 새 런을
+# 띄우면 두 프로세스가 같은 봇 토큰으로 getUpdates 롱폴을 걸어 텔레그램이 409 Conflict로
+# 한쪽을 죽인다(실측: 대본 카드까지 보낸 런이 통째로 소실). 게이트 충돌뿐 아니라 두 런이
+# 동시에 영상을 만들면 과금도 두 배다.
+_RUN_LOCK_NAME = "run.lock"
+# 락이 이 시간보다 오래되면 죽은 런의 잔재로 보고 인수한다 — 검수 대기 상한
+# (review_timeout_sec, 기본 1시간)보다 넉넉해야 정상 대기 중인 런을 뺏지 않는다.
+_RUN_LOCK_STALE_MARGIN_SEC = 1800
+
+
+def _acquire_run_lock(settings) -> Path | None:
+    """실행 락을 잡는다. 이미 살아있는 런이 있으면 None을 반환한다."""
+    import os
+    import time
+
+    lock = Path(settings.state_path).parent / _RUN_LOCK_NAME
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    stale_after = settings.review_timeout_sec + _RUN_LOCK_STALE_MARGIN_SEC
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            age = time.time() - lock.stat().st_mtime
+        except OSError:
+            age = 0.0
+        if age < stale_after:
+            return None
+        # 죽은 런의 잔재 — 인수한다(이 시점엔 게이트 대기 상한도 이미 지났다).
+        lock.unlink(missing_ok=True)
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    return lock
+
 
 @app.command()
 def run(
@@ -56,6 +91,23 @@ def run(
     configure_logging(settings.log_level)
     fmt = ContentFormat.REELS if reels else ContentFormat.SHORTS
 
+    lock = _acquire_run_lock(settings)
+    if lock is None:
+        typer.secho(
+            "이미 실행 중인 런이 있습니다 — 검수 게이트 대기 중일 수 있습니다. "
+            "두 런이 같이 돌면 텔레그램 폴링이 409로 충돌해 한쪽이 죽고 영상 과금도 "
+            "두 배가 됩니다. 그 런을 끝내거나 data/run.lock을 지운 뒤 다시 실행하세요.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=3)
+    try:
+        _run_cycle(settings, topic, feedback, fmt)
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def _run_cycle(settings, topic: Optional[str], feedback: str, fmt: ContentFormat) -> None:
+    """한 사이클 본체(락은 호출부가 관리한다)."""
     orchestrator = Orchestrator(settings)
     # 성과 수집: 숙성된(며칠 지난) 직전 업로드의 조회수를 걷어 이번 사이클 피드백으로
     # 저장한다. 업로드 직후엔 Analytics가 0이라, 수집은 항상 지난 사이클 영상을 대상으로
