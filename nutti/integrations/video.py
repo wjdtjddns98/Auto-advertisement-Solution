@@ -422,12 +422,16 @@ _VET_SETTING = "sitting at the examination desk of a bright, tidy veterinary cli
 # (2026-07-21 PR #117에서 같은 전환을 했다가 철회한 이력 있음 — 레시피는 PR #117 diff.)
 # 2026-07-23 PO "의인화 — 사람 아기처럼" 전환: 앉은 자세 → 직립(standing) 상황으로 통일
 # (외형·모션도 직립으로 일치). 사람 아기처럼 서서 말하는 상황들. ASCII 작은따옴표 금지.
+# ⚠️ 글자가 나올 만한 배경(번화가 간판·가게 입구·표지판·포장지)을 넣지 말 것 —
+# 화면 텍스트 QC(_qc_text_overlay)는 프레임 안 글자를 전부 잡으므로 배경 간판 하나로
+# 전 비트가 재시도→폴백으로 떨어진다(2026-07-29 실측: "busy city sidewalk" 편이
+# 비트1에서만 3회 재생성 후 런 사망, 의상은 무지였다).
 _EPISODE_SETTINGS = [
-    "standing on a busy city sidewalk like a street interview",
+    "standing on a quiet residential street with plain walls and no signs",
     "standing in a cozy living room under warm lamps",
     "standing in a sunny park on a nice afternoon",
     "standing in a bright modern kitchen",
-    "standing in front of a cute pet shop entrance",
+    "standing on a wooden terrace surrounded by green plants",
     "standing at a tidy home office like a news anchor",
 ]
 # 시작 프레임 구도·표정 로테이션(2026-07-20 PO — "썸네일이 전부 같은 자세"): Shorts
@@ -1058,21 +1062,36 @@ class VideoStudio:
                     log.info(
                         "video.veo_fal.qc.retry", beat=i, attempt=attempt, reasons=reasons
                     )
-                    Path(clip_path).unlink(missing_ok=True)
                     # 재시도는 **seed를 유지하고 프롬프트만 바꾼다**(2026-07-29 PO
                     # "비트별로 목소리가 다 다름"). 종전엔 seed에 오프셋을 줘 결함 재현을
                     # 피했는데(2026-07-10), 그 결과 재생성된 비트만 음색이 갈라졌다 —
                     # 직전 런은 3비트가 각각 3회씩 재생성돼 비트마다 다른 목소리가 됐다.
                     # 결함 회피는 seed가 아니라 결함을 콕 집는 교정 문구로 한다: 샘플이
                     # 달라지면서 목소리를 결정하는 seed는 편 전체가 하나로 유지된다.
-                    clip_path = self._generate_and_trim_clip(
-                        client,
-                        f"{prompt} {builder.retry_hint(reasons, attempt)}",
-                        current_frame,
-                        frame_path,
-                        use_lock,
-                        video_seed,
-                    )
+                    # 재생성이 실패(fal 422 안전필터·일시 오류 등)해도 런을 죽이지 않는다 —
+                    # 이미 만든 클립(결함은 있지만 재생 가능)을 그대로 쓰고 넘어간다.
+                    # 실측 2026-07-29: 마지막 재시도의 결과 조회가 422를 뱉어 클립 3개
+                    # (~$1.2)를 만든 런이 통째로 죽었다. 그래서 옛 클립은 새 클립이 나온
+                    # 뒤에만 지운다(먼저 지우면 폴백할 대상이 사라진다).
+                    try:
+                        new_path = self._generate_and_trim_clip(
+                            client,
+                            f"{prompt} {builder.retry_hint(reasons, attempt)}",
+                            current_frame,
+                            frame_path,
+                            use_lock,
+                            video_seed,
+                        )
+                    except VideoRenderError as exc:
+                        log.warning(
+                            "video.veo_fal.qc.retry_failed",
+                            beat=i,
+                            attempt=attempt,
+                            error=type(exc).__name__,
+                        )
+                        break
+                    Path(clip_path).unlink(missing_ok=True)
+                    clip_path = new_path
                     reasons = self._qc_check_beat(
                         clip_path, frame_path, use_lock, final_beat=final_beat
                     )

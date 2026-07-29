@@ -551,6 +551,39 @@ def test_retry_keeps_episode_seed_and_varies_prompt(tmp_path, monkeypatch):
     assert "no text" in prompts[1] and "take 2" in prompts[1]
 
 
+def test_retry_render_failure_keeps_previous_clip(tmp_path, monkeypatch):
+    """재생성이 실패해도 런을 죽이지 않고 직전 클립을 그대로 쓴다.
+
+    실측 2026-07-29: 마지막 재시도의 fal 결과 조회가 422를 뱉어 클립 3개(~$1.2)를 만든
+    런이 통째로 죽었다. 결함 있는 클립이라도 살리는 게 런 전체를 잃는 것보다 낫다.
+    """
+    from nutti.integrations.video import VideoRenderError
+
+    first = tmp_path / "first.mp4"
+    first.write_bytes(b"first")
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    calls = {"n": 0}
+
+    def fake_generate(client, prompt, cur, frame, lock, seed):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return str(first)
+        raise VideoRenderError("Veo(fal) 결과 조회 HTTP 422")
+
+    monkeypatch.setattr(studio, "_generate_and_trim_clip", fake_generate)
+    monkeypatch.setattr(studio, "_qc_check_beat", lambda *a, **k: ["text_overlay"])
+    monkeypatch.setattr(studio, "_chain_frame", lambda _c: None)
+    monkeypatch.setattr(studio, "_stitch", lambda clips, durations=None, **k: clips[0])
+    monkeypatch.setattr(studio, "_trim_to_speech", lambda clip: (clip, 8.0))
+
+    final, _total = studio._produce_clips_veo_fal(
+        str(tmp_path / "frame.png"), ["대사 하나."], pick_episode_style("x")
+    )
+
+    assert final == str(first)
+    assert first.exists(), "폴백 대상이 될 클립을 미리 지우면 안 된다"
+
+
 def test_punch_in_default_disabled():
     """펀치인 기본값은 비활성(1.0) — 2026-07-29 PO 실물 판정 "화면전환이 너무 잦아
     눈이 아프다"로 되돌렸다. 켤 때는 env 옵트인(주기·진폭을 함께 낮춰서)."""
