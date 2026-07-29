@@ -96,11 +96,12 @@ def test_script_system_prompt_pins_strong_hook():
     assert "15자 이내" in SCRIPT_SYSTEM_PROMPT
     assert "문형 반복" in SCRIPT_SYSTEM_PROMPT  # 태도는 고정, 문장 반복은 금지
     assert "2차 훅" in SCRIPT_SYSTEM_PROMPT
-    # 2026-07-23 PO 싸가지 먹방 컨셉 핀: 디스·명령형 훅("야 너는 이런 거 먹지 마라")이
-    # 대표 패턴 + 먹으면서 말하는 상황 + 건방·뻔뻔 캐릭터. 지워지면 실패(리버트 가드).
+    # 2026-07-23 PO 싸가지 컨셉 핀: 디스·명령형 훅("야 너는 이런 거 먹지 마라")이
+    # 대표 패턴 + 건방·뻔뻔 캐릭터. 지워지면 실패(리버트 가드).
     assert "먹지 마라" in SCRIPT_SYSTEM_PROMPT
     assert "건방" in SCRIPT_SYSTEM_PROMPT
-    assert "먹으면서 말하는" in SCRIPT_SYSTEM_PROMPT
+    # 2026-07-29 PO: 먹는 상황은 영상 연출 전용 — 대사에 먹방 멘트를 넣지 않는다.
+    assert "먹는다는 사실을 대사로 설명하지 않는다" in SCRIPT_SYSTEM_PROMPT
 
 
 def test_pick_beat_count_is_three():
