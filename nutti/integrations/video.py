@@ -127,6 +127,9 @@ def _asciify_font_path(font: str) -> str:
 # 스타일 요청). 문장 종결부호 뒤 공백에서 나눈다 — ai_text._split_into_beats의 문장
 # 분리 정규식과 동일 패턴(대본이 비트당 한국어 2문장을 강제하므로 보통 2개로 나뉜다).
 _CAPTION_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。…])\s+")
+# 문장 세그먼트를 다시 쪼개는 최대 어절 수(2026-07-29 — 무음 시청 가독, 2~4단어 규칙).
+# 늘리면 한 화면에 더 많이 뜨고 전환이 느려진다. 3이 한글 자막 한 줄에 편하게 들어간다.
+_CAPTION_MAX_WORDS = 3
 # 화면 자막(깨진 한글 텍스트) 억제용 negative_prompt는 이제 설정값
 # `Settings.veo_fal_negative_prompt`로 단일화되어 FalVeoClient._submit이 fal에 직접
 # 보낸다(2026-06-18). 프롬프트 본문의 "no on-screen text" 지시와 이중 방어를 이룬다.
@@ -369,15 +372,15 @@ class EpisodeStyle(NamedTuple):
 # 2026-07-16 소품·포맷 추가 — 매번 다른 옷·소품·연출). 항목을 추가/삭제하면 조합 수가
 # 바뀐다(현재 의상5×장소6×소품6×포맷3 = 540 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
 # 대사 인용 구분자와 충돌해 주입 방어 검증이 깨진다(U+2019는 허용).
-# 2026-07-23 PO "개밤티": 의상을 일부러 촌스럽고 과하고 안 어울리게 — 밤티(못생김·촌스러움·
-# 어설픔을 유머로 소비하는 밈, 라인플레이 아바타 유래). 클래싱 색·요란한 무늬·과잉 장식·
-# 안 맞는 핏의 우스꽝스러운 조합으로 "귀여운 비숑 × 개촌스러운 옷"의 갭 유머를 노린다.
+# 2026-07-29 PO: 개밤티(요란·과잉·오버사이즈) 폐기 — 거추장스러워 몸·표정을 가리고
+# 지저분하게 보인다. 2000년대 한국 스타일로 교체: 단정한 단색·슬림핏·레이어 최소(한 겹),
+# 무늬·장식 없음. 옷이 캐릭터를 덮지 않는 게 핵심 제약이다.
 _EPISODE_OUTFITS = [
-    "a garish clashing neon tracksuit with mismatched lime-green and hot-pink stripes",
-    "an oversized loud leopard-print coat paired with a clashing red tartan scarf",
-    "a gaudy gold sequined jacket that is comically too big and sags off its shoulders",
-    "a tacky mustard-yellow knit vest layered over a clashing purple floral shirt",
-    "a shiny turquoise tracksuit jacket studded with garish rhinestones and a clashing orange collar",
+    "a slim navy track jacket with two thin white side stripes, zipped up neatly",
+    "a clean white collared polo shirt with thin navy trim on the collar",
+    "a plain red short-sleeve tee with a small printed number on the chest",
+    "a slim light-blue denim jacket worn open over a plain white tee",
+    "a simple light-grey zip-up hoodie with the hood down, fitted and plain",
 ]
 # 소품 로테이션(2026-07-16 PO — 옷만 바뀌어 단조로움, 모자·머리 위 선글라스 같은 소품
 # 추가). 빈 문자열=소품 없음(2/6 확률 — "조금씩" 추가라 매편 소품은 과함). 규칙:
@@ -1861,18 +1864,38 @@ class VideoStudio:
         return self._concat(clips)
 
     def _input_norm(self, i: int) -> str:
-        """스티칭 입력 i의 정규화 필터 체인(픽셀포맷·fps·SAR·해상도 + 교차 펀치인).
+        """스티칭 입력 i의 정규화 필터 체인(픽셀포맷·fps·SAR·해상도 + 펀치인).
 
         모든 입력을 _STITCH_W×_STITCH_H로 통일해 xfade/concat 크기 불일치를 막는다.
-        punch_in_scale>1이면 짝수 비트(0·2… — 훅 포함)를 확대 후 원 해상도로 크롭해
-        컷마다 화면 크기가 교차되게 한다 — 동일 구도 점프컷을 의도된 편집으로 위장하고
-        시각 리듬을 만든다(2026-07-06 PO). 크롭 세로 기준은 상단 1/3(얼굴 보존).
+        punch_in_scale>1이면 디지털 줌으로 시각 리듬을 만든다:
+        · period>0(기본): 클립 **안에서** period초마다 줌 단계(1.0 → 중간 → 최대)를
+          밟는다. Veo 8초 원컷은 시각 변화가 8초에 한 번뿐인데, 2026 쇼츠 잔존
+          데이터는 1.5~2초 주기를 요구한다(같은 대사도 컷 3개는 하강 곡선, 15개는
+          플래토). 단계는 2초간 고정이라 프레임 간 흔들림이 없다.
+        · period<=0: 클립 단위 고정 줌(짝수 비트만 확대 — 2026-07-06 종전 동작).
+        클립 인덱스 i만큼 단계 위상을 밀어 비트 경계에서 같은 줌이 이어지지 않게 한다.
+        세로 기준은 상단 1/3(얼굴 보존).
         """
         # setsar=1은 체인 마지막에 — 펀치인 scale의 짝수 반올림이 미세 비율 오차(<0.1%,
         # 비가시)를 만들어 SAR이 1:1이 아니게 기록되는 것을 방지한다(실측 2026-07-06).
         base = f"[{i}:v]format=yuv420p,fps=30"
         s = float(getattr(self.settings, "veo_fal_punch_in_scale", 0.0) or 0.0)
-        if s > 1.0 and i % 2 == 0:
+        if s <= 1.0:
+            return f"{base},scale={_STITCH_W}:{_STITCH_H},setsar=1"
+        period = float(getattr(self.settings, "veo_fal_punch_in_period_sec", 0.0) or 0.0)
+        if period > 0:
+            # zoompan은 출력 fps 기본이 25라 fps=30을 명시해야 30fps 정규화가 깨지지
+            # 않는다. d=1이면 입력 프레임 1장당 출력 1장(길이 불변). z는 프레임 번호
+            # on으로 계산해 period초(=frames장)마다 3단계를 순환한다.
+            frames = max(1, int(round(period * 30)))
+            step = (s - 1.0) / 2
+            z = f"1+{step:.4f}*mod(floor(on/{frames})+{i},3)"
+            return (
+                f"{base},scale={_STITCH_W}:{_STITCH_H},"
+                f"zoompan=z='{z}':d=1:fps=30:s={_STITCH_W}x{_STITCH_H}"
+                ":x='iw/2-(iw/zoom/2)':y='ih/3-(ih/zoom/3)',setsar=1"
+            )
+        if i % 2 == 0:
             w2 = int(_STITCH_W * s) // 2 * 2
             h2 = int(_STITCH_H * s) // 2 * 2
             return (
@@ -2040,6 +2063,23 @@ class VideoStudio:
         segs = [s.strip() for s in _CAPTION_SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
         return segs or ([text.strip()] if text.strip() else [])
 
+    @staticmethod
+    def _chunk_words(text: str, max_words: int = _CAPTION_MAX_WORDS) -> list[str]:
+        """세그먼트를 어절 max_words개 이하의 청크로 쪼갠다(무음 시청 가독).
+
+        2026 쇼츠 실측: 시청의 60~80%가 무음이고, 화면 텍스트는 프레임당 2~4단어일 때
+        무음 잔존이 25~40% 오른다. 종전엔 문장 단위(한글 ~20자, 6~7어절)를 통째로
+        띄워 한 번에 다 읽히지 않았다. 청크가 늘면 표시 전환도 잦아져(≈1.2~1.5초)
+        펀치인과 함께 시각 변화 주기를 채운다 — 표시 구간은 호출부가 글자 수 비례로
+        나누므로 여기선 분할만 한다. 어절 수가 기준 이하면 원문 그대로 반환한다.
+        """
+        words = text.split()
+        if len(words) <= max_words:
+            return [text.strip()] if text.strip() else []
+        n_chunks = -(-len(words) // max_words)  # 올림 나눗셈
+        size = -(-len(words) // n_chunks)  # 청크 수를 유지하며 균등 분배
+        return [" ".join(words[i:i + size]) for i in range(0, len(words), size)]
+
     def _drawtext_filter(
         self,
         line: str,
@@ -2151,7 +2191,11 @@ class VideoStudio:
             for k, beat in enumerate(beats):
                 beat_start, beat_end = starts[k], ends[k]
                 beat_width = max(0.0, beat_end - beat_start)
-                segments = self._split_caption_segments(beat)
+                segments = [
+                    chunk
+                    for seg in self._split_caption_segments(beat)
+                    for chunk in self._chunk_words(seg)
+                ]
                 total_chars = sum(len(seg) for seg in segments) or 1
                 seg_start = beat_start
                 for si, seg in enumerate(segments):
@@ -2334,6 +2378,14 @@ class VideoStudio:
             # 첫 1초 무음 가독성(2026-07-21 쇼츠 트렌드): 0초 프레임만 보고도 상황이
             # 읽혀야 스와이프를 이긴다 — 배경·소품이 또렷이 보이는 상황 전달형 구도.
             "The setting and props are clearly visible so the situation reads at a glance. "
+            # 미드액션 오픈(2026-07-29): 상위권 훅은 "정지한 정면 응시"가 아니라 이미
+            # 진행 중인 동작 한가운데서 시작한다(mid-action open — 시청자를 서사의
+            # 30% 지점에 떨어뜨려 인지적 미완결을 만든다). 먹는 동작이 아니라 말하는
+            # 동작 한가운데로 잡는다 — 먹기는 클립에서 1회만 나오는 규칙이라 프레임이
+            # 선점하면 안 된다.
+            "The puppy is caught mid-motion in the middle of talking, mouth open mid-word, "
+            "leaning slightly toward the camera with one front paw raised — not a calm, "
+            "still, posed stare. "
             "Absolutely no text, letters, numbers, words, captions, logos, brand names, or "
             "watermarks anywhere. No people, no humans in costume, no other animals. "
             f"{mic}"

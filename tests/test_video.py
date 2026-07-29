@@ -235,8 +235,9 @@ def test_frame_prompt_sanitizes_topic():
     # 주제 잘림 경계 핀 — 고정 템플릿(페르소나·마이크·의상·장소·소품) 길이를 더한 상한.
     # 핀의 목적은 "주제가 _MAX_TOPIC_CHARS로 잘린다"이므로 템플릿이 길어지면 함께 올린다.
     # 2026-07-23: 먹방 간식 그릇 문장(+food_visual 80자) 추가로 1500→1700, 이어서 의인화
-    # 직립 외형 확장 + 개밤티 의상(더 김)으로 1700→1900 상향(실측 최장 1988, 여유 ~112).
-    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1900
+    # 직립 외형 확장 + 개밤티 의상(더 김)으로 1700→1900 상향.
+    # 2026-07-29: 미드액션 오픈 문장 추가로 1900→2100(실측 최장 1955, 여유 ~145).
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 2100
     # 금지 요소 지시는 주입과 무관하게 유지된다(자막·코스튬·타 동물 금지 강화 문구).
     assert "No people, no humans in costume, no other animals." in prompt
 
@@ -432,11 +433,12 @@ def test_stitch_punch_in_alternates_shot_scale(tmp_path, monkeypatch):
         return _R()
 
     monkeypatch.setattr(_sp, "run", fake_run)
-    # 펀치인은 기본 꺼짐(1.0, 2026-07-10 PO "크기 들쭉날쭉") — 기능 검증은 명시 옵트인.
+    # period=0 옵트아웃 시에만 종전(비트 단위 고정 줌) 경로가 쓰인다.
     settings = _live_settings_with_key(
         NUTTI_MEDIA_DIR=str(tmp_path),
         NUTTI_VEO_FAL_CROSSFADE_SEC="0.25",
         NUTTI_VEO_FAL_PUNCH_IN_SCALE="1.12",
+        NUTTI_VEO_FAL_PUNCH_IN_PERIOD_SEC="0",
     )
     studio = VideoStudio(settings)
     studio._stitch(["a.mp4", "b.mp4", "c.mp4"], [3.0, 3.0, 3.0])
@@ -446,6 +448,44 @@ def test_stitch_punch_in_alternates_shot_scale(tmp_path, monkeypatch):
     assert "scale=806:1432" in joined
     # 비펀치 입력(1)도 공통 해상도로 정규화돼 xfade 크기 불일치가 없다.
     assert "scale=720:1280" in joined
+
+
+def test_stitch_punch_in_time_stepped_by_default(tmp_path, monkeypatch):
+    """기본(period=2s)에서는 클립 **안에서** 2초마다 줌 단계가 바뀐다(zoompan).
+
+    2026 쇼츠 잔존 데이터의 "시각 변화 1.5~2초 주기" 요구 — 8초 원컷 한 덩어리로
+    나가면 곡선이 하강형이 된다. 클립마다 위상(+i)을 밀어 경계에서 같은 줌이
+    이어지지 않는지도 함께 고정한다.
+    """
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    studio = VideoStudio(
+        _live_settings_with_key(
+            NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_VEO_FAL_CROSSFADE_SEC="0.25"
+        )
+    )
+    studio._stitch(["a.mp4", "b.mp4", "c.mp4"], [3.0, 3.0, 3.0])
+    joined = " ".join(captured["cmd"])
+    # 2초 × 30fps = 60프레임마다 3단계 순환, 클립 i만큼 위상 이동.
+    assert joined.count("zoompan=") == 3
+    assert "mod(floor(on/60)+0,3)" in joined
+    assert "mod(floor(on/60)+1,3)" in joined
+    # 고정 줌 크롭 경로는 쓰이지 않는다(길이·해상도는 zoompan s=로 유지).
+    assert "crop=720:1280" not in joined
+    assert "s=720x1280" in joined
+    # 출력 fps 명시 — zoompan 기본 25fps로 떨어지면 30fps 정규화가 깨진다.
+    assert "fps=30" in joined
 
 
 def test_stitch_punch_in_disabled_when_scale_le_1(tmp_path, monkeypatch):
@@ -475,16 +515,18 @@ def test_stitch_punch_in_disabled_when_scale_le_1(tmp_path, monkeypatch):
     assert "scale=720:1280" in joined
 
 
-def test_punch_in_default_disabled():
-    """펀치인 기본값은 1.0(비활성) — 교차 줌이 강아지 크기를 비트마다 들쭉날쭉하게
-    만들어 연속 영상 체감을 깨는 직접 원인이었다(2026-07-10 PO). 켜려면 env 옵트인."""
+def test_punch_in_default_time_stepped():
+    """기본값 = 시간 스텝 펀치인(2026-07-29). 진폭은 작게(≤1.15) 유지한다 —
+    2026-07-10에 껐던 이유(비트마다 크기 들쭉날쭉)가 큰 진폭에서 재발한다."""
     from nutti.config import Settings
 
-    assert Settings(NUTTI_ENV="test").veo_fal_punch_in_scale == 1.0
+    s = Settings(NUTTI_ENV="test")
+    assert 1.0 < s.veo_fal_punch_in_scale <= 1.15
+    assert s.veo_fal_punch_in_period_sec == 2.0
 
 
 def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):
-    """디졸브 불가(길이 미상) concat 폴백에서도 (옵트인 시) 교차 펀치인이 유지된다."""
+    """디졸브 불가(길이 미상) concat 폴백에서도 펀치인이 유지된다(두 경로 동일 정규화)."""
     import subprocess as _sp
 
     captured: dict = {}
@@ -506,7 +548,7 @@ def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):
     studio._stitch(["a.mp4", "b.mp4"])  # durations 없음 → concat 경로
     joined = " ".join(captured["cmd"])
     assert "concat=n=2" in joined
-    assert joined.count("crop=720:1280") == 1  # 입력 0만 펀치인
+    assert joined.count("zoompan=") == 2  # 두 입력 모두 시간 스텝 펀치인
 
 
 # --- 자막 굽기(_burn_captions) ---
