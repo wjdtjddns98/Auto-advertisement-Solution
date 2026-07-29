@@ -73,7 +73,11 @@ class Orchestrator:
         settings: Settings | None = None,
         *,
         telegram: ReviewGate | None = None,
-        max_factcheck_retries: int = 1,
+        # 팩트체크 실패 시 issues를 피드백으로 재작성하는 횟수. 1회로는 부족해 런이 통째로
+        # 죽는 사례가 나왔다(2026-07-29 실측: 계란 급여량 수치 지적 → 재작성 1회도 실패 →
+        # FactCheckFailed로 파이프라인 종료). 재작성은 claude -p 텍스트 호출이라 추가 비용이
+        # 거의 없고, 실패 시 손실(런 전체)이 훨씬 크다.
+        max_factcheck_retries: int = 2,
         state: PipelineState | None = None,
         ledger: CostLedger | None = None,
         tg_client: TelegramClient | None = None,
