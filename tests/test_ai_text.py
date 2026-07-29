@@ -100,8 +100,34 @@ def test_script_system_prompt_pins_strong_hook():
     # 대표 패턴 + 건방·뻔뻔 캐릭터. 지워지면 실패(리버트 가드).
     assert "먹지 마라" in SCRIPT_SYSTEM_PROMPT
     assert "건방" in SCRIPT_SYSTEM_PROMPT
+    # 2026-07-29 PO "훅이 별로": 호출형 감탄사 문두 금지 + 훅에서 결론 미루기.
+    assert "호출형 감탄사" in SCRIPT_SYSTEM_PROMPT
+    assert "훅에서 결론을 다 말하지 않는다" in SCRIPT_SYSTEM_PROMPT
     # 2026-07-29 PO: 먹는 상황은 영상 연출 전용 — 대사에 먹방 멘트를 넣지 않는다.
     assert "먹는다는 사실을 대사로 설명하지 않는다" in SCRIPT_SYSTEM_PROMPT
+
+
+def test_validate_script_body_rejects_shouty_hook_opener():
+    """훅이 호출형 감탄사로 시작하면 하드룰 위반(2026-07-29 PO '훅 문형 고착').
+
+    실측: 연속 3편이 전부 "야"로 시작했다. '야채'·'야식'처럼 정상 단어로 시작하는
+    훅은 통과해야 한다(부분일치 오탐 가드).
+    """
+    from nutti.integrations.ai_text import validate_script_body
+
+    def _body(hook: str) -> str:
+        return "\n".join(
+            [
+                hook,
+                "근데 진짜 문제는 따로 있어. 그 조각이 장을 막는 게 진짜 위험한 거다.",
+                "하루 열량 십 퍼센트가 상한이야. 궁금하면 프로필 계산기나 써보든가.",
+            ]
+        )
+
+    shouty = _body("야 물그릇 그거 세균밭이야. 그거 그냥 두면 배탈 난다니까.")
+    assert any("호출형 감탄사" in v for v in validate_script_body(shouty, n_beats=3))
+    ok = _body("야채만 골라 먹는 거 그거 편식이야. 사료를 남기면 문제가 커진다.")
+    assert validate_script_body(ok, n_beats=3) == []
 
 
 def test_pick_beat_count_is_three():
