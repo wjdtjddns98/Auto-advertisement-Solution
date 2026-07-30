@@ -4,6 +4,10 @@
 # 환경 변수
 .env
 .env.local
+# .env 백업(채널 전환·스코프 변경 시 생성) — refresh token·client secret이 들어 있다.
+# 이 저장소는 public이므로 절대 커밋 금지.
+.env.bak*
+.env.*.bak
 
 # 의존성
 node_modules/
