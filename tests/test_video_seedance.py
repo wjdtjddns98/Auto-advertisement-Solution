@@ -152,10 +152,10 @@ def test_generate_payload_is_lipsync_shaped(tmp_path):
 
 @pytest.mark.parametrize(
     ("audio_sec", "expected"),
-    [(0.5, "4"), (4.0, "4"), (7.1, "8"), (20.0, "15")],
+    [(0.5, "4"), (4.0, "4"), (7.1, "8"), (14.2, "15")],
 )
 def test_generate_clamps_duration_to_schema_range(tmp_path, audio_sec, expected):
-    """duration은 스키마 허용 범위(4~15초)로 자르고 올림한다."""
+    """duration은 올림하고 하한(4초)까지 올린다(상한 초과는 별 테스트에서 실패 검증)."""
     frame = tmp_path / "frame.png"
     frame.write_bytes(b"FAKE-FRAME")
     http = FakeSeedanceHttp()
@@ -267,6 +267,95 @@ def _patch_ffmpeg_steps(monkeypatch, tmp_path, audio_sec=4.5):
     monkeypatch.setattr(VideoStudio, "_mux_audio", fake_mux)
     monkeypatch.setattr(VideoStudio, "_stitch", lambda self, clips, durs, **kw: clips[0])
     monkeypatch.setattr(VideoStudio, "_burn_captions", lambda self, *a, **kw: None)
+
+
+def _make_silent_video(tmp_path, seconds: float) -> str:
+    """ffmpeg로 무음 테스트 영상을 만든다(번들 의존성 — 다른 테스트도 ffmpeg를 쓴다)."""
+    import subprocess
+
+    import imageio_ffmpeg
+
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    out = tmp_path / f"silent_{seconds}.mp4"
+    subprocess.run(
+        [ff, "-hide_banner", "-y", "-f", "lavfi", "-i", f"color=c=black:s=64x64:d={seconds}",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)],
+        capture_output=True,
+        check=True,
+    )
+    return str(out)
+
+
+def _make_audio(tmp_path, seconds: float) -> str:
+    """ffmpeg로 테스트 오디오(사인파 mp3)를 만든다."""
+    import subprocess
+
+    import imageio_ffmpeg
+
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    out = tmp_path / f"tone_{seconds}.mp3"
+    subprocess.run(
+        [ff, "-hide_banner", "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+         str(out)],
+        capture_output=True,
+        check=True,
+    )
+    return str(out)
+
+
+def _has_audio_stream(path: str) -> bool:
+    import subprocess
+
+    import imageio_ffmpeg
+
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    err = subprocess.run(
+        [ff, "-hide_banner", "-i", path], capture_output=True, text=True, errors="replace"
+    ).stderr
+    return "Audio:" in err
+
+
+def test_mux_audio_attaches_audio_stream(tmp_path):
+    """무음 클립 + 오디오 → 오디오 스트림이 있는 클립(실제 ffmpeg 경로)."""
+    studio = VideoStudio(_seedance_settings(NUTTI_MEDIA_DIR=str(tmp_path)))
+    silent = _make_silent_video(tmp_path, 3.0)
+    assert not _has_audio_stream(silent)
+    muxed = studio._mux_audio(silent, _make_audio(tmp_path, 2.0))
+    assert _has_audio_stream(muxed)
+    # -shortest: 짧은 쪽(오디오 2초)에 맞춰진다.
+    assert studio._probe_duration_sec(muxed) == pytest.approx(2.0, abs=0.3)
+
+
+def test_mux_audio_warns_when_speech_truncated(tmp_path, capsys):
+    """영상이 오디오보다 짧으면 대사가 잘린 것이므로 경고를 남긴다(조용한 손실 방지).
+
+    structlog는 stdout으로 렌더하므로 caplog가 아니라 capsys로 확인한다.
+    """
+    studio = VideoStudio(_seedance_settings(NUTTI_MEDIA_DIR=str(tmp_path)))
+    silent = _make_silent_video(tmp_path, 2.0)
+    studio._mux_audio(silent, _make_audio(tmp_path, 5.0))
+    assert "speech_truncated" in capsys.readouterr().out
+
+
+def test_mux_audio_raises_on_ffmpeg_failure(tmp_path):
+    """ffmpeg 실패는 조용히 원본을 돌려주지 않고 실패시킨다(무음 편 업로드 방지)."""
+    studio = VideoStudio(_seedance_settings(NUTTI_MEDIA_DIR=str(tmp_path)))
+    with pytest.raises(VideoRenderError):
+        studio._mux_audio(str(tmp_path / "does-not-exist.mp4"), _make_audio(tmp_path, 1.0))
+
+
+def test_generate_rejects_audio_over_duration_cap(tmp_path):
+    """오디오가 모델 상한(15초)을 넘으면 조용히 깎지 않고 실패한다."""
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(b"FAKE-FRAME")
+    http = FakeSeedanceHttp()
+    client = FalSeedanceClient(
+        _seedance_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=http, sleep=_no_sleep
+    )
+    with pytest.raises(VideoRenderError):
+        client.generate(str(frame), "PROMPT", audio_url=_AUDIO_URL, duration_sec=18.0)
+    # 과금 전에 막아야 한다 — 제출조차 하지 않는다.
+    assert http.video_payloads == []
 
 
 def test_produce_seedance_wires_tts_per_beat(monkeypatch, tmp_path):

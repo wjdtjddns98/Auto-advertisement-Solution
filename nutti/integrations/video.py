@@ -1095,6 +1095,8 @@ class VideoStudio:
         그대로 맞지 않고, 재생성 단가도 비트당 훨씬 크다(720p 약 $1.5). Seedance가 채택되면
         화면 텍스트 QC(_qc_text_overlay)부터 이 경로에 맞춰 붙인다.
         """
+        import math
+
         from nutti.integrations.video_seedance import FalSeedanceClient
 
         builder = VeoPromptBuilder()
@@ -1104,6 +1106,8 @@ class VideoStudio:
             client = owned = FalSeedanceClient(self.settings, sleep=self._sleep)
         clips: list[str] = []
         durations: list[float | None] = []
+        # fal이 실제로 렌더한(=과금된) 초 — 반환 total의 근거. durations(배송 길이)와 다르다.
+        billed_secs: list[float] = []
         # 머지 후에는 필요 없는 중간물(TTS mp3·무음 클립) — finally에서 정리한다.
         temps: list[str] = []
         try:
@@ -1128,19 +1132,26 @@ class VideoStudio:
                 temps.append(silent)
                 # generate_audio=False 결과는 오디오 스트림이 없다 — 여기서 붙이지 않으면
                 # 무음 영상이 그대로 업로드된다(실측: 파일럿 ref 클립에 오디오 트랙 없음).
+                # 과금 기준은 **fal이 렌더한 무음 클립의 길이**다(파일럿 실청구 실측:
+                # 5.04초 클립 $1.5246 = 5.04 × $0.3025). 머지가 오디오 길이로 깎은 뒤의
+                # 길이를 원장에 넘기면 깎인 만큼 비용이 과소 계상된다 — 머지 전에 잰다.
+                rendered_sec = self._probe_duration_sec(silent)
                 muxed = self._mux_audio(silent, audio_path)
-                # 자막 타이밍은 **머지된 클립의 실측 길이**를 따른다. 머지는 짧은 쪽
+                # 반면 자막 타이밍은 **머지된 클립의 실측 길이**를 따른다. 머지는 짧은 쪽
                 # (영상/오디오)에 맞춰 자르므로 TTS 길이와 다를 수 있고, 그 차이를 그대로
                 # 자막 구간으로 쓰면 뒤 비트의 자막이 밀린다. 측정 실패 시에만 TTS 길이로 폴백.
                 clip_sec = self._probe_duration_sec(muxed) or audio_sec
                 clips.append(muxed)
                 durations.append(clip_sec)
+                # 렌더 길이 측정 실패 시엔 제출한 요청값(올림)으로 폴백 — 과소 계상보다 안전.
+                billed_secs.append(rendered_sec or float(math.ceil(audio_sec)))
                 log.info(
                     "video.seedance.clip.done",
                     beat=i,
                     of=len(beats),
                     tts_sec=round(audio_sec, 2),
                     clip_sec=round(clip_sec, 2),
+                    rendered_sec=round(billed_secs[-1], 2),
                 )
         except BaseException:
             # 중도 실패 시 이미 만든 클립(각 수십 MB)이 media_dir에 영구 잔존하지 않도록 정리.
@@ -1159,7 +1170,9 @@ class VideoStudio:
             if owned is not None:
                 _close_owned(owned)
 
-        total = sum(sec for sec in durations if sec is not None)
+        # 반환 total은 원장(estimate_run_cost)이 초당 단가를 곱하는 값이므로 렌더(과금)
+        # 기준을 쓴다 — 스티칭 디졸브로 짧아지는 배송 길이가 아니다.
+        total = sum(billed_secs)
         final = self._stitch(clips, durations)
         # 자막 굽기는 veo_fal 경로와 동일 정책(best-effort — 실패 시 무자막 원본 유지).
         if self.settings.caption_burn:

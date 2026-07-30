@@ -161,16 +161,25 @@ class FalSeedanceClient(_HttpClosingMixin):
     ) -> str:
         """시작 프레임 + 프롬프트 + 오디오로 무음 립싱크 클립을 만들고 저장 경로를 반환한다.
 
-        `duration_sec`(TTS 실측 길이)는 올림해서 스키마 범위(4~15초)로 자른 뒤 보낸다 —
-        오디오보다 짧으면 대사 끝이 잘리므로 올림이 안전한 방향이다. 남는 뒷부분은
-        머지 시 오디오 길이로 잘려 나간다.
+        `duration_sec`(TTS 실측 길이)는 올림해서 보낸다 — 오디오보다 짧으면 대사 끝이
+        잘리므로 올림이 안전한 방향이다. 남는 뒷부분은 머지 시 오디오 길이로 잘려 나간다.
+
+        오디오가 스키마 상한(15초)을 넘으면 **시끄럽게 실패한다**. 상한으로 조용히 깎으면
+        모델이 15초 클립을 주고 머지의 `-shortest`가 오디오를 그 길이로 잘라, 대사 끝
+        몇 초가 사라진 영상이 아무 신호 없이 업로드된다(하드룰 원칙: 구조적으로 담을 수
+        없는 입력은 조용한 품질 저하가 아니라 실패로 드러낸다). 하한(4초)은 반대로 안전한
+        방향이라 그대로 올린다 — 영상이 오디오보다 길어질 뿐이고 머지가 되돌린다.
         """
         import math
 
         _validate_fal_video_url(audio_url)
-        duration = max(
-            _MIN_DURATION_SEC, min(_MAX_DURATION_SEC, int(math.ceil(duration_sec or 0)))
-        )
+        needed = int(math.ceil(duration_sec or 0))
+        if needed > _MAX_DURATION_SEC:
+            raise VideoRenderError(
+                f"Seedance: 비트 오디오가 {duration_sec:.1f}초로 모델 상한"
+                f"({_MAX_DURATION_SEC}초)을 넘습니다 — 대사를 나눠 비트를 더 쪼개세요"
+            )
+        duration = max(_MIN_DURATION_SEC, needed)
         body = {
             "prompt": prompt,
             "image_urls": [self._encode_data_uri(frame_path, "Seedance 시작 프레임")],
