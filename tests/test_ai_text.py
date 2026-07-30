@@ -120,7 +120,7 @@ def test_validate_script_body_rejects_shouty_hook_opener():
             [
                 hook,
                 "근데 진짜 문제는 따로 있어. 그 조각이 장을 막는 게 진짜 위험한 거다.",
-                "하루 열량 십 퍼센트가 상한이야. 궁금하면 프로필 계산기나 써보든가.",
+                "하루 열량 십 퍼센트가 상한이야. 그 선만 지키면 걱정할 게 없다.",
             ]
         )
 
@@ -263,10 +263,21 @@ def test_script_system_prompt_bans_brand_in_last_beat():
 
 
 def test_script_system_prompt_cta_calm_tone():
-    """CTA 비트를 들뜨지 않은 톤으로 쓰게 가이드한다(2026-06-29 PO: 마지막 비트 음성이
-    들뜨며 화자가 바뀌는 경향 완화 — 2026-07-23 싸가지 컨셉에선 '심드렁한 무심한 권유')."""
-    assert "무심한 권유" in SCRIPT_SYSTEM_PROMPT
+    """마지막 비트를 들뜨지 않은 톤으로 쓰게 가이드한다(2026-06-29 PO: 마지막 비트 음성이
+    들뜨며 화자가 바뀌는 경향 완화). 2026-07-30 PO로 '무심한 권유'는 사라졌다 —
+    권유 자체를 금지했으므로 심드렁한 톤 유지와 느낌표 금지만 남는다."""
+    assert "심드렁한 톤을 유지한다" in SCRIPT_SYSTEM_PROMPT
     assert "느낌표를 쓰지 말 것" in SCRIPT_SYSTEM_PROMPT
+
+
+def test_script_system_prompt_bans_any_cta_in_last_beat():
+    """마지막 비트에서 어떤 유도도 하지 않는다는 지시 핀(2026-07-30 PO).
+
+    종전엔 반대로 '계산기'를 반드시 넣으라고 강제했다 — 그 리버트를 잡는 가드다.
+    """
+    assert "어떤 유도도 " in SCRIPT_SYSTEM_PROMPT
+    assert "계산기" in SCRIPT_SYSTEM_PROMPT  # 금지 대상으로만 등장해야 한다
+    assert "반드시 넣어" not in SCRIPT_SYSTEM_PROMPT
 
 
 def test_topic_system_prompt_bans_brand_in_topic():
@@ -419,7 +430,8 @@ def _valid_body() -> str:
         "강아지 간식 양 열에 아홉은 잘못 알고 있어요 지금 바로 확인해 보세요",
         "체중 일 킬로그램당 적정 열량 기준이 있어요 간식은 하루 열량의 십 퍼센트",
         "몸무게별 적정량은 고정이 아니라 활동량에 따라 조금씩 달라지니 살펴보세요",
-        "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인해 보세요",
+        # 2026-07-30 PO: 마지막 비트는 유도 없이 정보로 끝낸다(계산기·링크 언급 금지).
+        "몸무게 기준으로 하루 간식 양을 정해두고 그대로 지키는 게 답이에요",
     ]
     assert all(33 <= len(x) <= 46 for x in lines), [len(x) for x in lines]
     return "\n".join(lines)
@@ -455,9 +467,11 @@ def test_validate_script_body_catches_each_rule():
         (1, "짧은 대사", "28~48자"),
         (1, "귀진드기 감염은 초기에 잡아야 해요 가려움 신호를 놓치지 마세요 꼭", "발음"),
         (2, "Nutti 계산기로 우리 아이 맞춤 급여량을 오늘 바로 확인해 보세요", "브랜드"),
-        (2, "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인하세요!", "느낌표"),
-        # 2026-07-28 PO: 마지막 비트는 계산기 사용 유도가 하드룰.
-        (2, "궁금하면 프로필 링크나 한번 눌러보든가 어차피 알아서 하겠지만", "계산기"),
+        (2, "몸무게 기준으로 하루 간식 양을 정해두고 그대로 지키는 게 답이에요!", "느낌표"),
+        # 2026-07-30 PO "간식계산기 언급 일절 금지, 유도 아무것도 하지 말자" — 종전
+        # (2026-07-28)의 "계산기 유도 강제"를 뒤집은 것이라 리버트 가드로 남긴다.
+        (2, "궁금하면 프로필 링크의 간식 계산기나 한번 눌러보든가 알아서 하겠지만", "유도 표현"),
+        (2, "이 영상 저장해두고 구독까지 눌러두면 다음에 또 알려줄 테니까 그래라", "유도 표현"),
     ]
     assert any("3줄" in v for v in validate_script_body("\n".join(base[:2])))
     for idx, line, keyword in cases:
