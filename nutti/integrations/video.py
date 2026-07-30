@@ -644,13 +644,35 @@ class VeoPromptBuilder:
         # invalid_request로 라이브 런 2건 사망). 그래서 나이를 말하는 대신 음색의 물리
         # 특성(아주 높고 가볍고 얇은·삑삑거리는)과 만화 캐릭터 비유로만 표현한다.
         # 태도(퉁명·심드렁)는 그대로 유지 — PO 요구는 "귀엽고 어린데 퉁명스러운"이다.
-        "one specific recognizable person with a fixed vocal fingerprint): a tiny, squeaky, "
-        "feather-light and very high-pitched cartoon-character Korean voice — thin, bright "
-        "and adorable in timbre, clearly feminine, with a slightly nasal edge, a very narrow "
-        "vocal body, and a consistently high register that never drops into a lower or fuller "
-        "tone mid-clip. The timbre itself is cute and endearing even while the attitude is "
-        "blunt. This voice is never deep, never husky, never "
-        "breathy, never raspy, never resonant or full-bodied, and never mature-sounding. "
+        # 2026-07-30 PO "목소리도 페르소나 만들거나 파서 방식으로 고정 박으면 안 되냐,
+        # 진짜 완전 디테일하게": 음색을 산문 한 덩어리로 두면 모델이 일부만 집어간다 —
+        # 마스코트 외형(_MASCOT_APPEARANCE)처럼 **고정 사양 시트**로 항목화해 각 축을
+        # 개별 제약으로 준다. 항목이 빠지면 테스트(test_voice_persona_sheet_pins)가 깨진다.
+        # ⚠️ 여기서도 아동 지시어(little girl/child/나이 숫자)는 절대 금지 — 안전필터.
+        # 나이 대신 "작은 만화 동물 캐릭터"라는 프레이밍으로 어린 느낌을 낸다.
+        "one specific recognizable person with a fixed vocal fingerprint). "
+        "This voice has a FIXED SPEC — every item below applies to every clip without "
+        "exception:\n"
+        "- Pitch: sits very high and stays inside a narrow band from the first word to the "
+        "last; it never slides down into a lower or fuller tone mid-clip.\n"
+        "- Timbre: tiny, squeaky, feather-light, thin and bright with a slightly nasal edge "
+        "and a very narrow vocal body — cute and endearing, the voice of a small cartoon "
+        "animal character.\n"
+        "- Gender: clearly feminine.\n"
+        # 언어 축을 시트에 명시한다 — 항목화 과정에서 "Korean voice"가 빠졌던 것을
+        # 테스트가 잡았다. 발음 교정 블록·_SPEAKING_*에도 한국어 지시가 있지만, 음색
+        # 사양에서 언어가 사라지면 억양·말버릇 일관성 신호가 약해진다.
+        "- Language: always a Korean voice, with the same accent and speech habits in "
+        "every clip.\n"
+        "- Resonance: the sound forms forward and light, never from the chest — never deep, "
+        "never husky, never breathy, never raspy, never resonant or full-bodied, and never "
+        "mature-sounding.\n"
+        "- Volume: steady and moderate throughout; it never projects, shouts, or swells.\n"
+        "- Pace: unhurried and even, with sentence endings clipped short rather than drawn "
+        "out or sung.\n"
+        "- Emotional range: deliberately narrow and flat — no rising excitement, no gasps, "
+        "no audible breaths or sighs before or between lines.\n"
+        "- Attitude: cute in timbre but blunt in delivery — the two coexist.\n"
         # "microphone"은 쓰지 않는다 — 화면 밖 인터뷰 마이크 연출(_MIC)과 어휘가 겹쳐
         # 정면 발화 모드에도 마이크가 새고(테스트 가드), Veo가 화면에 마이크를 렌더할 수 있다.
         "Treat every clip in this series as one continuous take by the same single performer "
