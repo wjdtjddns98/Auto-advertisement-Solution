@@ -121,7 +121,11 @@ SCRIPT_SYSTEM_PROMPT = build_script_system_prompt(4)
 # vlog/interview/vet을 리스트에서 제거(휴면). 먹방 지시는 포맷 룰이 아니라
 # SCRIPT_SYSTEM_PROMPT(대본)·video.py(연출) 공통 규칙이다. 복원은 다시 추가만 —
 # vet 세트·인터뷰 마이크 등 연출 코드는 video.py에 휴면 상태로 남아 있다.
-EPISODE_FORMATS = ["mukbang"]
+# 2026-07-30 PO: 포맷 로테이션 복원 — 먹방 + 인터뷰 + 브이로그(vet은 제외: 반려견
+# 상황극이라 민트 스크럽 렌더 리스크가 있고 2026-07-20에 한 번 반려된 이력).
+# 간식(먹방 연출)은 mukbang 편에만 붙는다(generate_script의 fmt 분기) — 안 그러면
+# 인터뷰·브이로그 편도 간식 그릇을 두고 한 입 먹어 전 포맷이 먹방처럼 보인다.
+EPISODE_FORMATS = ["mukbang", "interview", "vlog"]
 
 # 포맷별 대본 추가 지시. 하드룰 파서(4비트·글자수·의성어 금지 등)는 그대로 적용되므로
 # 구조·톤만 지시한다. 줄 머리에 '3.' 같은 숫자+구두점을 쓰지 말 것
@@ -129,6 +133,15 @@ EPISODE_FORMATS = ["mukbang"]
 # 2026-07-23: vet/vlog는 휴면 엔트리 — EPISODE_FORMATS에서 빠져 선택되지 않지만
 # 컨셉 복원 대비로 룰은 남긴다(mukbang은 별도 룰 없음 — 공통 규칙이 전부 커버).
 FORMAT_SCRIPT_RULES = {
+    # 2026-07-30 PO 포맷 복원 시 신규 — 종전엔 interview에 대본 룰이 없어 영상에만
+    # 마이크(_MIC)가 붙고 대사는 정면 발화 톤 그대로였다(연출과 대본 불일치).
+    "interview": (
+        "이번 편은 화면 밖 인터뷰어와의 인터뷰다: 마스코트가 방금 질문을 받은 것처럼 "
+        "답하는 톤으로 말한다(예: '그거 물어볼 줄 알았다', '아까도 그거 묻더라'). "
+        "인터뷰어의 말은 대사에 쓰지 말고(화면 밖·무음) 마스코트의 답만 쓴다. "
+        "질문을 받아 답하는 흐름이라 첫 비트는 되묻거나 툭 받아치며 열어도 좋다. "
+        "싸가지 반말 톤과 정보 정확성 규칙은 그대로 지킨다."
+    ),
     "vet": (
         "이번 편은 수의사 상황극이다: 마스코트가 동물병원 진료실의 수의사 선생님인데, "
         "친한 동네 수의사가 단골 보호자에게 편하게 말하듯 반말로 설명한다(예: '이거 "
@@ -652,9 +665,18 @@ class AITextClient:
         # 편별 비트 수(완료율 A/B, 2026-07-21 PO): 주제 해시로 3/4비트 결정.
         n_beats = pick_beat_count(topic)
         fmt = episode_format or pick_episode_format(topic)
-        food_name, food_visual = self.suggest_food(topic)
+        # 간식(먹방 연출)은 mukbang 포맷 전용이다(2026-07-30 PO 포맷 로테이션 복원).
+        # 종전엔 포맷과 무관하게 항상 붙였는데, EPISODE_FORMATS가 mukbang 단일이던
+        # 기간(2026-07-23~30)엔 차이가 없었다. 포맷이 늘어난 지금 그대로 두면 인터뷰·
+        # 브이로그 편에도 간식 그릇과 "클립 시작 한 입"이 붙어(video._EATING_TEMPLATE는
+        # food가 비지 않으면 발동) 전 포맷이 먹방처럼 보인다.
+        if fmt == "mukbang":
+            food_name, food_visual = self.suggest_food(topic)
+        else:
+            food_name, food_visual = "", ""
         prompt = f"주제: {topic}\n"
-        prompt += f"\n[이번 편 간식 — 마스코트가 지금 앞에 두고 먹는 것]\n{food_name}\n"
+        if food_name:
+            prompt += f"\n[이번 편 간식 — 마스코트가 지금 앞에 두고 먹는 것]\n{food_name}\n"
         if feedback:
             prompt += f"\n[이전 사이클 개선 포인트]\n{feedback}\n"
         # 편별 포맷(2026-07-16 PO): 시스템 프롬프트가 아닌 유저 프롬프트에 붙여

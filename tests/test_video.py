@@ -1718,10 +1718,10 @@ def test_frame_prompt_includes_food_bowl_matching_beats():
     assert "snack bowl" not in VideoStudio._frame_prompt(without_food, style)
 
 
-def test_produce_clips_feeds_only_first_beat(tmp_path, monkeypatch):
-    """먹방은 첫 비트에서만 집어 먹는다(2026-07-23 PO: 한 번이면 충분·여러 번은 충돌·
-    2번째부터 그릇에 간식이 도로 차오름). 2번 비트부터는 food 텍스트가 빠져 그릇을 다시
-    그리지 않는다 — 시각 연속성은 체이닝이 잇는다."""
+def test_produce_clips_feeds_first_and_last_beat(tmp_path, monkeypatch):
+    """먹방은 첫 비트와 마지막 비트에서 각각 한 입 먹는다(2026-07-30 PO "처음에 한번
+    마지막 비트에 한번"). 중간 비트는 food 텍스트가 빠져 그릇을 다시 그리지 않는다 —
+    안 그러면 먹은 간식이 도로 차오른다(2026-07-23 실측). 시각 연속성은 체이닝이 잇는다."""
     prompts: list[str] = []
     studio = _wiring_capture_studio(tmp_path, monkeypatch, prompts)
     style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
@@ -1729,9 +1729,21 @@ def test_produce_clips_feeds_only_first_beat(tmp_path, monkeypatch):
         "frame.png", ["비트1", "비트2", "비트3"], style, food="fresh carrot sticks"
     )
     assert len(prompts) == 3
-    assert "snack bowl with fresh carrot sticks" in prompts[0]  # 첫 비트만 집어 먹기
+    assert "snack bowl with fresh carrot sticks" in prompts[0]  # 첫 비트
     assert "pick up a single piece" in prompts[0]
-    assert all("snack bowl" not in p for p in prompts[1:])  # 이후 비트는 그릇 리필 없음
+    assert "snack bowl with fresh carrot sticks" in prompts[2]  # 마지막 비트
+    assert "pick up a single piece" in prompts[2]
+    assert "snack bowl" not in prompts[1]  # 중간 비트는 그릇 리필 없음
+
+
+def test_produce_clips_single_beat_feeds_once(tmp_path, monkeypatch):
+    """비트가 1개면 첫 비트=마지막 비트라 먹는 지시가 중복되지 않는다."""
+    prompts: list[str] = []
+    studio = _wiring_capture_studio(tmp_path, monkeypatch, prompts)
+    style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
+    studio._produce_clips_veo_fal("frame.png", ["비트1"], style, food="fresh carrot sticks")
+    assert len(prompts) == 1
+    assert prompts[0].count("pick up a single piece") == 1
 
 
 def test_produce_clips_food_unlocks_and_chains(tmp_path, monkeypatch):

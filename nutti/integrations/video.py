@@ -637,10 +637,19 @@ class VeoPromptBuilder:
         # 이미 적용 중이고 오디오를 완전 통제하지 못하므로, 남은 카드는 음색을 **좁게 특정**
         # 하는 것뿐이다 — 7/29에 안전필터 때문에 나이·성별을 뺀 뒤 특정 신호가 약해졌던 걸
         # 나이·성별을 말하지 않는 질감·음역 기술자로 되살린다(아동 지시어는 계속 금지).
-        "one specific recognizable person with a fixed vocal fingerprint): a small, light, "
-        "high-pitched cartoon-character Korean voice — thin and bright with a slightly "
-        "nasal edge, a narrow vocal body, and a consistently high register that never drops "
-        "into a lower or fuller tone mid-clip. This voice is never deep, never husky, never "
+        # 2026-07-30 PO "아예 내가 원하는 목소리 톤이 아니야 — 좀 더 어린 귀여운 여자아이
+        # 말투로": 음색을 훨씬 어리고 귀엽게 민다. ⚠️ 단 "little girl"·"child"·나이 숫자
+        # 같은 **아동 지시어는 절대 쓰지 않는다** — 옷 갖춰 입은 직립 마스코트 이미지와
+        # 합쳐지면 Veo 안전필터가 아동 콘텐츠로 보고 통째로 거부한다(2026-07-29 실측:
+        # invalid_request로 라이브 런 2건 사망). 그래서 나이를 말하는 대신 음색의 물리
+        # 특성(아주 높고 가볍고 얇은·삑삑거리는)과 만화 캐릭터 비유로만 표현한다.
+        # 태도(퉁명·심드렁)는 그대로 유지 — PO 요구는 "귀엽고 어린데 퉁명스러운"이다.
+        "one specific recognizable person with a fixed vocal fingerprint): a tiny, squeaky, "
+        "feather-light and very high-pitched cartoon-character Korean voice — thin, bright "
+        "and adorable in timbre, clearly feminine, with a slightly nasal edge, a very narrow "
+        "vocal body, and a consistently high register that never drops into a lower or fuller "
+        "tone mid-clip. The timbre itself is cute and endearing even while the attitude is "
+        "blunt. This voice is never deep, never husky, never "
         "breathy, never raspy, never resonant or full-bodied, and never mature-sounding. "
         # "microphone"은 쓰지 않는다 — 화면 밖 인터뷰 마이크 연출(_MIC)과 어휘가 겹쳐
         # 정면 발화 모드에도 마이크가 새고(테스트 가드), Veo가 화면에 마이크를 렌더할 수 있다.
@@ -1084,7 +1093,11 @@ class VideoStudio:
                 # 충돌). 2번 비트부터는 food 텍스트를 아예 빼 그릇을 다시 그리지 않는다 —
                 # 안 그러면 매 비트가 "당근 가득한 그릇"을 다시 렌더해 먹은 간식이 도로
                 # 차오른다(PO 실측). 그릇의 시각적 연속성은 체이닝된 끝 프레임이 잇는다.
-                beat_food = food if i == 1 else ""
+                # 2026-07-30 PO "처음에 한번 마지막 비트에 한번 먹는걸로": 첫 비트와 마지막
+                # 비트에만 간식을 붙인다(각 클립에서 한 입 — 클립당 1회 제한은 유지).
+                # 중간 비트는 여전히 food를 비워 그릇을 다시 렌더하지 않는다(먹은 간식이
+                # 도로 차오르는 실측 방어). 비트가 1개뿐이면 조건이 겹쳐 한 번만 붙는다.
+                beat_food = food if i in (1, len(beats)) else ""
                 prompt = builder.build_beat(
                     beat,
                     off_screen_interviewer=(style.fmt == "interview"),

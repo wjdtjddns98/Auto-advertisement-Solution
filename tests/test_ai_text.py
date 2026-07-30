@@ -235,19 +235,24 @@ def test_pick_episode_format_deterministic_and_valid():
 
 
 def test_generate_script_injects_format_rule_into_prompt():
-    """포맷 규칙이 있는 편(휴면 vet 명시 지정)은 유저 프롬프트에 [이번 편 포맷] 블록이
-    붙고, 기본(mukbang — 룰 없음) 편은 붙지 않는다 — dry_run이 Script.prompt를
-    보존하므로 무네트워크 검증. (2026-07-23 먹방 단일 컨셉: vet은 명시 지정으로만 활성)"""
+    """포맷 규칙이 있는 편은 유저 프롬프트에 [이번 편 포맷] 블록이 붙고, 룰이 없는
+    mukbang 편은 붙지 않는다 — dry_run이 Script.prompt를 보존하므로 무네트워크 검증.
+
+    포맷은 명시 지정한다(주제 해시에 의존하면 EPISODE_FORMATS가 바뀔 때마다 깨진다).
+    """
     from nutti.config import Settings
     from nutti.integrations.ai_text import FORMAT_SCRIPT_RULES, AITextClient
 
     client = AITextClient(Settings(NUTTI_DRY_RUN="true"))
     vet_script = client.generate_script("주제-포맷룰", episode_format="vet")
-    default_script = client.generate_script("주제-포맷룰")
     assert "[이번 편 포맷" in vet_script.prompt
     assert FORMAT_SCRIPT_RULES["vet"] in vet_script.prompt
-    assert default_script.episode_format == "mukbang"
-    assert "[이번 편 포맷" not in default_script.prompt
+    # 2026-07-30 포맷 복원: interview도 대본 룰을 갖는다(종전엔 마이크 연출만 있었다).
+    interview = client.generate_script("주제-포맷룰", episode_format="interview")
+    assert FORMAT_SCRIPT_RULES["interview"] in interview.prompt
+    mukbang = client.generate_script("주제-포맷룰", episode_format="mukbang")
+    assert mukbang.episode_format == "mukbang"
+    assert "[이번 편 포맷" not in mukbang.prompt
 
 
 def test_script_system_prompt_enforces_banmal():
@@ -895,12 +900,25 @@ def test_guard_food_no_false_positive_on_partial_korean_match():
 
 
 def test_generate_script_carries_food():
-    """generate_script가 간식을 확정해 프롬프트 주입 + Script 필드로 영상 단계에 전달."""
+    """mukbang 편은 간식을 확정해 프롬프트 주입 + Script 필드로 영상 단계에 전달."""
     client = _client()
-    script = client.generate_script("강아지 간식 적정량")
+    script = client.generate_script("강아지 간식 적정량", episode_format="mukbang")
     assert script.food_name and script.food_visual
     assert "[이번 편 간식" in script.prompt
     assert script.food_name in script.prompt
+
+
+@pytest.mark.parametrize("fmt", ["interview", "vlog", "vet"])
+def test_generate_script_omits_food_outside_mukbang(fmt):
+    """간식(먹방 연출)은 mukbang 전용 — 다른 포맷엔 붙지 않는다(2026-07-30 PO).
+
+    video._EATING_TEMPLATE는 food가 비지 않으면 발동하므로, 여기서 food가 새면
+    인터뷰·브이로그 편도 간식 그릇을 두고 한 입 먹어 전 포맷이 먹방처럼 보인다.
+    """
+    script = _client().generate_script("강아지 발톱 깎는 주기", episode_format=fmt)
+    assert script.food_name == ""
+    assert script.food_visual == ""
+    assert "[이번 편 간식" not in script.prompt
 
 
 def test_suggest_food_live_guards_llm_answer(monkeypatch):
