@@ -14,6 +14,7 @@ dry_run이면 네트워크/SDK 없이 결정적 더미 결과를 반환해 파�
 | `ai_text.py` | Claude 텍스트 생성: 대본(1단계)·메타데이터(3단계)·성과분석(5단계)·팩트체크. 구조화 출력은 Anthropic tool use, 시스템 프롬프트 prompt caching. 키 없으면 `claude -p` CLI 폴백 |
 | `video.py` | `VideoStudio` 파사드: 시작 프레임(Kontext) → fal Veo 3.1 비트별 클립 → 앞뒤 침묵 트림 → ffmpeg 스티칭. `VeoPromptBuilder`가 대사를 따옴표 인용(네이티브 음성)·편별 스타일·마스코트 외형 고정. 백엔드 중립 헬퍼(HTTP·저장·redaction) 보유 |
 | `video_veo_fal.py` | `FalVeoClient`: fal.ai Veo 3.1 image-to-video(제출→폴링→다운로드). 비트당 8초 클립 |
+| `video_seedance.py` | `FalSeedanceClient`: Seedance 2.0 립싱크 백엔드(`NUTTI_VIDEO_BACKEND=seedance`). TTS로 목소리를 고정하고 그 오디오(@Audio1)에 입을 맞춘 **무음** 클립을 생성 → `VideoStudio._mux_audio`가 오디오를 붙인다. 클립 길이는 TTS 길이에 정합(8초 고정 트림 불요) |
 | `image_kontext.py` | `FalKontextClient`: fal.ai FLUX.1 Kontext [pro] 시작 프레임 생성(레퍼런스 이미지를 fal-storage 업로드 후 편집) |
 | `_fal_common.py` | fal.ai 큐 REST 공통 헬퍼(상수·`_fal_headers`·`_validate_*`·SSRF 가드). image_kontext·video_veo_fal이 공유 |
 | `publishing.py` | `Publisher`: YouTube Data API 자동 업로드 + YouTube/Instagram 성과 조회. Instagram 자동 게시는 제거(수동 텔레그램 핸드오프, 2026-06-18 PO) — 인사이트 조회만 유지 |

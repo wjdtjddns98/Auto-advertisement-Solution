@@ -42,6 +42,10 @@ _MAX_DIALOGUE_CHARS = 500
 _MAX_TOPIC_CHARS = 200
 # 비트 1개(독립 클립)의 길이(초). veo_fal 경로는 비트마다 8초 클립을 만들어 스티칭한다.
 _CLIP_SEC = 8.0
+# seedance 경로: 머지된 클립이 TTS 오디오보다 이 값 이상 짧으면 대사가 잘린 것으로 보고
+# 경고를 남긴다. 모델이 요청 duration을 소수점 수준으로 넘나드는 것은 정상이므로
+# (실측: "5" 요청 → 5.04초) 그 흔들림을 경고로 만들지 않을 만큼의 여유를 둔다.
+_MUX_TRUNCATION_WARN_SEC = 0.3
 
 # 발화 끝 적응 트림(_trim_to_speech) 파라미터(2026-06-30 PO 실측 보정). Veo 8초 클립은
 # 발화가 ~6초에 끝나도 뒤를 음악/앰비언스로 채워 무음이 안 생긴다 — 종전 silencedetect(EOF
@@ -266,7 +270,7 @@ def _send_json(
     *,
     sleep=None,
     max_transient_retries: int = 0,
-    retry_400: bool = False,
+    retry_4xx: bool = False,
 ) -> dict:
     """전송 + 상태 검증 + JSON 파싱을 한 번에 — 어떤 실패든 VideoRenderError로.
 
@@ -277,12 +281,15 @@ def _send_json(
     재시도 없이 기존 동작(즉시 전파)을 유지한다(Kling submit/result).
     영구 오류(그 외 4xx)·전송/JSON 파싱 실패는 재시도 없이 즉시 전파한다.
 
-    `retry_400=True`면 HTTP 400도 일시 오류로 분류해 재시도한다 — Veo 제출
-    (predictLongRunning)은 동일한 요청이 400과 200을 비결정적으로 오가는 간헐
-    400이 실측 확인됐다(2026-06-15 유료 실측: 동일 body가 한 호출은 400, 직후
-    재시도는 200 + operation name 발급). 영구 400(잘못된 입력)도 함께 재시도되나
-    제출 400은 영상 생성 이전이라 과금이 없고 backoff 몇 초만 손해이므로,
-    간헐 400으로 파이프라인 전체가 죽는 것을 막는 편이 이득이다.
+    `retry_4xx=True`면 HTTP 400·422도 일시 오류로 분류해 재시도한다 — fal은 같은
+    요청에 400/422와 200을 비결정적으로 오간다(2026-06-15 Veo 제출 실측: 동일 body가
+    한 호출은 400, 직후 재시도는 200. 2026-07-30 실측: Seedance **결과 조회**가 한 번
+    422를 뱉었는데 같은 입력으로 재시도하니 두 번 연속 200이었다). 영구 4xx(잘못된
+    입력·안전필터 거부)도 함께 재시도되지만, 이 플래그를 쓰는 지점은 ①과금 전 제출이라
+    손해가 backoff 몇 초뿐이거나 ②생성이 끝나 이미 과금된 뒤의 결과 조회라 재시도
+    실패해도 잃을 것이 없다. 반대로 재시도하지 않으면 조회 한 번의 간헐 4xx로 이미
+    만든 클립 전체(편당 수 달러)가 날아간다(2026-07-29 실측: 클립 3개 만든 런이 결과
+    조회 422로 통째로 사망).
     `sleep`은 테스트가 가짜 시계를 주입하기 위한 훅(기본 time.sleep)이다.
     """
     _sleep = sleep if sleep is not None else time.sleep
@@ -291,7 +298,7 @@ def _send_json(
         resp = _safe_send(send, what)
         code = getattr(resp, "status_code", None)
         transient = isinstance(code, int) and (
-            code == 429 or code >= 500 or (retry_400 and code == 400)
+            code == 429 or code >= 500 or (retry_4xx and code in (400, 422))
         )
         if transient and attempts < max_transient_retries:
             attempts += 1
@@ -896,6 +903,54 @@ class VeoPromptBuilder:
         _validate_visual_prompt(prompt.replace(dialogue, ""), expected_quotes=2)
         return prompt
 
+    def build_beat_lipsync(
+        self,
+        *,
+        off_screen_interviewer: bool = True,
+        style: EpisodeStyle | None = None,
+        final_cta: bool = False,
+    ) -> str:
+        """Seedance 립싱크 비트 프롬프트를 만든다 — 대사 텍스트를 넣지 않는다.
+
+        build_beat와의 차이는 대사와 목소리를 프롬프트가 담당하지 않는다는 점이다:
+        대사는 @Audio1(우리 TTS)이 담고, 모델은 그 오디오에 입만 맞춘다. 그래서
+        - `_VOICE`(음색 고정 묘사)가 불필요하다 — 목소리는 TTS가 물리적으로 고정한다.
+          이 백엔드를 쓰는 이유 자체이며, 나이·성별 묘사로 안전필터를 건드릴 일도 없다.
+        - `_CTA_VOICE_ANCHOR`(마지막 비트 음성 들뜸 억제)도 불필요하다 — 같은 TTS 보이스라
+          비트 간 화자 드리프트가 발생할 수 없다.
+        - 한글 대사가 프롬프트에 들어가지 않으니 그 글자를 화면 자막으로 그리는 경향의
+          최대 트리거가 사라진다(`_NEGATIVE`의 텍스트 금지는 그대로 유지).
+        먹방(food) 연출은 넣지 않는다 — 립싱크 오디오에 입을 맞추는 동안 씹는 동작을
+        섞으면 입모양이 무너진다(Veo 경로에서도 발화 중 씹기는 금지였다).
+        """
+        speaking = self._SPEAKING_OFF if off_screen_interviewer else self._SPEAKING_DIRECT
+        scene = ""
+        if style is not None:
+            prop = f", with {style.prop}" if style.prop else ""
+            scene = f"The puppy wears {style.outfit}{prop}, {style.setting}. {_OUTFIT_RULE} "
+        mic = f"{self._MIC} " if off_screen_interviewer else ""
+        # 끝 포즈 수렴을 모델로 강제하는 FLF 앵커가 없는 경로이므로 중간 비트도 생동
+        # 모션을 쓴다. 마지막 비트만 진정 강제 없이 자유(Veo 경로와 동일 기준).
+        motion = self._MOTION_FINAL_FREE if final_cta else self._MOTION_LIVELY
+        prompt = (
+            f"A photorealistic shot of {self._PERSONA}, {speaking}. "
+            "The puppy speaks the Korean line in @Audio1: its mouth opens and moves in "
+            "sync with that audio from the very first word to the last, and it stops "
+            "moving its mouth when the audio stops. The puppy is the exact same puppy as "
+            "in @Image1 — same face, same fur, same markings, same outfit, same place. "
+            f"{scene}{mic}"
+            f"{self._LIPSYNC} "
+            f"{self._CAMERA} "
+            f"{motion} "
+            f"{self._CONTINUITY} "
+            f"{_CINEMATIC_LOOK} "
+            "Format: tall vertical portrait orientation, single continuous shot. "
+            f"{self._NEGATIVE}"
+        )
+        # 하드가드: 금지 리터럴 + 인용 구분자 0개(대사를 싣지 않으므로) — 과금 전 검증.
+        _validate_visual_prompt(prompt, expected_quotes=0)
+        return prompt
+
 
 # NanoBananaClient(Gemini 이미지 생성)는 2026-06 PO 결정으로 FalKontextClient로 교체됨.
 # 프레임 클라이언트는 nutti/integrations/image_kontext.py의 FalKontextClient를 사용한다.
@@ -910,6 +965,7 @@ class VideoStudio:
         *,
         nano_client=None,
         veo_fal_client=None,
+        seedance_client=None,
         sleep=None,
         text_judge=None,
     ):
@@ -920,6 +976,9 @@ class VideoStudio:
         # fal.ai Veo 3.1 백엔드(veo_fal)용 주입 클라이언트.
         # 미주입 시 _produce_clips_veo_fal에서 지연 생성하고 finally에서 1회 닫는다.
         self._veo_fal_client = veo_fal_client
+        # Seedance 2.0 립싱크 백엔드(video_backend="seedance")용 주입 클라이언트.
+        # 미주입 시 _produce_clips_seedance에서 지연 생성하고 finally에서 1회 닫는다.
+        self._seedance_client = seedance_client
         # 폴링 대기용 sleep 주입(기본 time.sleep). 테스트에서 가짜 시계로 대체.
         self._sleep = sleep
         # 화면 텍스트 QC 판정자 주입(테스트용): callable(list[프레임 PNG 경로]) ->
@@ -945,6 +1004,12 @@ class VideoStudio:
             raise ValueError(
                 "FAL_KEY가 비어 있습니다 — veo_fal 백엔드의 프레임(Kontext) 생성에 필수입니다."
             )
+        if self.settings.video_backend == "seedance":
+            if self._seedance_client is None and not _usable_key(self.settings.fal_key):
+                raise ValueError(
+                    "FAL_KEY가 비어 있습니다 — seedance 백엔드(TTS·영상)에 필수입니다."
+                )
+            return
         if self._veo_fal_client is None and not _usable_key(self.settings.fal_key):
             raise ValueError(
                 "FAL_KEY가 비어 있습니다 — veo_fal 백엔드(dry_run=False) 시 필수입니다."
@@ -988,11 +1053,14 @@ class VideoStudio:
             script.id, script.topic, fmt=script.episode_format or None, avoid=style_avoid
         )
         frame_path = self._generate_frame(script, style)
-        # 실 경로의 총길이는 위 사전 추정 대신 veo_fal이 돌려준 실측값(비트 클립 앞뒤
-        # 침묵 트림 반영)으로 덮어쓴다.
-        video_path, duration = self._produce_clips_veo_fal(
-            frame_path, beats, style, food=script.food_visual
-        )
+        # 실 경로의 총길이는 위 사전 추정 대신 백엔드가 돌려준 실측값으로 덮어쓴다
+        # (veo_fal은 침묵 트림 실측, seedance는 TTS 길이 실측).
+        if self.settings.video_backend == "seedance":
+            video_path, duration = self._produce_clips_seedance(frame_path, beats, style)
+        else:
+            video_path, duration = self._produce_clips_veo_fal(
+                frame_path, beats, style, food=script.food_visual
+            )
         return VideoAsset(
             script_id=script.id,
             frame_image_path=frame_path,
@@ -1011,6 +1079,149 @@ class VideoStudio:
         if beats:
             return beats
         return [script.body.strip() or script.topic]
+
+    def _produce_clips_seedance(
+        self, frame_path: str, beats: list[str], style: EpisodeStyle
+    ) -> tuple[str, float]:
+        """Seedance 2.0으로 비트마다 [TTS → 립싱크 클립 → 오디오 머지]를 하고 스티칭한다.
+
+        veo_fal 경로보다 단계가 적다 — 목소리를 TTS가 고정하므로 seed 통일·음색 재시도가
+        불필요하고, 클립 길이가 TTS 길이에 정합되므로 8초 고정 트림(`_trim_to_speech`·
+        `_trim_tail_fixed`)과 경계 유사도 스티칭도 필요 없다. 비트 경계는 매 클립이 같은
+        마스코트 프레임(@Image1)에서 출발하는 것으로 잇는다.
+
+        ponytail: 클립 QC 레이어(_qc_check_beat)를 아직 태우지 않는다. 사유별 재생성 문구
+        (`retry_hint`)와 무발화·꼬리수렴 판정이 Veo 8초 고정 클립 전제로 쓰여 있어 이 경로에
+        그대로 맞지 않고, 재생성 단가도 비트당 훨씬 크다(720p 약 $1.5). Seedance가 채택되면
+        화면 텍스트 QC(_qc_text_overlay)부터 이 경로에 맞춰 붙인다.
+        """
+        from nutti.integrations.video_seedance import FalSeedanceClient
+
+        builder = VeoPromptBuilder()
+        client = self._seedance_client
+        owned = None
+        if client is None:
+            client = owned = FalSeedanceClient(self.settings, sleep=self._sleep)
+        clips: list[str] = []
+        durations: list[float | None] = []
+        # 머지 후에는 필요 없는 중간물(TTS mp3·무음 클립) — finally에서 정리한다.
+        temps: list[str] = []
+        try:
+            for i, beat in enumerate(beats, start=1):
+                audio_url, audio_path = client.tts(beat)
+                temps.append(audio_path)
+                # 오디오 길이가 곧 클립 길이다 — 못 재면 영상 duration을 정할 수 없어
+                # 대사가 잘릴 위험이 있으므로 조용히 넘기지 않고 실패시킨다.
+                audio_sec = self._probe_duration_sec(audio_path)
+                if audio_sec is None or audio_sec <= 0:
+                    raise VideoRenderError(
+                        f"Seedance: 비트 {i} TTS 오디오 길이를 측정할 수 없습니다"
+                    )
+                prompt = builder.build_beat_lipsync(
+                    off_screen_interviewer=(style.fmt == "interview"),
+                    style=style,
+                    final_cta=(i == len(beats)),
+                )
+                silent = client.generate(
+                    frame_path, prompt, audio_url=audio_url, duration_sec=audio_sec
+                )
+                temps.append(silent)
+                # generate_audio=False 결과는 오디오 스트림이 없다 — 여기서 붙이지 않으면
+                # 무음 영상이 그대로 업로드된다(실측: 파일럿 ref 클립에 오디오 트랙 없음).
+                muxed = self._mux_audio(silent, audio_path)
+                # 자막 타이밍은 **머지된 클립의 실측 길이**를 따른다. 머지는 짧은 쪽
+                # (영상/오디오)에 맞춰 자르므로 TTS 길이와 다를 수 있고, 그 차이를 그대로
+                # 자막 구간으로 쓰면 뒤 비트의 자막이 밀린다. 측정 실패 시에만 TTS 길이로 폴백.
+                clip_sec = self._probe_duration_sec(muxed) or audio_sec
+                clips.append(muxed)
+                durations.append(clip_sec)
+                log.info(
+                    "video.seedance.clip.done",
+                    beat=i,
+                    of=len(beats),
+                    tts_sec=round(audio_sec, 2),
+                    clip_sec=round(clip_sec, 2),
+                )
+        except BaseException:
+            # 중도 실패 시 이미 만든 클립(각 수십 MB)이 media_dir에 영구 잔존하지 않도록 정리.
+            for done in clips:
+                try:
+                    Path(done).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+        finally:
+            for t in temps:
+                try:
+                    Path(t).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if owned is not None:
+                _close_owned(owned)
+
+        total = sum(sec for sec in durations if sec is not None)
+        final = self._stitch(clips, durations)
+        # 자막 굽기는 veo_fal 경로와 동일 정책(best-effort — 실패 시 무자막 원본 유지).
+        if self.settings.caption_burn:
+            captioned = self._burn_captions(
+                final,
+                beats,
+                durations,
+                dissolve=getattr(self, "_last_stitch_dissolve", 0.0),
+                boundary_dissolves=getattr(self, "_last_boundary_dissolves", None),
+            )
+            if captioned is not None:
+                if final not in clips:
+                    try:
+                        Path(final).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                final = captioned
+        return final, total
+
+    def _mux_audio(self, clip: str, audio_path: str) -> str:
+        """무음 클립에 오디오를 붙인 새 클립 경로를 반환한다(길이는 짧은 쪽 = 오디오).
+
+        영상 스트림은 재인코딩 없이 복사하고 오디오만 aac로 인코딩한다. `-shortest`로
+        오디오가 끝나는 지점에서 자르므로, 오디오보다 길게 요청한 영상의 잉여 뒷부분
+        (발화 후 무의미한 동작 구간)이 함께 잘려 나간다.
+
+        실패는 시끄럽게 알린다 — 조용히 원본을 돌려주면 소리 없는 편이 업로드된다.
+        """
+        import subprocess
+
+        import imageio_ffmpeg
+
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        out_path = Path(self.settings.nutti_media_dir) / f"seedance_mux_{uuid4().hex[:12]}.mp4"
+        cmd = [
+            ff, "-hide_banner", "-y",
+            "-i", clip,
+            "-i", audio_path,
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", "-movflags", "+faststart",
+            str(out_path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+            err = (proc.stderr or b"").decode("utf-8", "replace")[-400:]
+            log.warning("video.seedance.mux.failed", code=proc.returncode, tail=err)
+            raise VideoRenderError(
+                f"Seedance: 무음 클립에 오디오를 붙이지 못했습니다(ffmpeg rc={proc.returncode})"
+            )
+        # 영상이 오디오보다 짧으면 -shortest가 **대사 끝을 잘라낸다**. 호출부가 오디오
+        # 길이를 올림해 duration을 요청하므로 정상적으로는 영상이 더 길지만, 모델이 요청보다
+        # 짧게 돌려주면 조용히 대사가 사라진다 — 관측 가능하게 경고로 남긴다(2026-07-30).
+        audio_sec = self._probe_duration_sec(audio_path)
+        clip_sec = self._probe_duration_sec(str(out_path))
+        if audio_sec and clip_sec and audio_sec - clip_sec > _MUX_TRUNCATION_WARN_SEC:
+            log.warning(
+                "video.seedance.mux.speech_truncated",
+                audio_sec=round(audio_sec, 2),
+                clip_sec=round(clip_sec, 2),
+            )
+        return str(out_path)
 
     def _produce_clips_veo_fal(
         self, frame_path: str, beats: list[str], style: EpisodeStyle, food: str = ""

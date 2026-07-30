@@ -266,13 +266,16 @@ class FalVeoClient(_HttpClosingMixin):
     def _fetch_result_url(self, request_id: str) -> str:
         """완료된 작업의 결과에서 검증된 영상 URL을 방어적으로 추출·반환한다."""
         result_url = f"{_FAL_QUEUE_BASE}/{self._app_id}/requests/{request_id}"
-        # 결과 조회도 일시 오류(429/5xx) 재시도 — Veo 생성이 끝난 뒤(과금 완료) 결과
-        # 조회 한 번의 429로 전체 비용이 날아가는 손실을 막는다(폴링과 동일 backoff).
+        # 결과 조회도 재시도 — Veo 생성이 끝난 뒤(과금 완료) 결과 조회 한 번의 오류로
+        # 전체 비용이 날아가는 손실을 막는다(폴링과 동일 backoff). 429/5xx뿐 아니라
+        # 간헐 400/422도 재시도한다(retry_4xx): 2026-07-29 실측으로 결과 조회 422가
+        # 클립 3개를 만든 런을 통째로 죽였고, 같은 입력의 재시도는 200이었다.
         data = _send_json(
             lambda: self._client().get(result_url, headers=_fal_headers(self.settings)),
             "Veo(fal) 결과 조회",
             sleep=self._sleep,
             max_transient_retries=_MAX_TRANSIENT_RETRIES,
+            retry_4xx=True,
         )
         # fal Veo 결과 스키마: {"video": {"url": "..."}} — KlingClient와 동일 구조.
         video = data.get("video")

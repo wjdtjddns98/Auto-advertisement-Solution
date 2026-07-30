@@ -204,6 +204,39 @@ class Settings(BaseSettings):
     veo_fal_clip_tail_trim_sec: float = Field(
         default=0.0, alias="NUTTI_VEO_FAL_CLIP_TAIL_TRIM_SEC"
     )
+    # ---- Seedance 2.0 백엔드(video_backend="seedance") ----
+    # Veo는 클립마다 음성을 새로 추첨해 목소리 고정이 구조적으로 불가능하다(voice 파라미터·
+    # 오디오 입력 없음). Seedance 2.0 reference-to-video는 오디오를 입력으로 받아 그 오디오에
+    # 입을 맞추므로, TTS로 목소리를 고정하고 영상이 립싱크하는 구조가 된다(2026-07-29 파일럿
+    # 에서 강아지 얼굴 립싱크 작동 확인). 클립 길이도 TTS 길이에 자동 정합돼 8초 고정 트림
+    # 문제가 사라진다. 단가는 Veo lite($1.46/편)보다 비싸다(std 720p 기준 약 $4.6/편).
+    video_backend: Literal["veo_fal", "seedance"] = Field(
+        default="veo_fal", alias="NUTTI_VIDEO_BACKEND"
+    )
+    seedance_model: str = Field(
+        default="bytedance/seedance-2.0/reference-to-video",
+        alias="NUTTI_SEEDANCE_MODEL",
+    )
+    # Seedance 출력 해상도. "720p"(기본) | "1080p".
+    seedance_resolution: str = Field(default="720p", alias="NUTTI_SEEDANCE_RESOLUTION")
+    # 목소리를 만드는 TTS 모델·보이스. 파일럿 실측(2026-07-29): 이 모델에서 한국어가 되는
+    # 보이스는 shane_ko·pinky_es_ko_mixed_en_zh 둘뿐이다. 목소리는 아직 PO 미확정이므로
+    # 확정되면 이 두 값(+ instruction/pitch)만 교체한다 — 코드 변경 불요.
+    seedance_tts_model: str = Field(
+        default="fal-ai/bytedance/seed-speech/tts/v2", alias="NUTTI_SEEDANCE_TTS_MODEL"
+    )
+    seedance_tts_voice: str = Field(default="shane_ko", alias="NUTTI_SEEDANCE_TTS_VOICE")
+    # 말투를 자연어로 지시한다(모델 지원 필드). 비면 페이로드에서 생략.
+    seedance_tts_voice_instruction: str = Field(
+        default=(
+            "Speak like a bratty little kid who is bored and unimpressed — "
+            "flat, deadpan, slightly cheeky, not cute-sweet."
+        ),
+        alias="NUTTI_SEEDANCE_TTS_VOICE_INSTRUCTION",
+    )
+    # 반음 단위 피치 시프트(모델 자체 노브 — ffmpeg 후처리 불요). 0이면 페이로드에서 생략.
+    seedance_tts_pitch: int = Field(default=0, alias="NUTTI_SEEDANCE_TTS_PITCH")
+
     # 비트 경계 유사도 스티칭 판단 임계(2026-07-07 PO 지시). 고정 지점 트림 대신, 경계
     # 근처 프레임 쌍의 평균절대차(MAD, 픽셀당 0~255)를 계산해 이 값 이하면 그 프레임 쌍에서
     # 실제로 이어붙인다. 초과하면 기존 트림을 유지하되 해당 경계만 크로스페이드를 2배로

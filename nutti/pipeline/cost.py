@@ -29,12 +29,27 @@ _TEXT_USD_PER_1K_TOKENS = 0.0025
 
 
 def _video_unit_price(settings: Settings) -> tuple[float, str]:
-    """영상 백엔드(veo_fal) 모델에 따른 초당 단가(USD)와 표시용 모델명을 돌려준다.
+    """영상 백엔드·모델에 따른 초당 단가(USD)와 표시용 모델명을 돌려준다.
 
     단가표는 docs/cost-analysis.md 기준. 단가가 표에 없는 신규/미확정 모델이 오면
     조용히 틀린 값을 쓰지 않도록 경고 로그를 남기고 보수적 기본값($0.40)으로 떨어진다.
     라벨에 "(단가추정)"을 붙여 표시한다.
     """
+    if settings.video_backend == "seedance":
+        # Seedance 2.0 실측(2026-07-29 파일럿): 720p 5.04초 클립 1개가 $1.5246 청구 →
+        # $0.3025/초. 다른 해상도의 단가는 아직 실측이 없어 경고 후 이 값을 쓴다
+        # (조용히 틀리지 않도록 라벨에 표시). TTS 비용(약 $0.014/편)은 이 집계에서
+        # 생략한다 — 영상 대비 0.5% 미만이라 라인을 두지 않는다.
+        resolution = (settings.seedance_resolution or "").lower()
+        if resolution == "720p":
+            return 0.3025, "Seedance 2.0 720p"
+        log.warning(
+            "cost.unknown_video_model",
+            backend="seedance",
+            model=settings.seedance_model,
+            resolution=settings.seedance_resolution,
+        )
+        return 0.3025, f"Seedance 2.0 {settings.seedance_resolution}(단가추정)"
     # fal.ai Veo 3.1 단가: Lite=$0.05/s, Fast=$0.15/s, 그 외(standard)=$0.40/s.
     # 모델 문자열("fal-ai/veo3.1/lite/image-to-video" 등)에서 tier를 판별한다.
     model = settings.veo_fal_model.lower()
