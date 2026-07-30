@@ -268,11 +268,15 @@ class FalVeoClient(_HttpClosingMixin):
         result_url = f"{_FAL_QUEUE_BASE}/{self._app_id}/requests/{request_id}"
         # 결과 조회도 일시 오류(429/5xx) 재시도 — Veo 생성이 끝난 뒤(과금 완료) 결과
         # 조회 한 번의 429로 전체 비용이 날아가는 손실을 막는다(폴링과 동일 backoff).
+        # 간헐 400/422도 재시도한다(retry_4xx) — 2026-07-30 실측: 클립 2개를 만든 런이
+        # 결과 조회 422로 통째로 죽었고, 같은 입력의 재시도는 200이었다. 이 지점은 생성이
+        # 끝나 과금이 완료된 뒤라 재시도가 실패해도 잃을 것이 없다.
         data = _send_json(
             lambda: self._client().get(result_url, headers=_fal_headers(self.settings)),
             "Veo(fal) 결과 조회",
             sleep=self._sleep,
             max_transient_retries=_MAX_TRANSIENT_RETRIES,
+            retry_4xx=True,
         )
         # fal Veo 결과 스키마: {"video": {"url": "..."}} — KlingClient와 동일 구조.
         video = data.get("video")

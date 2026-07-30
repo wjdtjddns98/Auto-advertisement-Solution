@@ -266,7 +266,7 @@ def _send_json(
     *,
     sleep=None,
     max_transient_retries: int = 0,
-    retry_400: bool = False,
+    retry_4xx: bool = False,
 ) -> dict:
     """전송 + 상태 검증 + JSON 파싱을 한 번에 — 어떤 실패든 VideoRenderError로.
 
@@ -277,7 +277,11 @@ def _send_json(
     재시도 없이 기존 동작(즉시 전파)을 유지한다(Kling submit/result).
     영구 오류(그 외 4xx)·전송/JSON 파싱 실패는 재시도 없이 즉시 전파한다.
 
-    `retry_400=True`면 HTTP 400도 일시 오류로 분류해 재시도한다 — Veo 제출
+    `retry_4xx=True`면 HTTP 400·422도 일시 오류로 분류해 재시도한다. 2026-07-30 실측:
+    Veo 결과 조회가 422를 뱉어 **클립 2개를 이미 만든(과금 완료) 런이 통째로 죽었다** —
+    같은 입력의 재시도는 200이었다. 이 플래그를 쓰는 지점은 생성이 끝난 뒤의 결과 조회이거나
+    과금 전 제출이라, 영구 4xx를 몇 번 더 두드려도 잃을 것이 없다. 반대로 재시도하지 않으면
+    조회 한 번의 간헐 4xx로 편 전체가 날아간다. — Veo 제출
     (predictLongRunning)은 동일한 요청이 400과 200을 비결정적으로 오가는 간헐
     400이 실측 확인됐다(2026-06-15 유료 실측: 동일 body가 한 호출은 400, 직후
     재시도는 200 + operation name 발급). 영구 400(잘못된 입력)도 함께 재시도되나
@@ -291,7 +295,7 @@ def _send_json(
         resp = _safe_send(send, what)
         code = getattr(resp, "status_code", None)
         transient = isinstance(code, int) and (
-            code == 429 or code >= 500 or (retry_400 and code == 400)
+            code == 429 or code >= 500 or (retry_4xx and code in (400, 422))
         )
         if transient and attempts < max_transient_retries:
             attempts += 1
