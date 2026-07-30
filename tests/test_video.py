@@ -2600,25 +2600,31 @@ def test_burn_captions_uses_per_boundary_dissolves(tmp_path, monkeypatch):
     assert "between(t,6.960," in joined
 
 
-def test_voice_persona_sheet_pins():
-    """목소리 페르소나 고정 사양 시트 리버트 가드(2026-07-30 PO "완전 디테일하게 고정").
+def test_voice_spec_pins_without_safety_trigger_form():
+    """목소리 사양 리버트 가드 + **항목화 재발 방지**(2026-07-30 실측).
 
     Veo는 음색을 클립마다 새로 추첨하므로(voice id·reference audio 없음) 프롬프트가
-    유일한 통제 수단이다. 항목이 조용히 빠지면 목소리가 다시 갈라지므로 축별로 핀한다.
+    유일한 통제 수단이다. 그래서 음색 어휘는 핀한다.
+
+    단 이 블록을 "FIXED SPEC" + `Gender:` 같은 **개별 항목으로 강조하면 fal이 영상 생성을
+    거부한다**(invalid_request — 라이브 런 2건 사망). 같은 어휘가 산문에 묻혀 있으면 통과한다.
+    그래서 어휘는 유지하되 항목화 형태로 되돌아가는 것을 막는다.
     """
     from nutti.integrations.video import VeoPromptBuilder
 
     voice = VeoPromptBuilder._VOICE
-    for axis in ("Pitch:", "Timbre:", "Gender:", "Resonance:", "Volume:", "Pace:",
-                 "Emotional range:", "Attitude:"):
-        assert axis in voice, f"페르소나 축 누락: {axis}"
-    assert "FIXED SPEC" in voice
     # 핵심 음색 어휘(어리고 귀여운 톤) — PO 지시의 실체.
-    for word in ("squeaky", "feather-light", "very high", "clearly feminine", "cute"):
+    for word in ("squeaky", "feather-light", "very high-pitched", "clearly feminine", "cute"):
         assert word in voice, f"음색 어휘 누락: {word}"
     # 배제 목록(낮고 성숙한 톤으로 새는 것 차단).
     for word in ("never deep", "never husky", "never mature-sounding"):
         assert word in voice, f"배제 어휘 누락: {word}"
+    # 안전 축(성별·나이 무관): 공명·볼륨·감정 진폭.
+    for word in ("forward and light", "never projects", "narrow and flat"):
+        assert word in voice, f"안전 통제 축 누락: {word}"
+    # 항목화 형태 금지 — 이 형태가 안전필터 거부를 유발했다.
+    assert "FIXED SPEC" not in voice, "항목화 형태는 fal이 영상 생성을 거부한다(실측)"
+    assert "Gender:" not in voice, "성별을 독립 항목으로 강조하면 거부된다(실측)"
 
 
 def test_voice_never_names_a_child():

@@ -654,29 +654,28 @@ class VeoPromptBuilder:
         # 개별 제약으로 준다. 항목이 빠지면 테스트(test_voice_persona_sheet_pins)가 깨진다.
         # ⚠️ 여기서도 아동 지시어(little girl/child/나이 숫자)는 절대 금지 — 안전필터.
         # 나이 대신 "작은 만화 동물 캐릭터"라는 프레이밍으로 어린 느낌을 낸다.
-        "one specific recognizable person with a fixed vocal fingerprint). "
-        "This voice has a FIXED SPEC — every item below applies to every clip without "
-        "exception:\n"
-        "- Pitch: sits very high and stays inside a narrow band from the first word to the "
-        "last; it never slides down into a lower or fuller tone mid-clip.\n"
-        "- Timbre: tiny, squeaky, feather-light, thin and bright with a slightly nasal edge "
-        "and a very narrow vocal body — cute and endearing, the voice of a small cartoon "
-        "animal character.\n"
-        "- Gender: clearly feminine.\n"
-        # 언어 축을 시트에 명시한다 — 항목화 과정에서 "Korean voice"가 빠졌던 것을
-        # 테스트가 잡았다. 발음 교정 블록·_SPEAKING_*에도 한국어 지시가 있지만, 음색
-        # 사양에서 언어가 사라지면 억양·말버릇 일관성 신호가 약해진다.
-        "- Language: always a Korean voice, with the same accent and speech habits in "
-        "every clip.\n"
-        "- Resonance: the sound forms forward and light, never from the chest — never deep, "
-        "never husky, never breathy, never raspy, never resonant or full-bodied, and never "
-        "mature-sounding.\n"
-        "- Volume: steady and moderate throughout; it never projects, shouts, or swells.\n"
-        "- Pace: unhurried and even, with sentence endings clipped short rather than drawn "
-        "out or sung.\n"
-        "- Emotional range: deliberately narrow and flat — no rising excitement, no gasps, "
-        "no audible breaths or sighs before or between lines.\n"
-        "- Attitude: cute in timbre but blunt in delivery — the two coexist.\n"
+        # ⚠️⚠️ 2026-07-30 실측 — 이 블록을 "고정 사양 시트"로 항목화(FIXED SPEC + Pitch/
+        # Timbre/**Gender: clearly feminine**/... 개별 항목)했더니 **fal이 영상 생성을 거부**
+        # 했다: invalid_request "Could not generate images with the given prompts and images"
+        # → 라이브 런 2건 연속 사망(클립 0개, 첫 비트부터 거부). 7/29 아동 표현 사고와 같은
+        # 코드다. 같은 어휘가 산문 안에 묻혀 있던 직전 커밋(b559b3d)에서는 영상이 정상
+        # 생성됐으므로(PO가 톤만 반려), 범인은 어휘 자체가 아니라 **성별·어림을 독립 항목으로
+        # 강조한 형태**로 보인다. 그래서 통과가 실측된 산문 형태로 되돌렸다.
+        # 교훈: 목소리의 나이·성별을 강조하면 강조할수록 안전필터에 가까워진다 — 이 방향으로
+        # 더 밀 수 없다(더 어리고 귀여운 톤은 TTS로 오디오를 직접 만드는 경로만 가능).
+        "one specific recognizable person with a fixed vocal fingerprint): a tiny, squeaky, "
+        "feather-light and very high-pitched cartoon-character Korean voice — thin, bright "
+        "and adorable in timbre, clearly feminine, with a slightly nasal edge, a very narrow "
+        "vocal body, and a consistently high register that never drops into a lower or fuller "
+        "tone mid-clip. The timbre itself is cute and endearing even while the attitude is "
+        "blunt. This voice is never deep, never husky, never "
+        "breathy, never raspy, never resonant or full-bodied, and never mature-sounding. "
+        # 아래 3개는 항목화 시도에서 새로 넣었던 통제 중 **성별·나이와 무관해 안전한 것**만
+        # 산문으로 남긴 것이다(공명·볼륨·감정 진폭). 비트 간 편차를 줄이는 데 기여한다.
+        "The sound forms forward and light rather than from the chest, at a steady moderate "
+        "volume that never projects, shouts, or swells, with a deliberately narrow and flat "
+        "emotional range — no rising excitement, no gasps, and no audible breaths or sighs "
+        "before or between lines. "
         # "microphone"은 쓰지 않는다 — 화면 밖 인터뷰 마이크 연출(_MIC)과 어휘가 겹쳐
         # 정면 발화 모드에도 마이크가 새고(테스트 가드), Veo가 화면에 마이크를 렌더할 수 있다.
         "Treat every clip in this series as one continuous take by the same single performer "
