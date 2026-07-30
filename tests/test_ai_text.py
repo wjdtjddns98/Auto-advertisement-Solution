@@ -499,7 +499,9 @@ def test_generate_script_regenerates_on_hard_rule_violation(monkeypatch):
     monkeypatch.setattr(client, "_llm_text", fake_llm)
     # 간식 선정도 _llm_text를 쓰므로 페이크 iterator를 소모하지 않게 고정값으로 대체.
     monkeypatch.setattr(client, "suggest_food", lambda _t: ("고구마 스틱", "sweet potato"))
-    script = client.generate_script("간식 적정량")
+    # 포맷은 mukbang으로 고정한다 — 공통 하드룰 재생성을 검증하는 테스트이므로 포맷
+    # 전용 룰(interview의 Q&A 구조 강제)이 끼어들면 재생성 횟수가 달라진다.
+    script = client.generate_script("간식 적정량", episode_format="mukbang")
     assert len(prompts) == 2  # 1회 위반 → 1회 재생성
     assert "하드룰 위반" in prompts[1] and "의성어" in prompts[1]  # 위반 사유가 피드백으로
     assert script.body == good
@@ -1097,3 +1099,31 @@ def test_judge_frames_have_text_parses_yes_no(monkeypatch):
     answers["value"] = "잘 모르겠어요"
     assert client.judge_frames_have_text(["f.png"]) is None
 
+
+
+def test_validate_script_body_interview_requires_qa_structure():
+    """인터뷰 편은 모든 비트가 [질문 되읊기 → 답] 구조여야 한다(2026-07-30 PO).
+
+    실측 반려 대본(마스코트 자기 질문 1개뿐)이 잡히고, Q&A 구조는 통과해야 한다.
+    포맷을 넘기지 않으면(공통 경로) 이 규칙은 적용되지 않는다.
+    """
+    from nutti.integrations.ai_text import validate_script_body
+
+    rejected = "\n".join([
+        "그 밥그릇, 며칠째야? 아까도 그거 묻더라, 씻는 주기부터 틀렸거든.",
+        "근데 진짜 문제는 며칠이 아니야. 한 끼만 남아도 기름때에 세균이 붙어서 자라.",
+        "먹고 나면 매번 뜨거운 물에 씻어. 긁힌 플라스틱 그릇이면 스테인리스로 바꿔.",
+    ])
+    v = validate_script_body(rejected, n_beats=3, fmt="interview")
+    assert any("되읊는 질문이 없음" in x for x in v)
+    # 질문이 없는 비트 번호(2·3)를 콕 집어 알려준다.
+    assert any("2·3번 비트" in x for x in v)
+    # 포맷 미지정이면 이 규칙은 적용되지 않는다(하위호환).
+    assert not any("되읊는 질문" in x for x in validate_script_body(rejected, n_beats=3))
+
+    qa = "\n".join([
+        "밥그릇 며칠에 한 번 씻냐고? 며칠이 아니라 매 끼마다 씻어야 하는 거다.",
+        "왜 그렇게 자주냐고? 한 끼만 남아도 기름때에 세균이 붙어서 자라거든.",
+        "플라스틱도 괜찮냐고? 긁힌 건 버리고 스테인리스로 바꾸는 게 답이다.",
+    ])
+    assert not any("되읊는 질문" in x for x in validate_script_body(qa, n_beats=3, fmt="interview"))

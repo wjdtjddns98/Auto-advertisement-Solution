@@ -135,12 +135,23 @@ EPISODE_FORMATS = ["mukbang", "interview", "vlog"]
 FORMAT_SCRIPT_RULES = {
     # 2026-07-30 PO 포맷 복원 시 신규 — 종전엔 interview에 대본 룰이 없어 영상에만
     # 마이크(_MIC)가 붙고 대사는 정면 발화 톤 그대로였다(연출과 대본 불일치).
+    # 2026-07-30 PO "인터뷰어가 인터뷰 하는거 같지가 않잖아 — Q&A 형식으로 대본을 짜야할듯":
+    # 종전 룰("질문 받은 것처럼 답하는 톤")로는 인터뷰로 읽히지 않았다(실측 반려: 1번 비트가
+    # "그 밥그릇, 며칠째야? 아까도 그거 묻더라"로 마스코트 자기 질문이 됐다).
+    # 인터뷰어 음성을 넣을 수는 없다 — 화자가 둘이 되면 목소리 일관성이 붕괴한다.
+    # 그래서 **마스코트가 인터뷰어의 질문을 되읊고 곧바로 답하는** 구조로 못박는다.
+    # 각 비트가 [질문 인용 → 답] 한 쌍이라 자막에도 Q&A가 그대로 드러난다.
     "interview": (
-        "이번 편은 화면 밖 인터뷰어와의 인터뷰다: 마스코트가 방금 질문을 받은 것처럼 "
-        "답하는 톤으로 말한다(예: '그거 물어볼 줄 알았다', '아까도 그거 묻더라'). "
-        "인터뷰어의 말은 대사에 쓰지 말고(화면 밖·무음) 마스코트의 답만 쓴다. "
-        "질문을 받아 답하는 흐름이라 첫 비트는 되묻거나 툭 받아치며 열어도 좋다. "
-        "싸가지 반말 톤과 정보 정확성 규칙은 그대로 지킨다."
+        "이번 편은 화면 밖 인터뷰어와의 Q&A 인터뷰다. **모든 비트를 [질문 되읊기 → 답] "
+        "구조로 쓴다**: 인터뷰어가 방금 던진 질문을 마스코트가 자기 입으로 짧게 되읊고"
+        "(반드시 물음표로 끝나는 인용, 예: '며칠에 한 번 씻냐고?'), 바로 이어서 답한다. "
+        "인터뷰어의 목소리는 절대 대사에 쓰지 않는다 — 되읊는 것은 마스코트다. "
+        "질문은 매 비트 다른 각도로 파고든다(첫 비트=주제 핵심 질문, 중간=왜/그럼 어떻게, "
+        "마지막=흔한 오해나 마무리 질문). 예시 구조:\n"
+        "밥그릇 며칠에 한 번 씻냐고? 며칠이 아니라 매 끼마다야.\n"
+        "왜 그렇게 자주냐고? 한 끼만 남아도 기름때에 세균이 붙어서 자라거든.\n"
+        "플라스틱도 괜찮냐고? 긁힌 건 버려, 스테인리스로 바꿔.\n"
+        "싸가지 반말 톤과 정보 정확성·글자수 규칙은 그대로 지킨다."
     ),
     "vet": (
         "이번 편은 수의사 상황극이다: 마스코트가 동물병원 진료실의 수의사 선생님인데, "
@@ -533,11 +544,15 @@ _HOOK_OPENER_RE = re.compile(r"^(야|너희야|얘들아|여러분)\s*[,.!?]?\s"
 _BANNED_CTA_WORDS = ["계산기", "링크", "프로필", "구독", "저장", "댓글"]
 
 
-def validate_script_body(body: str, n_beats: int = _BEAT_COUNT) -> list[str]:
+def validate_script_body(
+    body: str, n_beats: int = _BEAT_COUNT, fmt: str = ""
+) -> list[str]:
     """대본 하드룰 검증 — 위반 사유 목록을 반환한다(빈 리스트=통과).
 
     각 사유는 모델에게 재생성 피드백으로 그대로 전달되므로 "무엇을 어떻게 고칠지"
     형태의 한국어 문장으로 쓴다. n_beats는 편별 완료율 A/B(pick_beat_count) 값.
+    `fmt`(편 포맷)가 오면 포맷 전용 규칙을 추가로 적용한다 — 비면 공통 규칙만
+    (레거시 호출·테스트 하위호환).
     """
     lines = [ln.strip() for ln in (body or "").splitlines() if ln.strip()]
     violations: list[str] = []
@@ -584,6 +599,18 @@ def validate_script_body(body: str, n_beats: int = _BEAT_COUNT) -> list[str]:
             violations.append(
                 f"마지막 비트에 유도 표현({'·'.join(banned)})이 있음 — 계산기·링크·구독 등 "
                 "어떤 유도도 하지 말고 주제의 핵심 답을 한 줄로 못박아 정보로 끝낼 것"
+            )
+    # 인터뷰 포맷 전용: 모든 비트가 [질문 되읊기 → 답] 구조여야 한다(2026-07-30 PO
+    # "인터뷰어가 인터뷰 하는거 같지가 않잖아 Q&A 형식으로"). 프롬프트 지시만으로는
+    # 마스코트 자기 질문("그 밥그릇, 며칠째야?")으로 새어 인터뷰로 읽히지 않았다 —
+    # 되읊는 질문은 반드시 물음표를 남기므로 그 존재를 파서로 강제한다.
+    if fmt == "interview":
+        missing = [i + 1 for i, ln in enumerate(lines) if "?" not in ln]
+        if missing:
+            violations.append(
+                f"인터뷰 편인데 {'·'.join(map(str, missing))}번 비트에 되읊는 질문이 없음 — "
+                "각 비트를 [인터뷰어 질문을 물음표로 되읊기 → 바로 답] 구조로 다시 쓸 것"
+                "(예: 며칠에 한 번 씻냐고? 며칠이 아니라 매 끼마다야)"
             )
     return violations
 
@@ -717,7 +744,7 @@ class AITextClient:
         gen_prompt = prompt
         for attempt in range(1, _SCRIPT_MAX_TRIES + 1):
             body = self._generate_body_once(gen_prompt, n_beats)
-            violations = validate_script_body(body, n_beats=n_beats)
+            violations = validate_script_body(body, n_beats=n_beats, fmt=fmt)
             if not violations:
                 break
             log.warning(
