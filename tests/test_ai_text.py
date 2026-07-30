@@ -96,11 +96,38 @@ def test_script_system_prompt_pins_strong_hook():
     assert "15자 이내" in SCRIPT_SYSTEM_PROMPT
     assert "문형 반복" in SCRIPT_SYSTEM_PROMPT  # 태도는 고정, 문장 반복은 금지
     assert "2차 훅" in SCRIPT_SYSTEM_PROMPT
-    # 2026-07-23 PO 싸가지 먹방 컨셉 핀: 디스·명령형 훅("야 너는 이런 거 먹지 마라")이
-    # 대표 패턴 + 먹으면서 말하는 상황 + 건방·뻔뻔 캐릭터. 지워지면 실패(리버트 가드).
+    # 2026-07-23 PO 싸가지 컨셉 핀: 디스·명령형 훅("야 너는 이런 거 먹지 마라")이
+    # 대표 패턴 + 건방·뻔뻔 캐릭터. 지워지면 실패(리버트 가드).
     assert "먹지 마라" in SCRIPT_SYSTEM_PROMPT
     assert "건방" in SCRIPT_SYSTEM_PROMPT
-    assert "먹으면서 말하는" in SCRIPT_SYSTEM_PROMPT
+    # 2026-07-29 PO "훅이 별로": 호출형 감탄사 문두 금지 + 훅에서 결론 미루기.
+    assert "호출형 감탄사" in SCRIPT_SYSTEM_PROMPT
+    assert "훅에서 결론을 다 말하지 않는다" in SCRIPT_SYSTEM_PROMPT
+    # 2026-07-29 PO: 먹는 상황은 영상 연출 전용 — 대사에 먹방 멘트를 넣지 않는다.
+    assert "먹는다는 사실을 대사로 설명하지 않는다" in SCRIPT_SYSTEM_PROMPT
+
+
+def test_validate_script_body_rejects_shouty_hook_opener():
+    """훅이 호출형 감탄사로 시작하면 하드룰 위반(2026-07-29 PO '훅 문형 고착').
+
+    실측: 연속 3편이 전부 "야"로 시작했다. '야채'·'야식'처럼 정상 단어로 시작하는
+    훅은 통과해야 한다(부분일치 오탐 가드).
+    """
+    from nutti.integrations.ai_text import validate_script_body
+
+    def _body(hook: str) -> str:
+        return "\n".join(
+            [
+                hook,
+                "근데 진짜 문제는 따로 있어. 그 조각이 장을 막는 게 진짜 위험한 거다.",
+                "하루 열량 십 퍼센트가 상한이야. 그 선만 지키면 걱정할 게 없다.",
+            ]
+        )
+
+    shouty = _body("야 물그릇 그거 세균밭이야. 그거 그냥 두면 배탈 난다니까.")
+    assert any("호출형 감탄사" in v for v in validate_script_body(shouty, n_beats=3))
+    ok = _body("야채만 골라 먹는 거 그거 편식이야. 사료를 남기면 문제가 커진다.")
+    assert validate_script_body(ok, n_beats=3) == []
 
 
 def test_pick_beat_count_is_three():
@@ -208,19 +235,24 @@ def test_pick_episode_format_deterministic_and_valid():
 
 
 def test_generate_script_injects_format_rule_into_prompt():
-    """포맷 규칙이 있는 편(휴면 vet 명시 지정)은 유저 프롬프트에 [이번 편 포맷] 블록이
-    붙고, 기본(mukbang — 룰 없음) 편은 붙지 않는다 — dry_run이 Script.prompt를
-    보존하므로 무네트워크 검증. (2026-07-23 먹방 단일 컨셉: vet은 명시 지정으로만 활성)"""
+    """포맷 규칙이 있는 편은 유저 프롬프트에 [이번 편 포맷] 블록이 붙고, 룰이 없는
+    mukbang 편은 붙지 않는다 — dry_run이 Script.prompt를 보존하므로 무네트워크 검증.
+
+    포맷은 명시 지정한다(주제 해시에 의존하면 EPISODE_FORMATS가 바뀔 때마다 깨진다).
+    """
     from nutti.config import Settings
     from nutti.integrations.ai_text import FORMAT_SCRIPT_RULES, AITextClient
 
     client = AITextClient(Settings(NUTTI_DRY_RUN="true"))
     vet_script = client.generate_script("주제-포맷룰", episode_format="vet")
-    default_script = client.generate_script("주제-포맷룰")
     assert "[이번 편 포맷" in vet_script.prompt
     assert FORMAT_SCRIPT_RULES["vet"] in vet_script.prompt
-    assert default_script.episode_format == "mukbang"
-    assert "[이번 편 포맷" not in default_script.prompt
+    # 2026-07-30 포맷 복원: interview도 대본 룰을 갖는다(종전엔 마이크 연출만 있었다).
+    interview = client.generate_script("주제-포맷룰", episode_format="interview")
+    assert FORMAT_SCRIPT_RULES["interview"] in interview.prompt
+    mukbang = client.generate_script("주제-포맷룰", episode_format="mukbang")
+    assert mukbang.episode_format == "mukbang"
+    assert "[이번 편 포맷" not in mukbang.prompt
 
 
 def test_script_system_prompt_enforces_banmal():
@@ -236,10 +268,21 @@ def test_script_system_prompt_bans_brand_in_last_beat():
 
 
 def test_script_system_prompt_cta_calm_tone():
-    """CTA 비트를 들뜨지 않은 톤으로 쓰게 가이드한다(2026-06-29 PO: 마지막 비트 음성이
-    들뜨며 화자가 바뀌는 경향 완화 — 2026-07-23 싸가지 컨셉에선 '심드렁한 무심한 권유')."""
-    assert "무심한 권유" in SCRIPT_SYSTEM_PROMPT
+    """마지막 비트를 들뜨지 않은 톤으로 쓰게 가이드한다(2026-06-29 PO: 마지막 비트 음성이
+    들뜨며 화자가 바뀌는 경향 완화). 2026-07-30 PO로 '무심한 권유'는 사라졌다 —
+    권유 자체를 금지했으므로 심드렁한 톤 유지와 느낌표 금지만 남는다."""
+    assert "심드렁한 톤을 유지한다" in SCRIPT_SYSTEM_PROMPT
     assert "느낌표를 쓰지 말 것" in SCRIPT_SYSTEM_PROMPT
+
+
+def test_script_system_prompt_bans_any_cta_in_last_beat():
+    """마지막 비트에서 어떤 유도도 하지 않는다는 지시 핀(2026-07-30 PO).
+
+    종전엔 반대로 '계산기'를 반드시 넣으라고 강제했다 — 그 리버트를 잡는 가드다.
+    """
+    assert "어떤 유도도 " in SCRIPT_SYSTEM_PROMPT
+    assert "계산기" in SCRIPT_SYSTEM_PROMPT  # 금지 대상으로만 등장해야 한다
+    assert "반드시 넣어" not in SCRIPT_SYSTEM_PROMPT
 
 
 def test_topic_system_prompt_bans_brand_in_topic():
@@ -392,7 +435,8 @@ def _valid_body() -> str:
         "강아지 간식 양 열에 아홉은 잘못 알고 있어요 지금 바로 확인해 보세요",
         "체중 일 킬로그램당 적정 열량 기준이 있어요 간식은 하루 열량의 십 퍼센트",
         "몸무게별 적정량은 고정이 아니라 활동량에 따라 조금씩 달라지니 살펴보세요",
-        "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인해 보세요",
+        # 2026-07-30 PO: 마지막 비트는 유도 없이 정보로 끝낸다(계산기·링크 언급 금지).
+        "몸무게 기준으로 하루 간식 양을 정해두고 그대로 지키는 게 답이에요",
     ]
     assert all(33 <= len(x) <= 46 for x in lines), [len(x) for x in lines]
     return "\n".join(lines)
@@ -428,7 +472,11 @@ def test_validate_script_body_catches_each_rule():
         (1, "짧은 대사", "28~48자"),
         (1, "귀진드기 감염은 초기에 잡아야 해요 가려움 신호를 놓치지 마세요 꼭", "발음"),
         (2, "Nutti 계산기로 우리 아이 맞춤 급여량을 오늘 바로 확인해 보세요", "브랜드"),
-        (2, "프로필 링크의 간식 계산기로 우리 아이 맞춤 급여량을 확인하세요!", "느낌표"),
+        (2, "몸무게 기준으로 하루 간식 양을 정해두고 그대로 지키는 게 답이에요!", "느낌표"),
+        # 2026-07-30 PO "간식계산기 언급 일절 금지, 유도 아무것도 하지 말자" — 종전
+        # (2026-07-28)의 "계산기 유도 강제"를 뒤집은 것이라 리버트 가드로 남긴다.
+        (2, "궁금하면 프로필 링크의 간식 계산기나 한번 눌러보든가 알아서 하겠지만", "유도 표현"),
+        (2, "이 영상 저장해두고 구독까지 눌러두면 다음에 또 알려줄 테니까 그래라", "유도 표현"),
     ]
     assert any("3줄" in v for v in validate_script_body("\n".join(base[:2])))
     for idx, line, keyword in cases:
@@ -451,7 +499,9 @@ def test_generate_script_regenerates_on_hard_rule_violation(monkeypatch):
     monkeypatch.setattr(client, "_llm_text", fake_llm)
     # 간식 선정도 _llm_text를 쓰므로 페이크 iterator를 소모하지 않게 고정값으로 대체.
     monkeypatch.setattr(client, "suggest_food", lambda _t: ("고구마 스틱", "sweet potato"))
-    script = client.generate_script("간식 적정량")
+    # 포맷은 mukbang으로 고정한다 — 공통 하드룰 재생성을 검증하는 테스트이므로 포맷
+    # 전용 룰(interview의 Q&A 구조 강제)이 끼어들면 재생성 횟수가 달라진다.
+    script = client.generate_script("간식 적정량", episode_format="mukbang")
     assert len(prompts) == 2  # 1회 위반 → 1회 재생성
     assert "하드룰 위반" in prompts[1] and "의성어" in prompts[1]  # 위반 사유가 피드백으로
     assert script.body == good
@@ -852,12 +902,25 @@ def test_guard_food_no_false_positive_on_partial_korean_match():
 
 
 def test_generate_script_carries_food():
-    """generate_script가 간식을 확정해 프롬프트 주입 + Script 필드로 영상 단계에 전달."""
+    """mukbang 편은 간식을 확정해 프롬프트 주입 + Script 필드로 영상 단계에 전달."""
     client = _client()
-    script = client.generate_script("강아지 간식 적정량")
+    script = client.generate_script("강아지 간식 적정량", episode_format="mukbang")
     assert script.food_name and script.food_visual
     assert "[이번 편 간식" in script.prompt
     assert script.food_name in script.prompt
+
+
+@pytest.mark.parametrize("fmt", ["interview", "vlog", "vet"])
+def test_generate_script_omits_food_outside_mukbang(fmt):
+    """간식(먹방 연출)은 mukbang 전용 — 다른 포맷엔 붙지 않는다(2026-07-30 PO).
+
+    video._EATING_TEMPLATE는 food가 비지 않으면 발동하므로, 여기서 food가 새면
+    인터뷰·브이로그 편도 간식 그릇을 두고 한 입 먹어 전 포맷이 먹방처럼 보인다.
+    """
+    script = _client().generate_script("강아지 발톱 깎는 주기", episode_format=fmt)
+    assert script.food_name == ""
+    assert script.food_visual == ""
+    assert "[이번 편 간식" not in script.prompt
 
 
 def test_suggest_food_live_guards_llm_answer(monkeypatch):
@@ -1036,3 +1099,31 @@ def test_judge_frames_have_text_parses_yes_no(monkeypatch):
     answers["value"] = "잘 모르겠어요"
     assert client.judge_frames_have_text(["f.png"]) is None
 
+
+
+def test_validate_script_body_interview_requires_qa_structure():
+    """인터뷰 편은 모든 비트가 [질문 되읊기 → 답] 구조여야 한다(2026-07-30 PO).
+
+    실측 반려 대본(마스코트 자기 질문 1개뿐)이 잡히고, Q&A 구조는 통과해야 한다.
+    포맷을 넘기지 않으면(공통 경로) 이 규칙은 적용되지 않는다.
+    """
+    from nutti.integrations.ai_text import validate_script_body
+
+    rejected = "\n".join([
+        "그 밥그릇, 며칠째야? 아까도 그거 묻더라, 씻는 주기부터 틀렸거든.",
+        "근데 진짜 문제는 며칠이 아니야. 한 끼만 남아도 기름때에 세균이 붙어서 자라.",
+        "먹고 나면 매번 뜨거운 물에 씻어. 긁힌 플라스틱 그릇이면 스테인리스로 바꿔.",
+    ])
+    v = validate_script_body(rejected, n_beats=3, fmt="interview")
+    assert any("되읊는 질문이 없음" in x for x in v)
+    # 질문이 없는 비트 번호(2·3)를 콕 집어 알려준다.
+    assert any("2·3번 비트" in x for x in v)
+    # 포맷 미지정이면 이 규칙은 적용되지 않는다(하위호환).
+    assert not any("되읊는 질문" in x for x in validate_script_body(rejected, n_beats=3))
+
+    qa = "\n".join([
+        "밥그릇 며칠에 한 번 씻냐고? 며칠이 아니라 매 끼마다 씻어야 하는 거다.",
+        "왜 그렇게 자주냐고? 한 끼만 남아도 기름때에 세균이 붙어서 자라거든.",
+        "플라스틱도 괜찮냐고? 긁힌 건 버리고 스테인리스로 바꾸는 게 답이다.",
+    ])
+    assert not any("되읊는 질문" in x for x in validate_script_body(qa, n_beats=3, fmt="interview"))

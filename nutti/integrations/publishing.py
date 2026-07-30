@@ -2,7 +2,10 @@
 
 Instagram 자동 게시는 수동 핸드오프 전환(2026-06-18 PO)으로 제거됐다(성과 조회만 유지).
 ⚠️ 계획서 주의사항: 다계정 운영은 제재 위험 → 초기 1~2계정 파일럿 후 확장.
-자동 댓글 링크 금지 → 간식계산기 링크는 설명란/프로필에만 고정.
+간식계산기 링크는 설명란 + 업로드 직후 자동 댓글로만 노출한다(2026-07-30 PO).
+종전 "자동 댓글 링크 금지"(초기 계획서, 다계정 운영 제재 위험 맥락)는 해제됐다 —
+단일 채널이 자기 영상에 링크 댓글 하나를 다는 것은 통상 운영 범위다. 대사(CTA)에서의
+유도는 반대로 전면 금지됐다(ai_text._BANNED_CTA_WORDS).
 """
 
 from __future__ import annotations
@@ -210,6 +213,50 @@ class YouTubeClient:
                 f"YouTube 업로드 응답에 id가 없습니다 (응답 키: {list(payload.keys())})"
             )
         return str(video_id)
+
+    def post_comment(self, video_id: str, text: str, access_token: str) -> str:
+        """업로드된 영상에 최상위 댓글을 달고 comment id를 반환한다(commentThreads.insert).
+
+        POST https://www.googleapis.com/youtube/v3/commentThreads?part=snippet
+          body: {"snippet": {"videoId": ..., "topLevelComment": {"snippet": {"textOriginal": ...}}}}
+
+        ⚠️ `youtube.force-ssl` 스코프가 필요하다 — 업로드 전용 스코프(youtube.upload)만 있는
+        토큰으로 호출하면 403이 난다. 스코프를 추가한 뒤 refresh token을 재발급해야 한다
+        (scripts/get_youtube_refresh_token.py).
+        ⚠️ 댓글 상단 **고정(pin)** 은 Data API가 제공하지 않는다 — 필요하면 Studio에서 수동.
+
+        호출부는 이 실패를 업로드 실패로 승격시키지 않는다(best-effort) — 영상은 이미
+        올라갔고 과금도 끝났으므로 댓글 하나 때문에 런을 죽이면 손실이 크다.
+        """
+        import httpx  # lazy import — dry_run 경로에서는 불필요
+
+        body = {
+            "snippet": {
+                "videoId": video_id,
+                "topLevelComment": {"snippet": {"textOriginal": text}},
+            }
+        }
+        try:
+            resp = self.http.post(
+                "https://www.googleapis.com/youtube/v3/commentThreads",
+                params={"part": "snippet"},
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json; charset=UTF-8",
+                },
+            )
+        except (httpx.TransportError, httpx.TooManyRedirects):
+            # 전송 계층 오류 — Authorization 헤더(access_token)를 노출하지 않는다.
+            raise PublishError("YouTube 댓글 작성 전송 오류") from None
+        self._raise_for_publish(resp, "YouTube 댓글 작성")
+        payload = resp.json()
+        comment_id = payload.get("id")
+        if not comment_id:
+            raise PublishError(
+                f"YouTube 댓글 응답에 id가 없습니다 (응답 키: {list(payload.keys())})"
+            )
+        return str(comment_id)
 
     def _load_video_bytes(self, video: VideoAsset) -> bytes:
         """업로드할 영상 바이트를 확보한다.
@@ -483,6 +530,23 @@ class Publisher:
             access_token = client.exchange_token()
             # 2) 영상 업로드 → video_id
             video_id = client.upload_video(video, meta, access_token)
+            # 3) 계산기 링크 자동 댓글(2026-07-30 PO) — best-effort.
+            #    대사에서 유도를 전면 금지했으므로 설명란과 이 댓글이 유입 경로 전부다.
+            #    실패해도 업로드는 성공으로 유지한다: 영상은 이미 올라갔고 제작비도 이미
+            #    나갔으므로 댓글 하나로 런을 죽이면 손실이 훨씬 크다(스코프 부족 403 포함).
+            if self.settings.youtube_auto_comment:
+                try:
+                    comment_id = client.post_comment(
+                        video_id, self._comment_body(video.script_id), access_token
+                    )
+                    log.info("youtube.comment.done", video_id=video_id, comment_id=comment_id)
+                except Exception as exc:  # noqa: BLE001 - 댓글 실패는 업로드를 되돌리지 않는다
+                    log.warning(
+                        "youtube.comment.failed",
+                        video_id=video_id,
+                        error=type(exc).__name__,
+                        hint="youtube.force-ssl 스코프가 없으면 403 — 토큰 재발급 필요",
+                    )
         finally:
             if _own_yt:
                 client.close()
@@ -492,6 +556,21 @@ class Publisher:
             external_id=video_id,
             url=f"https://youtube.com/shorts/{video_id}",
         )
+
+    def _comment_body(self, script_id: str) -> str:
+        """자동 댓글 본문 = 설정 문구 + UTM 추적 계산기 링크.
+
+        `utm_medium=comment`로 설명란(`utm_medium=shorts`)과 구분한다 — 두 경로를 같은
+        medium으로 두면 어느 쪽이 계산기 유입을 만드는지 GA에서 갈리지 않는다.
+        편별 분리는 설명란과 동일하게 `utm_content=script.id`를 쓴다.
+        """
+        base = self.settings.calculator_url
+        joiner = "&" if "?" in base else "?"
+        tracked = (
+            f"{base}{joiner}utm_source=youtube&utm_medium=comment&utm_content={script_id}"
+        )
+        text = (self.settings.youtube_comment_text or "").strip()
+        return f"{text} {tracked}".strip()
 
     def fetch_performance(self, upload: UploadResult) -> PerformanceReport:
         """업로드된 콘텐츠의 성과 지표를 조회해 PerformanceReport를 반환한다."""

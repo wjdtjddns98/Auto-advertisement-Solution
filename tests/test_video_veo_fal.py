@@ -1163,3 +1163,34 @@ def test_cost_veo_fal_dry_run_flag_preserved():
     run = _make_run_with_video(8.0, settings)
     cost = estimate_run_cost(run, settings)
     assert cost.dry_run is True
+
+
+def test_result_fetch_retries_intermittent_422(tmp_path):
+    """결과 조회의 간헐 422는 재시도로 넘긴다 — 이미 과금된 클립을 조회 한 번에 잃지 않는다.
+
+    2026-07-30 실측: 클립 2개를 만든 라이브 런이 결과 조회 422로 통째로 죽었고, 같은
+    입력의 재시도는 200이었다. 이 가드가 없으면 편 전체(수 달러)가 조회 한 번에 날아간다.
+    """
+    result_calls = {"n": 0}
+
+    class _Flaky422Http(FakeVeoFalHttp):
+        def get(self, url, headers=None, **kwargs):
+            is_result = "/requests/" in url and not url.endswith("/status")
+            if is_result and "queue.fal.run" in url:
+                result_calls["n"] += 1
+                if result_calls["n"] == 1:
+                    return _Resp(status_code=422, json_data={"detail": "transient"})
+            return super().get(url, headers=headers, **kwargs)
+
+    http = _Flaky422Http(
+        post_response=_Resp(json_data={"request_id": "req-1"}),
+        get_status_responses=[_Resp(json_data={"status": "COMPLETED"})],
+        get_result_response=_Resp(json_data={"video": {"url": "https://v3.fal.media/x.mp4"}}),
+        download_response=_Resp(content=b"MP4"),
+    )
+    client = FalVeoClient(
+        _veo_fal_settings(NUTTI_MEDIA_DIR=str(tmp_path)), http=http, sleep=_no_sleep
+    )
+    out = client.generate(_frame_file(tmp_path), "PROMPT")
+    assert out.endswith(".mp4")
+    assert result_calls["n"] == 2, "422 후 재시도가 일어나야 한다"

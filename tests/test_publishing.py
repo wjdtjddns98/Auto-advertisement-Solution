@@ -1306,3 +1306,93 @@ _INITIATE_OK = {
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# 업로드 직후 자동 댓글(2026-07-30 PO)
+# ---------------------------------------------------------------------------
+
+
+class _CommentingYTClient:
+    """upload_video + post_comment 호출을 기록하는 가짜 클라이언트."""
+
+    def __init__(self, *, comment_exc: Exception | None = None):
+        self.comment_calls: list[tuple[str, str]] = []
+        self._comment_exc = comment_exc
+
+    def exchange_token(self) -> str:
+        return "fake_token"
+
+    def upload_video(self, video: VideoAsset, meta: Metadata, access_token: str) -> str:
+        return "vid_123"
+
+    def post_comment(self, video_id: str, text: str, access_token: str) -> str:
+        if self._comment_exc is not None:
+            raise self._comment_exc
+        self.comment_calls.append((video_id, text))
+        return "comment_1"
+
+    def close(self) -> None:
+        pass
+
+
+def _comment_settings(**overrides) -> Settings:
+    base: dict = {
+        "YOUTUBE_CLIENT_ID": "cid",
+        "YOUTUBE_CLIENT_SECRET": "csecret",
+        "YOUTUBE_REFRESH_TOKEN": "rtoken",
+    }
+    base.update(overrides)
+    return _live_settings(**base)
+
+
+def test_upload_youtube_posts_tracked_calculator_comment():
+    """업로드 성공 후 계산기 링크 댓글이 달리고, UTM이 설명란과 구분된다."""
+    client = _CommentingYTClient()
+    settings = _comment_settings()
+    publisher = Publisher(settings, yt_client=client)
+    result = publisher.upload_youtube(_video(script_id="s42"), _meta())
+
+    assert result.external_id == "vid_123"
+    assert len(client.comment_calls) == 1
+    video_id, text = client.comment_calls[0]
+    assert video_id == "vid_123"
+    assert settings.calculator_url in text
+    # 설명란은 utm_medium=shorts — 댓글은 comment로 갈려야 유입 경로가 분리된다.
+    assert "utm_medium=comment" in text
+    assert "utm_content=s42" in text
+
+
+def test_upload_youtube_survives_comment_failure():
+    """댓글 실패(예: force-ssl 스코프 없어 403)가 업로드를 되돌리지 않는다.
+
+    영상은 이미 올라갔고 제작비도 나갔으므로 댓글 하나로 런을 죽이면 손실이 크다.
+    """
+    client = _CommentingYTClient(comment_exc=PublishError("YouTube 댓글 작성 HTTP 403"))
+    publisher = Publisher(_comment_settings(), yt_client=client)
+    result = publisher.upload_youtube(_video(), _meta())
+
+    assert result.external_id == "vid_123"
+    assert result.url == "https://youtube.com/shorts/vid_123"
+
+
+def test_upload_youtube_skips_comment_when_disabled():
+    """토글이 꺼지면 댓글을 달지 않는다."""
+    client = _CommentingYTClient()
+    publisher = Publisher(
+        _comment_settings(NUTTI_YOUTUBE_AUTO_COMMENT=False), yt_client=client
+    )
+    publisher.upload_youtube(_video(), _meta())
+
+    assert client.comment_calls == []
+
+
+def test_comment_body_appends_utm_to_url_with_existing_query():
+    """계산기 URL에 이미 쿼리가 있으면 &로 이어붙인다(?가 두 번 들어가지 않게)."""
+    publisher = Publisher(
+        _comment_settings(NUTTI_CALCULATOR_URL="https://nutti.co.kr/calc?ref=yt"),
+        yt_client=_CommentingYTClient(),
+    )
+    body = publisher._comment_body("s7")
+    assert "calc?ref=yt&utm_source=youtube" in body
+    assert body.count("?") == 1

@@ -30,6 +30,23 @@ def _callback_origin_chat(cb: dict) -> str:
     return str(chat.get("id", ""))
 
 
+def _is_review_echo(text: str, review: ReviewRequest | None) -> bool:
+    """수신 텍스트가 검수 카드 본문(제목/미리보기)의 되돌이인지 판정한다.
+
+    카드 본문은 telegram.send_review가 `f"{title}\\n\\n{preview}"`로 만든다 — 제목으로
+    시작하거나 미리보기와 같으면 사람이 쓴 수정 대본일 수 없다. 복사·전달·에코 등
+    경로와 무관하게 내용만 보고 막는다(hard-rule-over-prompt).
+    """
+    if review is None:
+        return False
+    body = text.strip()
+    if not body:
+        return False
+    title = (review.title or "").strip()
+    preview = (review.preview or "").strip()
+    return bool(title and body.startswith(title)) or bool(preview and body == preview)
+
+
 class ReviewGate(Protocol):
     """검수 요청을 보내고 결정(승인/거절/수정)을 반환한다."""
 
@@ -177,11 +194,31 @@ class TelegramGate:
                 if decision == ReviewDecision.REVISE:
                     elapsed = self._clock() - start
                     revised = self._wait_for_text_input(
-                        client, chat_id, offset, elapsed_sec=elapsed
+                        client, chat_id, offset, review=review, elapsed_sec=elapsed
                     )
                     if revised is not None:
                         review.revised_content = revised
                         log.info("telegram.revised_content_received", stage=review.stage.value)
+                # REJECTED: 반려 사유를 한 줄 받아 다음 런 대본·주제 프롬프트에 넣는다
+                # (2026-07-29 PO 선택 — 대본 4연속 반려에도 사유가 코드로 안 돌아와
+                # 리드가 추측으로 프롬프트를 고치는 낭비가 있었다). 사유 입력은 선택이라
+                # 짧은 별도 타임아웃(reject_reason_timeout_sec)만 기다리고 넘어간다.
+                elif decision == ReviewDecision.REJECTED:
+                    reason = self._wait_for_text_input(
+                        client,
+                        chat_id,
+                        offset,
+                        review=review,
+                        timeout_sec=self.settings.reject_reason_timeout_sec,
+                        prompt_text=(
+                            "✏️ 반려 사유를 한 줄로 적어주세요 — 다음 대본 생성에 "
+                            "그대로 반영됩니다. (안 적으면 잠시 후 그냥 넘어갑니다)"
+                        ),
+                    )
+                    if reason:
+                        review.note = reason
+                        store.update_decision(review.id, decision, note=reason)
+                        log.info("telegram.reject_reason_received", stage=review.stage.value)
 
                 return decision
 
@@ -193,23 +230,40 @@ class TelegramGate:
         chat_id: str,
         offset: int | None,
         *,
+        review: ReviewRequest | None = None,
         elapsed_sec: float = 0.0,
+        timeout_sec: float | None = None,
+        prompt_text: str = "✏️ 수정할 대본 내용을 입력해 주세요.",
     ) -> str | None:
-        """수정 안내 메시지를 보내고 사용자의 일반 텍스트 메시지를 수신 대기한다.
+        """안내 메시지를 보내고 사용자의 일반 텍스트 메시지를 수신 대기한다.
 
-        elapsed_sec: 콜백 폴링에서 이미 소비한 시간(초). 남은 시간 = review_timeout_sec - elapsed_sec.
+        elapsed_sec: 콜백 폴링에서 이미 소비한 시간(초). 남은 시간 = 타임아웃 - elapsed_sec.
+        timeout_sec: 이 대기의 상한(기본 review_timeout_sec). 반려 사유처럼 입력이
+        선택인 경우 짧게 줘서 안 적으면 곧장 넘어가게 한다.
         타임아웃 내에 인가된 채팅에서 텍스트 메시지가 오면 반환하고,
         타임아웃이 지나면 None을 반환한다.
+
+        `review`를 주면 **검수 카드 자신의 텍스트를 수정 대본으로 받아들이지 않는다.**
+        실측 사고(2026-07-29 run 805e16ea): 수신된 "수정 대본"이 카드 본문
+        (`title\\n\\npreview`)과 바이트 단위로 일치했고, 그게 그대로 script.body가 되어
+        "대본 검수(클립별) [대본 검수 — 3개 클립·약 24초]"가 영상 자막·훅 오버레이로
+        구워졌다($1.14 소모 후 PO 반려). 봇이 보낸 메시지(from.is_bot)와 카드 제목으로
+        시작하는 텍스트는 건너뛰고 진짜 입력을 계속 기다린다.
         """
         try:
-            client.send_message(chat_id, "✏️ 수정할 대본 내용을 입력해 주세요.")
+            client.send_message(chat_id, prompt_text)
         except Exception:  # 안내 메시지 실패는 best-effort
             log.warning("telegram.revise_prompt_failed")
 
+        limit = (
+            float(timeout_sec)
+            if timeout_sec is not None
+            else float(self.settings.review_timeout_sec)
+        )
         start = self._clock() - elapsed_sec  # elapsed만큼 앞당겨 총 타임아웃 내에서 소진
         current_offset = offset
         while True:
-            remaining = self.settings.review_timeout_sec - (self._clock() - start)
+            remaining = limit - (self._clock() - start)
             if remaining <= 0:
                 log.warning("telegram.revise_text_timeout")
                 return None
@@ -231,6 +285,13 @@ class TelegramGate:
                 # 인가 확인: 설정된 검수 채팅에서 온 메시지만 수락.
                 msg_chat_id = str((msg.get("chat") or {}).get("id", ""))
                 if not msg_chat_id or msg_chat_id != str(chat_id):
+                    continue
+                # 에코 차단: 봇 메시지·검수 카드 본문은 수정 대본이 아니다(위 docstring 사고).
+                if (msg.get("from") or {}).get("is_bot") or _is_review_echo(text, review):
+                    log.warning(
+                        "telegram.revise_echo_ignored",
+                        stage=review.stage.value if review else "",
+                    )
                     continue
                 # 수정 내용 접수 완료 표시(best-effort).
                 try:

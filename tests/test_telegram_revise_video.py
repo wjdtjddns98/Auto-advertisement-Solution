@@ -139,6 +139,79 @@ def test_revise_then_text_input_sets_revised_content():
     assert any("수정할 대본" in msg for _, msg in client.sent_messages)
 
 
+def test_revise_ignores_review_card_echo():
+    """검수 카드 본문이 되돌아오면 수정 대본으로 채택하지 않고 계속 기다린다.
+
+    실측 사고(2026-07-29 run 805e16ea): 카드 본문(title\\n\\npreview)이 그대로
+    revised_content가 되어 "대본 검수(클립별) [대본 검수 — …]"가 영상 자막·훅
+    오버레이로 구워졌다($1.14 소모 후 PO 반려).
+    """
+    review = _review()
+    card = f"{review.title}\n\n{review.preview}"
+    batches = [
+        [_callback_update(review.id, "revise", update_id=1)],
+        [_text_update(card, update_id=2)],  # 카드 에코 — 무시돼야 한다
+        [_text_update("진짜 수정 대본이야.", update_id=3)],
+    ]
+    client = FakeTelegramClient(batches)
+    decision = _gate(client).request(review)
+
+    assert decision == ReviewDecision.REVISE
+    assert review.revised_content == "진짜 수정 대본이야."
+
+
+def test_reject_collects_reason_into_note():
+    """[반려] 탭 후 한 줄 입력하면 review.note에 담긴다(2026-07-29 PO — 다음 런 반영)."""
+    review = _review()
+    batches = [
+        [_callback_update(review.id, "rejected", update_id=1)],
+        [_text_update("훅이 지겨움. 숫자부터 던져.", update_id=2)],
+    ]
+    client = FakeTelegramClient(batches)
+    decision = _gate(client).request(review)
+
+    assert decision == ReviewDecision.REJECTED
+    assert review.note == "훅이 지겨움. 숫자부터 던져."
+    assert any("반려 사유" in msg for _, msg in client.sent_messages)
+
+
+def test_reject_without_reason_still_returns():
+    """사유를 안 적어도 반려는 그대로 성립한다(입력은 선택 — 짧은 타임아웃 후 통과)."""
+    review = _review()
+    batches = [
+        [_callback_update(review.id, "rejected", update_id=1)],
+        [],  # 사유 미입력 → 타임아웃
+    ]
+    client = FakeTelegramClient(batches)
+    # 콜백 폴링은 여유, 사유 대기 루프에서 곧장 타임아웃되도록 clock 제어.
+    calls = {"n": 0}
+
+    def ticking_clock():
+        calls["n"] += 1
+        return 0.0 if calls["n"] <= 4 else 9999.0
+
+    decision = _gate(client, clock=ticking_clock).request(review)
+
+    assert decision == ReviewDecision.REJECTED
+    assert review.note == ""
+
+
+def test_revise_ignores_bot_message():
+    """봇이 보낸 메시지는 수정 대본이 될 수 없다."""
+    review = _review()
+    bot_msg = _text_update("봇이 쓴 안내문", update_id=2)
+    bot_msg["message"]["from"] = {"id": 1, "is_bot": True}
+    batches = [
+        [_callback_update(review.id, "revise", update_id=1)],
+        [bot_msg],
+        [_text_update("사람이 쓴 대본.", update_id=3)],
+    ]
+    client = FakeTelegramClient(batches)
+    _gate(client).request(review)
+
+    assert review.revised_content == "사람이 쓴 대본."
+
+
 def test_revise_sends_prompt_message():
     """REVISE 결정 시 수정 안내 메시지가 send_message로 전송된다."""
     review = _review()

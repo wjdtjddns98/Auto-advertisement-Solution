@@ -20,7 +20,7 @@
 - **main/dev 직접 `git push` 절대 금지** — 브랜치 보호 ACTIVE라 거부됨. 항상 `feat/*`·`fix/*`·`docs/*` 브랜치 + PR(`gh pr create --base dev`) + green CI 경유.
 - **dev 머지**: 리뷰어 지적 수정 → **같은 리뷰어 재승인 후에만** 자동 머지(재승인 없이 금지). 자기 PR은 `--approve` 불가 → `gh pr review --comment`.
 - **main 머지(dev→main 릴리스)**: 항상 **PO 명시 승인 후에만.** 임의 머지 금지.
-- **커밋 전 검증**: `./.venv/Scripts/python.exe -m ruff check .` + `-m pytest -q` 둘 다 green 필수. Conventional commit(`feat(scope):`…) + `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` 트레일러.
+- **커밋 전 검증**: `./.venv/Scripts/python.exe -m ruff check .` + `-m pytest -q` 둘 다 green 필수. **예외(2026-07-29 PO)**: 프롬프트 문구만 바꾸는 변경(로테이션 문자열·연출 템플릿 등 PO 수정 구역, 로직 무변경)은 테스트 생략 — ruff만. Conventional commit(`feat(scope):`…) + `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` 트레일러.
 - **리뷰 전략**: 기본 단일 `nutti-reviewer` 1회. 보안민감(인증·시크릿·신뢰불가 입력)·대규모 변경만 `Workflow({name:'nutti-review'})` full(비쌈). 확정 `high`/`critical` 결함은 수정 후 재리뷰 필수, `medium`/`low`만 남으면 PR comment 기록 후 머지.
 
 ## 2. 핵심 계약 — DRY-RUN 우선

@@ -235,8 +235,10 @@ def test_frame_prompt_sanitizes_topic():
     # 주제 잘림 경계 핀 — 고정 템플릿(페르소나·마이크·의상·장소·소품) 길이를 더한 상한.
     # 핀의 목적은 "주제가 _MAX_TOPIC_CHARS로 잘린다"이므로 템플릿이 길어지면 함께 올린다.
     # 2026-07-23: 먹방 간식 그릇 문장(+food_visual 80자) 추가로 1500→1700, 이어서 의인화
-    # 직립 외형 확장 + 개밤티 의상(더 김)으로 1700→1900 상향(실측 최장 1988, 여유 ~112).
-    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 1900
+    # 직립 외형 확장 + 개밤티 의상(더 김)으로 1700→1900 상향.
+    # 2026-07-29: 미드액션 오픈 문장 추가로 1900→2100, 이어서 상의-only 규칙(_OUTFIT_RULE)
+    # 추가로 2100→2300(실측 최장 2138, 여유 ~162).
+    assert len(prompt) <= video_module._MAX_TOPIC_CHARS + 2300
     # 금지 요소 지시는 주입과 무관하게 유지된다(자막·코스튬·타 동물 금지 강화 문구).
     assert "No people, no humans in costume, no other animals." in prompt
 
@@ -432,11 +434,12 @@ def test_stitch_punch_in_alternates_shot_scale(tmp_path, monkeypatch):
         return _R()
 
     monkeypatch.setattr(_sp, "run", fake_run)
-    # 펀치인은 기본 꺼짐(1.0, 2026-07-10 PO "크기 들쭉날쭉") — 기능 검증은 명시 옵트인.
+    # period=0 옵트아웃 시에만 종전(비트 단위 고정 줌) 경로가 쓰인다.
     settings = _live_settings_with_key(
         NUTTI_MEDIA_DIR=str(tmp_path),
         NUTTI_VEO_FAL_CROSSFADE_SEC="0.25",
         NUTTI_VEO_FAL_PUNCH_IN_SCALE="1.12",
+        NUTTI_VEO_FAL_PUNCH_IN_PERIOD_SEC="0",
     )
     studio = VideoStudio(settings)
     studio._stitch(["a.mp4", "b.mp4", "c.mp4"], [3.0, 3.0, 3.0])
@@ -446,6 +449,46 @@ def test_stitch_punch_in_alternates_shot_scale(tmp_path, monkeypatch):
     assert "scale=806:1432" in joined
     # 비펀치 입력(1)도 공통 해상도로 정규화돼 xfade 크기 불일치가 없다.
     assert "scale=720:1280" in joined
+
+
+def test_stitch_punch_in_time_stepped_when_opted_in(tmp_path, monkeypatch):
+    """옵트인(scale>1, period=2s) 시 클립 **안에서** 2초마다 줌 단계가 바뀐다(zoompan).
+
+    기본은 비활성이다(2026-07-29 PO "화면전환이 너무 잦다") — 이 테스트는 다시 켰을 때의
+    동작 계약을 고정한다. 클립마다 위상(+i)을 밀어 경계에서 같은 줌이 이어지지 않는지도
+    함께 본다.
+    """
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    studio = VideoStudio(
+        _live_settings_with_key(
+            NUTTI_MEDIA_DIR=str(tmp_path),
+            NUTTI_VEO_FAL_CROSSFADE_SEC="0.25",
+            NUTTI_VEO_FAL_PUNCH_IN_SCALE="1.12",
+        )
+    )
+    studio._stitch(["a.mp4", "b.mp4", "c.mp4"], [3.0, 3.0, 3.0])
+    joined = " ".join(captured["cmd"])
+    # 2초 × 30fps = 60프레임마다 3단계 순환, 클립 i만큼 위상 이동.
+    assert joined.count("zoompan=") == 3
+    assert "mod(floor(on/60)+0,3)" in joined
+    assert "mod(floor(on/60)+1,3)" in joined
+    # 고정 줌 크롭 경로는 쓰이지 않는다(길이·해상도는 zoompan s=로 유지).
+    assert "crop=720:1280" not in joined
+    assert "s=720x1280" in joined
+    # 출력 fps 명시 — zoompan 기본 25fps로 떨어지면 30fps 정규화가 깨진다.
+    assert "fps=30" in joined
 
 
 def test_stitch_punch_in_disabled_when_scale_le_1(tmp_path, monkeypatch):
@@ -475,16 +518,83 @@ def test_stitch_punch_in_disabled_when_scale_le_1(tmp_path, monkeypatch):
     assert "scale=720:1280" in joined
 
 
+def test_retry_keeps_episode_seed_and_varies_prompt(tmp_path, monkeypatch):
+    """QC 재시도는 seed를 유지하고 프롬프트만 바꾼다(2026-07-29 PO '비트별 목소리 다름').
+
+    종전엔 재시도마다 seed에 오프셋을 줘, 재생성된 비트만 음색이 갈라졌다.
+    """
+    calls: list[tuple[str, int | None]] = []
+
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+
+    def fake_generate(client, prompt, cur, frame, lock, seed):
+        calls.append((prompt, seed))
+        return str(tmp_path / f"clip{len(calls)}.mp4")
+
+    # 첫 2회는 결함, 3회차에 통과 — 재시도가 2번 일어나게 한다.
+    verdicts = [["text_overlay"], ["text_overlay"], []]
+
+    monkeypatch.setattr(studio, "_generate_and_trim_clip", fake_generate)
+    monkeypatch.setattr(studio, "_qc_check_beat", lambda *a, **k: verdicts.pop(0))
+    monkeypatch.setattr(studio, "_chain_frame", lambda _c: None)
+    monkeypatch.setattr(studio, "_stitch", lambda clips, durations=None, **k: clips[0])
+    monkeypatch.setattr(studio, "_trim_to_speech", lambda clip: (clip, 8.0))
+
+    studio._produce_clips_veo_fal(
+        str(tmp_path / "frame.png"), ["대사 하나."], pick_episode_style("x")
+    )
+
+    assert len(calls) == 3
+    seeds = {seed for _p, seed in calls}
+    assert len(seeds) == 1, "재시도가 seed를 바꾸면 비트 음색이 갈라진다"
+    prompts = [p for p, _s in calls]
+    assert len(set(prompts)) == 3, "프롬프트가 같으면 같은 결함이 재현된다"
+    assert "no text" in prompts[1] and "take 2" in prompts[1]
+
+
+def test_retry_render_failure_keeps_previous_clip(tmp_path, monkeypatch):
+    """재생성이 실패해도 런을 죽이지 않고 직전 클립을 그대로 쓴다.
+
+    실측 2026-07-29: 마지막 재시도의 fal 결과 조회가 422를 뱉어 클립 3개(~$1.2)를 만든
+    런이 통째로 죽었다. 결함 있는 클립이라도 살리는 게 런 전체를 잃는 것보다 낫다.
+    """
+    from nutti.integrations.video import VideoRenderError
+
+    first = tmp_path / "first.mp4"
+    first.write_bytes(b"first")
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    calls = {"n": 0}
+
+    def fake_generate(client, prompt, cur, frame, lock, seed):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return str(first)
+        raise VideoRenderError("Veo(fal) 결과 조회 HTTP 422")
+
+    monkeypatch.setattr(studio, "_generate_and_trim_clip", fake_generate)
+    monkeypatch.setattr(studio, "_qc_check_beat", lambda *a, **k: ["text_overlay"])
+    monkeypatch.setattr(studio, "_chain_frame", lambda _c: None)
+    monkeypatch.setattr(studio, "_stitch", lambda clips, durations=None, **k: clips[0])
+    monkeypatch.setattr(studio, "_trim_to_speech", lambda clip: (clip, 8.0))
+
+    final, _total = studio._produce_clips_veo_fal(
+        str(tmp_path / "frame.png"), ["대사 하나."], pick_episode_style("x")
+    )
+
+    assert final == str(first)
+    assert first.exists(), "폴백 대상이 될 클립을 미리 지우면 안 된다"
+
+
 def test_punch_in_default_disabled():
-    """펀치인 기본값은 1.0(비활성) — 교차 줌이 강아지 크기를 비트마다 들쭉날쭉하게
-    만들어 연속 영상 체감을 깨는 직접 원인이었다(2026-07-10 PO). 켜려면 env 옵트인."""
+    """펀치인 기본값은 비활성(1.0) — 2026-07-29 PO 실물 판정 "화면전환이 너무 잦아
+    눈이 아프다"로 되돌렸다. 켤 때는 env 옵트인(주기·진폭을 함께 낮춰서)."""
     from nutti.config import Settings
 
     assert Settings(NUTTI_ENV="test").veo_fal_punch_in_scale == 1.0
 
 
 def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):
-    """디졸브 불가(길이 미상) concat 폴백에서도 (옵트인 시) 교차 펀치인이 유지된다."""
+    """디졸브 불가(길이 미상) concat 폴백에서도 펀치인이 유지된다(두 경로 동일 정규화)."""
     import subprocess as _sp
 
     captured: dict = {}
@@ -506,7 +616,7 @@ def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):
     studio._stitch(["a.mp4", "b.mp4"])  # durations 없음 → concat 경로
     joined = " ".join(captured["cmd"])
     assert "concat=n=2" in joined
-    assert joined.count("crop=720:1280") == 1  # 입력 0만 펀치인
+    assert joined.count("zoompan=") == 2  # 두 입력 모두 시간 스텝 펀치인
 
 
 # --- 자막 굽기(_burn_captions) ---
@@ -1608,10 +1718,10 @@ def test_frame_prompt_includes_food_bowl_matching_beats():
     assert "snack bowl" not in VideoStudio._frame_prompt(without_food, style)
 
 
-def test_produce_clips_feeds_only_first_beat(tmp_path, monkeypatch):
-    """먹방은 첫 비트에서만 집어 먹는다(2026-07-23 PO: 한 번이면 충분·여러 번은 충돌·
-    2번째부터 그릇에 간식이 도로 차오름). 2번 비트부터는 food 텍스트가 빠져 그릇을 다시
-    그리지 않는다 — 시각 연속성은 체이닝이 잇는다."""
+def test_produce_clips_feeds_first_and_last_beat(tmp_path, monkeypatch):
+    """먹방은 첫 비트와 마지막 비트에서 각각 한 입 먹는다(2026-07-30 PO "처음에 한번
+    마지막 비트에 한번"). 중간 비트는 food 텍스트가 빠져 그릇을 다시 그리지 않는다 —
+    안 그러면 먹은 간식이 도로 차오른다(2026-07-23 실측). 시각 연속성은 체이닝이 잇는다."""
     prompts: list[str] = []
     studio = _wiring_capture_studio(tmp_path, monkeypatch, prompts)
     style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
@@ -1619,9 +1729,21 @@ def test_produce_clips_feeds_only_first_beat(tmp_path, monkeypatch):
         "frame.png", ["비트1", "비트2", "비트3"], style, food="fresh carrot sticks"
     )
     assert len(prompts) == 3
-    assert "snack bowl with fresh carrot sticks" in prompts[0]  # 첫 비트만 집어 먹기
+    assert "snack bowl with fresh carrot sticks" in prompts[0]  # 첫 비트
     assert "pick up a single piece" in prompts[0]
-    assert all("snack bowl" not in p for p in prompts[1:])  # 이후 비트는 그릇 리필 없음
+    assert "snack bowl with fresh carrot sticks" in prompts[2]  # 마지막 비트
+    assert "pick up a single piece" in prompts[2]
+    assert "snack bowl" not in prompts[1]  # 중간 비트는 그릇 리필 없음
+
+
+def test_produce_clips_single_beat_feeds_once(tmp_path, monkeypatch):
+    """비트가 1개면 첫 비트=마지막 비트라 먹는 지시가 중복되지 않는다."""
+    prompts: list[str] = []
+    studio = _wiring_capture_studio(tmp_path, monkeypatch, prompts)
+    style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
+    studio._produce_clips_veo_fal("frame.png", ["비트1"], style, food="fresh carrot sticks")
+    assert len(prompts) == 1
+    assert prompts[0].count("pick up a single piece") == 1
 
 
 def test_produce_clips_food_unlocks_and_chains(tmp_path, monkeypatch):
@@ -2364,9 +2486,13 @@ def test_qc_check_beat_final_beat_skips_tail_convergence(tmp_path, monkeypatch):
     assert studio._qc_check_beat("c.mp4", "f.png", lock=True, final_beat=True) == []
 
 
-def test_produce_clips_qc_retry_offsets_seed(tmp_path, monkeypatch):
-    """QC 재생성은 seed를 오프셋한다 — 같은 seed+같은 프롬프트 재제출은 같은 결함
-    (텍스트 오버레이 등)을 그대로 재현할 수 있어 재시도가 무효가 되기 때문."""
+def test_produce_clips_qc_retry_keeps_seed(tmp_path, monkeypatch):
+    """QC 재생성이 seed를 유지한다 — seed가 음색을 좌우하므로 재생성된 비트만 목소리가
+    갈라지면 안 된다(2026-07-29 PO '비트별로 목소리가 다 다름').
+
+    2026-07-10에는 같은 seed+같은 프롬프트가 같은 결함을 재현한다는 이유로 seed를
+    오프셋했는데, 이제 결함 회피는 프롬프트 교정 문구(retry_hint)가 맡는다.
+    """
     bad = tmp_path / "bad.mp4"
     bad.write_bytes(b"bad")
     good = tmp_path / "good.mp4"
@@ -2407,7 +2533,7 @@ def test_produce_clips_qc_retry_offsets_seed(tmp_path, monkeypatch):
         VideoStudio, "_stitch", lambda self, clips, durs=None, **kw: str(tmp_path / "f.mp4")
     )
     studio._produce_clips_veo_fal("frame.png", ["비트1"], pick_episode_style("x"))
-    assert seeds == [123, 124]  # 최초 seed → 재생성 seed+1
+    assert seeds == [123, 123]  # 재생성도 같은 seed(음색 유지)
 
 
 # --- 경계별 디졸브 기록·자막 타이밍 동기화(2026-07-10 PO) ---
@@ -2472,3 +2598,45 @@ def test_burn_captions_uses_per_boundary_dissolves(tmp_path, monkeypatch):
     # 전환 시점 = 7.0 - 0.08/2 = 6.96초(경계별 값 기준, 대표값 0.25 기준 6.875 아님).
     assert "between(t,0.000,6.960)" in joined
     assert "between(t,6.960," in joined
+
+
+def test_voice_spec_pins_without_safety_trigger_form():
+    """목소리 사양 리버트 가드 + **항목화 재발 방지**(2026-07-30 실측).
+
+    Veo는 음색을 클립마다 새로 추첨하므로(voice id·reference audio 없음) 프롬프트가
+    유일한 통제 수단이다. 그래서 음색 어휘는 핀한다.
+
+    단 이 블록을 "FIXED SPEC" + `Gender:` 같은 **개별 항목으로 강조하면 fal이 영상 생성을
+    거부한다**(invalid_request — 라이브 런 2건 사망). 같은 어휘가 산문에 묻혀 있으면 통과한다.
+    그래서 어휘는 유지하되 항목화 형태로 되돌아가는 것을 막는다.
+    """
+    from nutti.integrations.video import VeoPromptBuilder
+
+    voice = VeoPromptBuilder._VOICE
+    # 핵심 음색 어휘(어리고 귀여운 톤) — PO 지시의 실체.
+    for word in ("squeaky", "feather-light", "very high-pitched", "clearly feminine", "cute"):
+        assert word in voice, f"음색 어휘 누락: {word}"
+    # 배제 목록(낮고 성숙한 톤으로 새는 것 차단).
+    for word in ("never deep", "never husky", "never mature-sounding"):
+        assert word in voice, f"배제 어휘 누락: {word}"
+    # 안전 축(성별·나이 무관): 공명·볼륨·감정 진폭.
+    for word in ("forward and light", "never projects", "narrow and flat"):
+        assert word in voice, f"안전 통제 축 누락: {word}"
+    # 항목화 형태 금지 — 이 형태가 안전필터 거부를 유발했다.
+    assert "FIXED SPEC" not in voice, "항목화 형태는 fal이 영상 생성을 거부한다(실측)"
+    assert "Gender:" not in voice, "성별을 독립 항목으로 강조하면 거부된다(실측)"
+
+
+def test_voice_never_names_a_child():
+    """⚠️ 안전필터 가드: 목소리 묘사에 아동 지시어가 들어가면 Veo가 영상 생성을 거부한다.
+
+    2026-07-29 실측: "little-girl"·"about 6 years old"가 옷 갖춘 직립 마스코트 이미지와
+    합쳐져 invalid_request로 라이브 런 2건이 죽었다. 어리고 귀여운 톤은 음색 기술자로만
+    표현해야 한다 — 이 테스트는 그 사고 경로가 되살아나는 것을 막는다.
+    """
+    from nutti.integrations.video import VeoPromptBuilder
+
+    low = VeoPromptBuilder._VOICE.lower()
+    for banned in ("little girl", "little-girl", "child", "kid", "years old",
+                   "toddler", "infant", "schoolgirl", "young girl"):
+        assert banned not in low, f"아동 지시어가 들어갔다(안전필터 거부 위험): {banned}"

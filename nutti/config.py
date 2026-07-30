@@ -131,13 +131,22 @@ class Settings(BaseSettings):
     # 그 순간을 부드럽게 가린다(근본 제거가 아닌 완화 — 2026-06-29 PO 옵션 B). 0이면
     # 디졸브 없이 단순 concat. 너무 길면 대사가 겹쳐 잘리므로 0.2~0.4초 권장.
     veo_fal_crossfade_sec: float = Field(default=0.35, alias="NUTTI_VEO_FAL_CROSSFADE_SEC")
-    # 비트 경계 점프컷 위장 + 시각 리듬용 교차 펀치인(디지털 줌) 배율(2026-07-06 PO).
-    # 짝수 비트(1·3번째 — 훅 포함)를 이 배율로 확대 크롭해 컷마다 화면 크기가 교차되게
-    # 한다. 1.0 이하면 비활성. 크롭 세로 기준은 상단 1/3(얼굴 보존). 켤 땐 1.08~1.15.
-    # 기본 1.0(비활성, 2026-07-10 PO): 교차 줌이 "강아지 크기가 비트마다 들쭉날쭉해
-    # 연속 영상 같지 않다"는 체감의 직접 원인 — 점프컷 위장은 유사도 컷(임계 이하
-    # 최이른 프레임)+마이크로 하드컷이 대신하므로 위장용 줌은 역효과만 남았다.
+    # 시각 리듬용 펀치인(디지털 줌) 최대 배율. 1.0 이하면 비활성.
+    # 연혁: 비트 단위 교차 줌(2026-07-06) → 비활성(2026-07-10 PO "비트마다 크기가
+    # 들쭉날쭉") → 2026-07-29 시간 스텝 방식으로 부활. 종전 문제는 "8초에 한 번, 비트
+    # 단위로" 크기가 바뀌어 연속성 파괴로만 읽힌 것 — 이번엔 클립 안에서
+    # punch_in_period_sec마다 작은 폭으로 단계를 밟아 편집 리듬으로 읽히게 한다
+    # (2026 쇼츠 잔존 데이터: 시각 변화 1.5~2초 주기가 하강 곡선을 플래토로 바꾼다).
+    # 진폭이 크면 예전 지적이 재발하므로 1.10~1.15 범위를 지킬 것.
+    # 2026-07-29 PO 실물 판정: 2초 주기 줌은 "화면전환이 너무 잦아 눈이 아프다" → 기본
+    # 비활성(1.0)으로 되돌림. 잔존 벤치마크(1.5~2초 주기)보다 PO 육안 판정이 우선이다.
+    # 다시 켤 때는 진폭·주기를 함께 낮춰서(예: SCALE=1.06, PERIOD=4) 시작할 것.
     veo_fal_punch_in_scale: float = Field(default=1.0, alias="NUTTI_VEO_FAL_PUNCH_IN_SCALE")
+    # 펀치인 줌 단계가 바뀌는 주기(초). 0 이하면 시간 스텝 없이 클립 전체 고정 줌
+    # (= 종전 비트 단위 동작). 1.2초 미만은 노이즈로 읽히므로 1.5~2.5초 권장.
+    veo_fal_punch_in_period_sec: float = Field(
+        default=2.0, alias="NUTTI_VEO_FAL_PUNCH_IN_PERIOD_SEC"
+    )
     # 비트별 대사를 하단 한글 자막으로 굽기(스티칭 후 ffmpeg drawtext, best-effort).
     # 기본 True — 2줄/26px 렌더 결과를 PO가 승인(2026-07-07, 최초 "이상함" 판정 시의
     # 렌더 결함은 26px 수정으로 이미 해소됨). Veo가 임의로 박는 깨진 자막은
@@ -234,6 +243,9 @@ class Settings(BaseSettings):
     # 검수 대기 동작
     review_timeout_sec: int = Field(default=3600, alias="NUTTI_REVIEW_TIMEOUT_SEC")
     review_poll_interval_sec: float = Field(default=3.0, alias="NUTTI_REVIEW_POLL_INTERVAL_SEC")
+    # 반려 사유 한 줄 입력을 기다리는 시간(초, 2026-07-29 PO). 사유 입력은 선택이라
+    # 검수 대기(review_timeout_sec)와 달리 짧게 둔다 — 안 적으면 그냥 넘어간다.
+    reject_reason_timeout_sec: int = Field(default=180, alias="NUTTI_REJECT_REASON_TIMEOUT_SEC")
     review_store_path: str = Field(default="data/reviews.json", alias="NUTTI_REVIEW_STORE_PATH")
 
     # 4단계: 업로드
@@ -268,6 +280,21 @@ class Settings(BaseSettings):
     calculator_url: str = Field(
         default="https://nutti.co.kr/calculator.html",
         alias="NUTTI_CALCULATOR_URL",
+    )
+
+    # ---- 업로드 직후 자동 댓글(2026-07-30 PO "간식계산기 링크는 설명란에 넣고 댓글에 자동으로") ----
+    # 대사(CTA)에서는 유도를 전면 금지했으므로(validate_script_body의 _BANNED_CTA_WORDS)
+    # 계산기 유입 경로는 설명란과 이 댓글 둘뿐이다.
+    # ⚠️ 댓글 **고정(pin)** 은 YouTube Data API가 제공하지 않는다 — 자동으로 달리기만 하고,
+    # 상단 고정이 필요하면 Studio에서 수동으로 해야 한다.
+    # ⚠️ 이 기능은 `youtube.force-ssl` 스코프가 필요하다(업로드 전용 스코프로는 403).
+    # 스코프가 없으면 댓글만 실패하고 업로드는 성공으로 유지된다(best-effort).
+    youtube_auto_comment: bool = Field(default=True, alias="NUTTI_YOUTUBE_AUTO_COMMENT")
+    # 댓글 본문. 링크는 코드가 UTM(utm_medium=comment)을 붙여 뒤에 이어붙인다 —
+    # 설명란(utm_medium=shorts)과 구분해야 어느 경로가 유입을 만드는지 GA에서 갈린다.
+    youtube_comment_text: str = Field(
+        default="우리 아이 몸무게로 하루 간식량 계산해보기 🐾",
+        alias="NUTTI_YOUTUBE_COMMENT_TEXT",
     )
 
 

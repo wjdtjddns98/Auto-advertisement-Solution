@@ -127,6 +127,11 @@ def _asciify_font_path(font: str) -> str:
 # 스타일 요청). 문장 종결부호 뒤 공백에서 나눈다 — ai_text._split_into_beats의 문장
 # 분리 정규식과 동일 패턴(대본이 비트당 한국어 2문장을 강제하므로 보통 2개로 나뉜다).
 _CAPTION_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。…])\s+")
+# 문장 세그먼트를 다시 쪼개는 최대 어절 수. 늘리면 한 화면에 더 많이 뜨고 전환이 느려진다.
+# 3(무음 가독 2~4단어 규칙)으로 시작했으나 2026-07-29 PO 실물 판정 "화면전환이 너무 잦아
+# 눈이 아프다"로 8로 완화 — 대본 한 문장이 보통 5~7어절이라 사실상 종전 문장 단위 표시로
+# 돌아가고, 비정상적으로 긴 문장만 갈라 화면 밖으로 넘치는 것을 막는 안전판으로 남는다.
+_CAPTION_MAX_WORDS = 8
 # 화면 자막(깨진 한글 텍스트) 억제용 negative_prompt는 이제 설정값
 # `Settings.veo_fal_negative_prompt`로 단일화되어 FalVeoClient._submit이 fal에 직접
 # 보낸다(2026-06-18). 프롬프트 본문의 "no on-screen text" 지시와 이중 방어를 이룬다.
@@ -201,7 +206,29 @@ def _raise_for_status(resp, what: str) -> None:
     if not isinstance(code, int):
         raise VideoRenderError(f"{what} 응답에 유효한 status_code가 없습니다")
     if code >= 400:
+        # 4xx 사유를 로그로만 남긴다(예외 메시지엔 여전히 상태코드만 — redaction 유지).
+        # 2026-07-29 실측: fal 422로 라이브 런이 두 번 연속 죽었는데 사유가 어디에도
+        # 남지 않아(본문 전면 차단) 원인 추적이 불가능했다. 안전필터 거부인지 잘못된
+        # 파라미터인지 구분하려면 fal이 준 detail이 필요하다.
+        log.warning("video.http_error", what=what, status=code, detail=_error_detail(resp))
         raise VideoRenderError(f"{what} HTTP {code}")
+
+
+# fal 오류 본문에서 사유만 뽑는 상한 길이 — 프롬프트 원문이 통째로 로그에 실리지 않게 한다.
+_ERROR_DETAIL_MAX = 300
+
+
+def _error_detail(resp) -> str:
+    """fal 오류 응답에서 사람이 읽을 사유를 짧게 뽑는다(실패해도 예외를 내지 않는다)."""
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001 - 비-JSON 오류 본문 방어
+        return (getattr(resp, "text", "") or "")[:_ERROR_DETAIL_MAX]
+    if isinstance(data, dict):
+        for key in ("detail", "error", "message"):
+            if key in data:
+                return str(data[key])[:_ERROR_DETAIL_MAX]
+    return str(data)[:_ERROR_DETAIL_MAX]
 
 
 def _safe_send(send, what: str):
@@ -239,7 +266,7 @@ def _send_json(
     *,
     sleep=None,
     max_transient_retries: int = 0,
-    retry_400: bool = False,
+    retry_4xx: bool = False,
 ) -> dict:
     """전송 + 상태 검증 + JSON 파싱을 한 번에 — 어떤 실패든 VideoRenderError로.
 
@@ -250,7 +277,11 @@ def _send_json(
     재시도 없이 기존 동작(즉시 전파)을 유지한다(Kling submit/result).
     영구 오류(그 외 4xx)·전송/JSON 파싱 실패는 재시도 없이 즉시 전파한다.
 
-    `retry_400=True`면 HTTP 400도 일시 오류로 분류해 재시도한다 — Veo 제출
+    `retry_4xx=True`면 HTTP 400·422도 일시 오류로 분류해 재시도한다. 2026-07-30 실측:
+    Veo 결과 조회가 422를 뱉어 **클립 2개를 이미 만든(과금 완료) 런이 통째로 죽었다** —
+    같은 입력의 재시도는 200이었다. 이 플래그를 쓰는 지점은 생성이 끝난 뒤의 결과 조회이거나
+    과금 전 제출이라, 영구 4xx를 몇 번 더 두드려도 잃을 것이 없다. 반대로 재시도하지 않으면
+    조회 한 번의 간헐 4xx로 편 전체가 날아간다. — Veo 제출
     (predictLongRunning)은 동일한 요청이 400과 200을 비결정적으로 오가는 간헐
     400이 실측 확인됐다(2026-06-15 유료 실측: 동일 body가 한 호출은 400, 직후
     재시도는 200 + operation name 발급). 영구 400(잘못된 입력)도 함께 재시도되나
@@ -264,7 +295,7 @@ def _send_json(
         resp = _safe_send(send, what)
         code = getattr(resp, "status_code", None)
         transient = isinstance(code, int) and (
-            code == 429 or code >= 500 or (retry_400 and code == 400)
+            code == 429 or code >= 500 or (retry_4xx and code in (400, 422))
         )
         if transient and attempts < max_transient_retries:
             attempts += 1
@@ -369,15 +400,30 @@ class EpisodeStyle(NamedTuple):
 # 2026-07-16 소품·포맷 추가 — 매번 다른 옷·소품·연출). 항목을 추가/삭제하면 조합 수가
 # 바뀐다(현재 의상5×장소6×소품6×포맷3 = 540 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
 # 대사 인용 구분자와 충돌해 주입 방어 검증이 깨진다(U+2019는 허용).
-# 2026-07-23 PO "개밤티": 의상을 일부러 촌스럽고 과하고 안 어울리게 — 밤티(못생김·촌스러움·
-# 어설픔을 유머로 소비하는 밈, 라인플레이 아바타 유래). 클래싱 색·요란한 무늬·과잉 장식·
-# 안 맞는 핏의 우스꽝스러운 조합으로 "귀여운 비숑 × 개촌스러운 옷"의 갭 유머를 노린다.
+# 2026-07-29 PO: 개밤티(요란·과잉·오버사이즈) 폐기 — 거추장스러워 몸·표정을 가리고
+# 지저분하게 보인다. 2000년대 한국 스타일로 교체: 단정한 단색·슬림핏·레이어 최소(한 겹),
+# 무늬·장식 없음. 옷이 캐릭터를 덮지 않는 게 핵심 제약이다.
+# ⚠️ 의상에 글자·숫자·로고·프린트를 절대 넣지 말 것 — 화면 텍스트 QC(_qc_text_overlay)가
+# 옷의 프린트도 "렌더된 글자"로 판정해 전 비트가 재시도→폴백으로 떨어진다(2026-07-29
+# 실측: "small printed number on the chest" → 3비트×3회 전부 text_overlay, 클립 9개 과금).
+# 의상은 **상의만** — 바지·전신 착장은 금지다(2026-07-29 실측). 소매·바지로 사지를 덮으면
+# 그림이 "옷 입은 사람 아기"로 읽혀 Veo 안전필터가 이미지+프롬프트를 통째로 거부한다
+# (invalid_request로 라이브 런 2건 사망). 뒷다리·발은 항상 개 그대로 보이게 둔다.
+# ⚠️ 이 문구는 FLUX(Kontext)와 Veo 양쪽 안전필터를 통과해야 한다. "bare"·"no pants"
+# 같은 탈의 뉘앙스·부정문은 쓰지 말 것 — 실측 2026-07-29: "hind legs and paws stay bare
+# / no trousers, no pants"가 has_nsfw_concepts=True를 유발해 프레임이 3연속
+# 플레이스홀더(too_small)로 나와 런이 죽었다. 원하는 그림을 긍정문으로만 서술한다.
+_OUTFIT_RULE = (
+    "The outfit is a single top worn on the upper body only, ending at the waist; below it "
+    "the puppy keeps its own natural fluffy white fur, with its dog hind legs and paws "
+    "fully visible as a real dog."
+)
 _EPISODE_OUTFITS = [
-    "a garish clashing neon tracksuit with mismatched lime-green and hot-pink stripes",
-    "an oversized loud leopard-print coat paired with a clashing red tartan scarf",
-    "a gaudy gold sequined jacket that is comically too big and sags off its shoulders",
-    "a tacky mustard-yellow knit vest layered over a clashing purple floral shirt",
-    "a shiny turquoise tracksuit jacket studded with garish rhinestones and a clashing orange collar",
+    "a slim navy track jacket with two thin white side stripes, zipped up neatly",
+    "a clean white collared polo shirt with thin navy trim on the collar",
+    "a plain red short-sleeve tee with no print or pattern of any kind",
+    "a slim light-blue denim jacket worn open over a plain white tee",
+    "a simple light-grey zip-up hoodie with the hood down, fitted and plain",
 ]
 # 소품 로테이션(2026-07-16 PO — 옷만 바뀌어 단조로움, 모자·머리 위 선글라스 같은 소품
 # 추가). 빈 문자열=소품 없음(2/6 확률 — "조금씩" 추가라 매편 소품은 과함). 규칙:
@@ -414,12 +460,16 @@ _VET_SETTING = "sitting at the examination desk of a bright, tidy veterinary cli
 # (2026-07-21 PR #117에서 같은 전환을 했다가 철회한 이력 있음 — 레시피는 PR #117 diff.)
 # 2026-07-23 PO "의인화 — 사람 아기처럼" 전환: 앉은 자세 → 직립(standing) 상황으로 통일
 # (외형·모션도 직립으로 일치). 사람 아기처럼 서서 말하는 상황들. ASCII 작은따옴표 금지.
+# ⚠️ 글자가 나올 만한 배경(번화가 간판·가게 입구·표지판·포장지)을 넣지 말 것 —
+# 화면 텍스트 QC(_qc_text_overlay)는 프레임 안 글자를 전부 잡으므로 배경 간판 하나로
+# 전 비트가 재시도→폴백으로 떨어진다(2026-07-29 실측: "busy city sidewalk" 편이
+# 비트1에서만 3회 재생성 후 런 사망, 의상은 무지였다).
 _EPISODE_SETTINGS = [
-    "standing on a busy city sidewalk like a street interview",
+    "standing on a quiet residential street with plain walls and no signs",
     "standing in a cozy living room under warm lamps",
     "standing in a sunny park on a nice afternoon",
     "standing in a bright modern kitchen",
-    "standing in front of a cute pet shop entrance",
+    "standing on a wooden terrace surrounded by green plants",
     "standing at a tidy home office like a news anchor",
 ]
 # 시작 프레임 구도·표정 로테이션(2026-07-20 PO — "썸네일이 전부 같은 자세"): Shorts
@@ -581,24 +631,72 @@ class VeoPromptBuilder:
     # 발음 교정 블록·CTA 앵커는 그대로 두고 태도 어휘만 교체한다.
     _VOICE = (
         "Voice (must be EXACTLY the same single voice in every clip of this series, like "
-        "one specific recognizable person with a fixed vocal fingerprint): a little-girl "
-        "Korean voice, sounding about 6 years old, slightly high-pitched, but delivered "
+        # 2026-07-29: 아동 나이·성별 명시("little-girl", "about 6 years old")를 뺐다 —
+        # 옷을 갖춰 입은 직립 마스코트 이미지와 합쳐지면 Veo 안전필터가 아동 콘텐츠로
+        # 보고 거부한다(실측: invalid_request "Could not generate images with the given
+        # prompts and images"로 라이브 런 2건 사망). 음색(작고 높은 톤)은 나이를 말하지
+        # 않고 묘사로만 유지한다.
+        # 2026-07-30 PO "비트마다 목소리 다 다르잖아": 비트별 독립 생성이라 Veo는 매 클립
+        # 음색을 새로 추첨한다(voice id·reference audio 파라미터가 없어 구조적). seed 통일은
+        # 이미 적용 중이고 오디오를 완전 통제하지 못하므로, 남은 카드는 음색을 **좁게 특정**
+        # 하는 것뿐이다 — 7/29에 안전필터 때문에 나이·성별을 뺀 뒤 특정 신호가 약해졌던 걸
+        # 나이·성별을 말하지 않는 질감·음역 기술자로 되살린다(아동 지시어는 계속 금지).
+        # 2026-07-30 PO "아예 내가 원하는 목소리 톤이 아니야 — 좀 더 어린 귀여운 여자아이
+        # 말투로": 음색을 훨씬 어리고 귀엽게 민다. ⚠️ 단 "little girl"·"child"·나이 숫자
+        # 같은 **아동 지시어는 절대 쓰지 않는다** — 옷 갖춰 입은 직립 마스코트 이미지와
+        # 합쳐지면 Veo 안전필터가 아동 콘텐츠로 보고 통째로 거부한다(2026-07-29 실측:
+        # invalid_request로 라이브 런 2건 사망). 그래서 나이를 말하는 대신 음색의 물리
+        # 특성(아주 높고 가볍고 얇은·삑삑거리는)과 만화 캐릭터 비유로만 표현한다.
+        # 태도(퉁명·심드렁)는 그대로 유지 — PO 요구는 "귀엽고 어린데 퉁명스러운"이다.
+        # 2026-07-30 PO "목소리도 페르소나 만들거나 파서 방식으로 고정 박으면 안 되냐,
+        # 진짜 완전 디테일하게": 음색을 산문 한 덩어리로 두면 모델이 일부만 집어간다 —
+        # 마스코트 외형(_MASCOT_APPEARANCE)처럼 **고정 사양 시트**로 항목화해 각 축을
+        # 개별 제약으로 준다. 항목이 빠지면 테스트(test_voice_persona_sheet_pins)가 깨진다.
+        # ⚠️ 여기서도 아동 지시어(little girl/child/나이 숫자)는 절대 금지 — 안전필터.
+        # 나이 대신 "작은 만화 동물 캐릭터"라는 프레이밍으로 어린 느낌을 낸다.
+        # ⚠️⚠️ 2026-07-30 실측 — 이 블록을 "고정 사양 시트"로 항목화(FIXED SPEC + Pitch/
+        # Timbre/**Gender: clearly feminine**/... 개별 항목)했더니 **fal이 영상 생성을 거부**
+        # 했다: invalid_request "Could not generate images with the given prompts and images"
+        # → 라이브 런 2건 연속 사망(클립 0개, 첫 비트부터 거부). 7/29 아동 표현 사고와 같은
+        # 코드다. 같은 어휘가 산문 안에 묻혀 있던 직전 커밋(b559b3d)에서는 영상이 정상
+        # 생성됐으므로(PO가 톤만 반려), 범인은 어휘 자체가 아니라 **성별·어림을 독립 항목으로
+        # 강조한 형태**로 보인다. 그래서 통과가 실측된 산문 형태로 되돌렸다.
+        # 교훈: 목소리의 나이·성별을 강조하면 강조할수록 안전필터에 가까워진다 — 이 방향으로
+        # 더 밀 수 없다(더 어리고 귀여운 톤은 TTS로 오디오를 직접 만드는 경로만 가능).
+        "one specific recognizable person with a fixed vocal fingerprint): a tiny, squeaky, "
+        "feather-light and very high-pitched cartoon-character Korean voice — thin, bright "
+        "and adorable in timbre, clearly feminine, with a slightly nasal edge, a very narrow "
+        "vocal body, and a consistently high register that never drops into a lower or fuller "
+        "tone mid-clip. The timbre itself is cute and endearing even while the attitude is "
+        "blunt. This voice is never deep, never husky, never "
+        "breathy, never raspy, never resonant or full-bodied, and never mature-sounding. "
+        # 아래 3개는 항목화 시도에서 새로 넣었던 통제 중 **성별·나이와 무관해 안전한 것**만
+        # 산문으로 남긴 것이다(공명·볼륨·감정 진폭). 비트 간 편차를 줄이는 데 기여한다.
+        "The sound forms forward and light rather than from the chest, at a steady moderate "
+        "volume that never projects, shouts, or swells, with a deliberately narrow and flat "
+        "emotional range — no rising excitement, no gasps, and no audible breaths or sighs "
+        "before or between lines. "
+        # "microphone"은 쓰지 않는다 — 화면 밖 인터뷰 마이크 연출(_MIC)과 어휘가 겹쳐
+        # 정면 발화 모드에도 마이크가 새고(테스트 가드), Veo가 화면에 마이크를 렌더할 수 있다.
+        "Treat every clip in this series as one continuous take by the same single performer "
+        "in one sitting — same throat, same recording setup, same room — so the voice cannot "
+        "sound like a different performer from one clip to the next. It is delivered "
         "with a blunt, curt, cocky and smug attitude — dry, flat and deadpan, clearly "
-        "unbothered and a little annoyed, talking down to the listener like a bratty kid "
-        "who is sure she knows better and cannot be bothered to be nice, never sweet, "
+        "unbothered and a little annoyed, talking down to the listener like someone "
+        "sure they know better and cannot be bothered to be nice, never sweet, "
         "eager, gentle, cheerful, or sing-songy, at a consistent speaking rhythm. "
         # 발음 교정(2026-07-06 PO 실측: 쉬운 단어도 발음이 뭉개짐 — 아이 페르소나의
         # 혀 짧은 딕션 재현이 유력 원인). 톤은 아이답게 유지하되 발음만 성인급 정확도로.
-        "Her Korean PRONUNCIATION however is flawlessly clear and precise: perfect "
+        "The Korean PRONUNCIATION however is flawlessly clear and precise: perfect "
         "standard Korean diction, every syllable fully and accurately articulated, "
         "never slurred, never mumbled, never babyish or lisping — like a professional "
-        "child voice actor whose enunciation is adult-level crisp and correct. "
+        "voice actor whose enunciation is crisp and correct. "
         "Keep the identical timbre, pitch, accent, speaking speed, and this same dry "
         "sassy attitude in every clip. Keep this exact same voice even on excited, "
         "exclamatory, or call-to-action lines: do not raise the pitch, do not get louder, "
         "do not turn into an excited announcer or a promotional voice-over, and never "
         "switch to a different speaker or a different age — every line, including the "
-        "final call-to-action, must sound like the exact same sassy little girl in the "
+        "final call-to-action, must sound like the exact same sassy character in the "
         "same dry, unbothered tone as the earlier lines. "
         # 발화 후 잉여 구간 BGM 채움 억제 — Veo가 대사가 끝난 뒤 남는 시간을 배경음악으로
         # 채우면 무음 트림이 발화 끝을 못 잡아 끝부분 헛짓이 남는다(2026-06-29 PO 실측).
@@ -689,12 +787,50 @@ class VeoPromptBuilder:
     )
     # 립싱크 강제 — 간헐적으로 입을 안 움직이며 내레이션처럼 나오는 클립 방지
     # (2026-07-06 PO 실측). 모든 비트 프롬프트에 포함.
+    # 2026-07-29 PO 실측: "앞부분에 입은 안 움직이고 대사가 나옴" — FLF 앵커(정지 프레임)에서
+    # 출발하느라 Veo가 첫 순간을 정지 화면으로 물고 있고 음성만 먼저 나가는 경향. 첫 프레임
+    # 동시 시작을 명시적으로 못박는다.
     _LIPSYNC = (
         "The puppy visibly speaks every word on camera: its mouth clearly opens and moves "
         "in sync with the spoken Korean line from the first word to the last. The voice is "
         "never detached narration or voice-over — it always comes from the puppy talking "
-        "on screen with matching mouth movements."
+        "on screen with matching mouth movements. The mouth is already moving on the very "
+        "first frame of the clip: the audio and the mouth movement start together at the "
+        "same instant, with no still, frozen or silent opening moment before the puppy "
+        "starts talking."
     )
+    # QC 재시도용 교정 문구(2026-07-29). seed를 유지한 채 샘플을 흔들면서, 잡힌 결함을
+    # 콕 집어 다시 지시한다 — 같은 seed+완전히 같은 프롬프트는 같은 결함을 재현하므로
+    # 문구 변화가 재시도의 유일한 동력이다. 사유 키는 _qc_check_beat가 만드는 값과 같다.
+    _RETRY_HINTS = {
+        "text_overlay": (
+            "Critical: the previous attempt rendered letters on screen. Render absolutely "
+            "no text, captions, subtitles, numbers or written characters anywhere in the "
+            "frame, including on clothing, props and background signage."
+        ),
+        "mid_freeze": (
+            "Critical: the previous attempt froze mid-clip. Keep continuous natural motion "
+            "through the entire clip with no frozen or repeated frames."
+        ),
+        "black_frame": (
+            "Critical: the previous attempt went dark. Keep the puppy fully lit and clearly "
+            "visible for the entire clip."
+        ),
+        "tail_not_converged": (
+            "Critical: the previous attempt drifted at the end. Finish on the same calm "
+            "pose and framing the clip started from."
+        ),
+    }
+
+    def retry_hint(self, reasons: list[str], attempt: int) -> str:
+        """QC 사유별 교정 문구 + 테이크 번호를 만든다(빈 사유면 테이크 번호만).
+
+        테이크 번호는 사유가 매핑에 없을 때도 프롬프트를 반드시 달라지게 하는 최소 변화다 —
+        seed를 고정한 채 재시도하므로 프롬프트가 같으면 결함이 그대로 재현된다.
+        """
+        hints = [self._RETRY_HINTS[r] for r in reasons if r in self._RETRY_HINTS]
+        return " ".join([*hints, f"This is take {attempt + 1} of this shot."])
+
     _NEGATIVE = (
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
         "costume, person in a costume, or plush toy. Strictly no additional animals, no "
@@ -768,7 +904,7 @@ class VeoPromptBuilder:
         scene = ""
         if style is not None:
             prop = f", with {style.prop}" if style.prop else ""
-            scene = f"The puppy wears {style.outfit}{prop}, {style.setting}. "
+            scene = f"The puppy wears {style.outfit}{prop}, {style.setting}. {_OUTFIT_RULE} "
         if food:
             scene += self._EATING_TEMPLATE.format(food=food) + " "
         mic = f"{self._MIC} " if off_screen_interviewer else ""
@@ -982,7 +1118,11 @@ class VideoStudio:
                 # 충돌). 2번 비트부터는 food 텍스트를 아예 빼 그릇을 다시 그리지 않는다 —
                 # 안 그러면 매 비트가 "당근 가득한 그릇"을 다시 렌더해 먹은 간식이 도로
                 # 차오른다(PO 실측). 그릇의 시각적 연속성은 체이닝된 끝 프레임이 잇는다.
-                beat_food = food if i == 1 else ""
+                # 2026-07-30 PO "처음에 한번 마지막 비트에 한번 먹는걸로": 첫 비트와 마지막
+                # 비트에만 간식을 붙인다(각 클립에서 한 입 — 클립당 1회 제한은 유지).
+                # 중간 비트는 여전히 food를 비워 그릇을 다시 렌더하지 않는다(먹은 간식이
+                # 도로 차오르는 실측 방어). 비트가 1개뿐이면 조건이 겹쳐 한 번만 붙는다.
+                beat_food = food if i in (1, len(beats)) else ""
                 prompt = builder.build_beat(
                     beat,
                     off_screen_interviewer=(style.fmt == "interview"),
@@ -1012,20 +1152,50 @@ class VideoStudio:
                     log.info(
                         "video.veo_fal.qc.retry", beat=i, attempt=attempt, reasons=reasons
                     )
+                    # 재시도는 **seed를 유지하고 프롬프트만 바꾼다**(2026-07-29 PO
+                    # "비트별로 목소리가 다 다름"). 종전엔 seed에 오프셋을 줘 결함 재현을
+                    # 피했는데(2026-07-10), 그 결과 재생성된 비트만 음색이 갈라졌다 —
+                    # 직전 런은 3비트가 각각 3회씩 재생성돼 비트마다 다른 목소리가 됐다.
+                    # 결함 회피는 seed가 아니라 결함을 콕 집는 교정 문구로 한다: 샘플이
+                    # 달라지면서 목소리를 결정하는 seed는 편 전체가 하나로 유지된다.
+                    # 재생성이 실패(fal 422 안전필터·일시 오류 등)해도 런을 죽이지 않는다 —
+                    # 이미 만든 클립(결함은 있지만 재생 가능)을 그대로 쓰고 넘어간다.
+                    # 실측 2026-07-29: 마지막 재시도의 결과 조회가 422를 뱉어 클립 3개
+                    # (~$1.2)를 만든 런이 통째로 죽었다. 그래서 옛 클립은 새 클립이 나온
+                    # 뒤에만 지운다(먼저 지우면 폴백할 대상이 사라진다).
+                    try:
+                        new_path = self._generate_and_trim_clip(
+                            client,
+                            f"{prompt} {builder.retry_hint(reasons, attempt)}",
+                            current_frame,
+                            frame_path,
+                            use_lock,
+                            video_seed,
+                        )
+                    except VideoRenderError as exc:
+                        log.warning(
+                            "video.veo_fal.qc.retry_failed",
+                            beat=i,
+                            attempt=attempt,
+                            error=type(exc).__name__,
+                        )
+                        break
                     Path(clip_path).unlink(missing_ok=True)
-                    # 재생성 seed는 오프셋을 준다 — 같은 seed+같은 프롬프트 재제출은 같은
-                    # 결함(텍스트 오버레이 등)을 그대로 재현할 수 있어 재시도가 무효가 된다.
-                    # 음색 seed 일관성보다 결함 제거가 우선(2026-07-10, 텍스트 QC와 함께).
-                    retry_seed = (video_seed + attempt) % (2**31)
-                    clip_path = self._generate_and_trim_clip(
-                        client, prompt, current_frame, frame_path, use_lock, retry_seed
-                    )
+                    clip_path = new_path
                     reasons = self._qc_check_beat(
                         clip_path, frame_path, use_lock, final_beat=final_beat
                     )
                 if reasons:
                     log.info("video.veo_fal.qc.fallback", beat=i, reasons=reasons)
-                log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
+                # seed를 함께 남긴다(2026-07-30): "비트마다 목소리가 다르다" 반려를 조사할 때
+                # 비트 간 seed 동일 여부를 로그로 확인할 수 없어 코드만 보고 추정해야 했다.
+                log.info(
+                    "video.veo_fal.clip.done",
+                    path=clip_path,
+                    beat=i,
+                    of=len(beats),
+                    seed=video_seed,
+                )
                 clips.append(clip_path)
                 # 가드된 체이닝(기본 모드만): 다음 비트가 있으면 이 클립의 끝 안정 프레임을
                 # 다음 시작 프레임으로 쓴다. 추출·품질 가드(검정/빈/가로) 실패 시 None → 원본
@@ -1861,18 +2031,38 @@ class VideoStudio:
         return self._concat(clips)
 
     def _input_norm(self, i: int) -> str:
-        """스티칭 입력 i의 정규화 필터 체인(픽셀포맷·fps·SAR·해상도 + 교차 펀치인).
+        """스티칭 입력 i의 정규화 필터 체인(픽셀포맷·fps·SAR·해상도 + 펀치인).
 
         모든 입력을 _STITCH_W×_STITCH_H로 통일해 xfade/concat 크기 불일치를 막는다.
-        punch_in_scale>1이면 짝수 비트(0·2… — 훅 포함)를 확대 후 원 해상도로 크롭해
-        컷마다 화면 크기가 교차되게 한다 — 동일 구도 점프컷을 의도된 편집으로 위장하고
-        시각 리듬을 만든다(2026-07-06 PO). 크롭 세로 기준은 상단 1/3(얼굴 보존).
+        punch_in_scale>1이면 디지털 줌으로 시각 리듬을 만든다:
+        · period>0(기본): 클립 **안에서** period초마다 줌 단계(1.0 → 중간 → 최대)를
+          밟는다. Veo 8초 원컷은 시각 변화가 8초에 한 번뿐인데, 2026 쇼츠 잔존
+          데이터는 1.5~2초 주기를 요구한다(같은 대사도 컷 3개는 하강 곡선, 15개는
+          플래토). 단계는 2초간 고정이라 프레임 간 흔들림이 없다.
+        · period<=0: 클립 단위 고정 줌(짝수 비트만 확대 — 2026-07-06 종전 동작).
+        클립 인덱스 i만큼 단계 위상을 밀어 비트 경계에서 같은 줌이 이어지지 않게 한다.
+        세로 기준은 상단 1/3(얼굴 보존).
         """
         # setsar=1은 체인 마지막에 — 펀치인 scale의 짝수 반올림이 미세 비율 오차(<0.1%,
         # 비가시)를 만들어 SAR이 1:1이 아니게 기록되는 것을 방지한다(실측 2026-07-06).
         base = f"[{i}:v]format=yuv420p,fps=30"
         s = float(getattr(self.settings, "veo_fal_punch_in_scale", 0.0) or 0.0)
-        if s > 1.0 and i % 2 == 0:
+        if s <= 1.0:
+            return f"{base},scale={_STITCH_W}:{_STITCH_H},setsar=1"
+        period = float(getattr(self.settings, "veo_fal_punch_in_period_sec", 0.0) or 0.0)
+        if period > 0:
+            # zoompan은 출력 fps 기본이 25라 fps=30을 명시해야 30fps 정규화가 깨지지
+            # 않는다. d=1이면 입력 프레임 1장당 출력 1장(길이 불변). z는 프레임 번호
+            # on으로 계산해 period초(=frames장)마다 3단계를 순환한다.
+            frames = max(1, int(round(period * 30)))
+            step = (s - 1.0) / 2
+            z = f"1+{step:.4f}*mod(floor(on/{frames})+{i},3)"
+            return (
+                f"{base},scale={_STITCH_W}:{_STITCH_H},"
+                f"zoompan=z='{z}':d=1:fps=30:s={_STITCH_W}x{_STITCH_H}"
+                ":x='iw/2-(iw/zoom/2)':y='ih/3-(ih/zoom/3)',setsar=1"
+            )
+        if i % 2 == 0:
             w2 = int(_STITCH_W * s) // 2 * 2
             h2 = int(_STITCH_H * s) // 2 * 2
             return (
@@ -2040,6 +2230,23 @@ class VideoStudio:
         segs = [s.strip() for s in _CAPTION_SENTENCE_SPLIT_RE.split(text.strip()) if s.strip()]
         return segs or ([text.strip()] if text.strip() else [])
 
+    @staticmethod
+    def _chunk_words(text: str, max_words: int = _CAPTION_MAX_WORDS) -> list[str]:
+        """세그먼트를 어절 max_words개 이하의 청크로 쪼갠다(무음 시청 가독).
+
+        2026 쇼츠 실측: 시청의 60~80%가 무음이고, 화면 텍스트는 프레임당 2~4단어일 때
+        무음 잔존이 25~40% 오른다. 종전엔 문장 단위(한글 ~20자, 6~7어절)를 통째로
+        띄워 한 번에 다 읽히지 않았다. 청크가 늘면 표시 전환도 잦아져(≈1.2~1.5초)
+        펀치인과 함께 시각 변화 주기를 채운다 — 표시 구간은 호출부가 글자 수 비례로
+        나누므로 여기선 분할만 한다. 어절 수가 기준 이하면 원문 그대로 반환한다.
+        """
+        words = text.split()
+        if len(words) <= max_words:
+            return [text.strip()] if text.strip() else []
+        n_chunks = -(-len(words) // max_words)  # 올림 나눗셈
+        size = -(-len(words) // n_chunks)  # 청크 수를 유지하며 균등 분배
+        return [" ".join(words[i:i + size]) for i in range(0, len(words), size)]
+
     def _drawtext_filter(
         self,
         line: str,
@@ -2151,7 +2358,11 @@ class VideoStudio:
             for k, beat in enumerate(beats):
                 beat_start, beat_end = starts[k], ends[k]
                 beat_width = max(0.0, beat_end - beat_start)
-                segments = self._split_caption_segments(beat)
+                segments = [
+                    chunk
+                    for seg in self._split_caption_segments(beat)
+                    for chunk in self._chunk_words(seg)
+                ]
                 total_chars = sum(len(seg) for seg in segments) or 1
                 seg_start = beat_start
                 for si, seg in enumerate(segments):
@@ -2329,11 +2540,19 @@ class VideoStudio:
             "A photorealistic tall vertical portrait-orientation starting frame for a "
             f"short-form video: {_MASCOT_APPEARANCE}, wearing {style.outfit}{prop}, "
             f"{style.setting}, "
-            f"{shot}. {food}{_CINEMATIC_LOOK} "
+            f"{shot}. {_OUTFIT_RULE} {food}{_CINEMATIC_LOOK} "
             f"{scene_context}"
             # 첫 1초 무음 가독성(2026-07-21 쇼츠 트렌드): 0초 프레임만 보고도 상황이
             # 읽혀야 스와이프를 이긴다 — 배경·소품이 또렷이 보이는 상황 전달형 구도.
             "The setting and props are clearly visible so the situation reads at a glance. "
+            # 미드액션 오픈(2026-07-29): 상위권 훅은 "정지한 정면 응시"가 아니라 이미
+            # 진행 중인 동작 한가운데서 시작한다(mid-action open — 시청자를 서사의
+            # 30% 지점에 떨어뜨려 인지적 미완결을 만든다). 먹는 동작이 아니라 말하는
+            # 동작 한가운데로 잡는다 — 먹기는 클립에서 1회만 나오는 규칙이라 프레임이
+            # 선점하면 안 된다.
+            "The puppy is caught mid-motion in the middle of talking, mouth open mid-word, "
+            "leaning slightly toward the camera with one front paw raised — not a calm, "
+            "still, posed stare. "
             "Absolutely no text, letters, numbers, words, captions, logos, brand names, or "
             "watermarks anywhere. No people, no humans in costume, no other animals. "
             f"{mic}"
