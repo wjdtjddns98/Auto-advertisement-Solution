@@ -29,6 +29,10 @@ from nutti.config import Settings
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
+    # commentThreads.insert(업로드 직후 계산기 링크 자동 댓글, 2026-07-30 PO).
+    # 업로드 전용 스코프로는 403이라 이 스코프가 필요하다. 이 줄을 추가한 뒤에는
+    # **refresh token을 재발급해야** 실제로 권한이 붙는다(기존 토큰엔 소급 적용 안 됨).
+    "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
 
 

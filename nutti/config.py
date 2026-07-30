@@ -282,6 +282,21 @@ class Settings(BaseSettings):
         alias="NUTTI_CALCULATOR_URL",
     )
 
+    # ---- 업로드 직후 자동 댓글(2026-07-30 PO "간식계산기 링크는 설명란에 넣고 댓글에 자동으로") ----
+    # 대사(CTA)에서는 유도를 전면 금지했으므로(validate_script_body의 _BANNED_CTA_WORDS)
+    # 계산기 유입 경로는 설명란과 이 댓글 둘뿐이다.
+    # ⚠️ 댓글 **고정(pin)** 은 YouTube Data API가 제공하지 않는다 — 자동으로 달리기만 하고,
+    # 상단 고정이 필요하면 Studio에서 수동으로 해야 한다.
+    # ⚠️ 이 기능은 `youtube.force-ssl` 스코프가 필요하다(업로드 전용 스코프로는 403).
+    # 스코프가 없으면 댓글만 실패하고 업로드는 성공으로 유지된다(best-effort).
+    youtube_auto_comment: bool = Field(default=True, alias="NUTTI_YOUTUBE_AUTO_COMMENT")
+    # 댓글 본문. 링크는 코드가 UTM(utm_medium=comment)을 붙여 뒤에 이어붙인다 —
+    # 설명란(utm_medium=shorts)과 구분해야 어느 경로가 유입을 만드는지 GA에서 갈린다.
+    youtube_comment_text: str = Field(
+        default="우리 아이 몸무게로 하루 간식량 계산해보기 🐾",
+        alias="NUTTI_YOUTUBE_COMMENT_TEXT",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

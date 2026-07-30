@@ -632,8 +632,21 @@ class VeoPromptBuilder:
         # 보고 거부한다(실측: invalid_request "Could not generate images with the given
         # prompts and images"로 라이브 런 2건 사망). 음색(작고 높은 톤)은 나이를 말하지
         # 않고 묘사로만 유지한다.
+        # 2026-07-30 PO "비트마다 목소리 다 다르잖아": 비트별 독립 생성이라 Veo는 매 클립
+        # 음색을 새로 추첨한다(voice id·reference audio 파라미터가 없어 구조적). seed 통일은
+        # 이미 적용 중이고 오디오를 완전 통제하지 못하므로, 남은 카드는 음색을 **좁게 특정**
+        # 하는 것뿐이다 — 7/29에 안전필터 때문에 나이·성별을 뺀 뒤 특정 신호가 약해졌던 걸
+        # 나이·성별을 말하지 않는 질감·음역 기술자로 되살린다(아동 지시어는 계속 금지).
         "one specific recognizable person with a fixed vocal fingerprint): a small, light, "
-        "high-pitched cartoon-character Korean voice, but delivered "
+        "high-pitched cartoon-character Korean voice — thin and bright with a slightly "
+        "nasal edge, a narrow vocal body, and a consistently high register that never drops "
+        "into a lower or fuller tone mid-clip. This voice is never deep, never husky, never "
+        "breathy, never raspy, never resonant or full-bodied, and never mature-sounding. "
+        # "microphone"은 쓰지 않는다 — 화면 밖 인터뷰 마이크 연출(_MIC)과 어휘가 겹쳐
+        # 정면 발화 모드에도 마이크가 새고(테스트 가드), Veo가 화면에 마이크를 렌더할 수 있다.
+        "Treat every clip in this series as one continuous take by the same single performer "
+        "in one sitting — same throat, same recording setup, same room — so the voice cannot "
+        "sound like a different performer from one clip to the next. It is delivered "
         "with a blunt, curt, cocky and smug attitude — dry, flat and deadpan, clearly "
         "unbothered and a little annoyed, talking down to the listener like someone "
         "sure they know better and cannot be bothered to be nice, never sweet, "
@@ -1136,7 +1149,15 @@ class VideoStudio:
                     )
                 if reasons:
                     log.info("video.veo_fal.qc.fallback", beat=i, reasons=reasons)
-                log.info("video.veo_fal.clip.done", path=clip_path, beat=i, of=len(beats))
+                # seed를 함께 남긴다(2026-07-30): "비트마다 목소리가 다르다" 반려를 조사할 때
+                # 비트 간 seed 동일 여부를 로그로 확인할 수 없어 코드만 보고 추정해야 했다.
+                log.info(
+                    "video.veo_fal.clip.done",
+                    path=clip_path,
+                    beat=i,
+                    of=len(beats),
+                    seed=video_seed,
+                )
                 clips.append(clip_path)
                 # 가드된 체이닝(기본 모드만): 다음 비트가 있으면 이 클립의 끝 안정 프레임을
                 # 다음 시작 프레임으로 쓴다. 추출·품질 가드(검정/빈/가로) 실패 시 None → 원본
