@@ -13,6 +13,8 @@ VideoStudio seedance 분기, 비용 계산.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from nutti.config import Settings
@@ -255,9 +257,22 @@ class FakeSeedanceClient:
         self.closed = True
 
 
-def _patch_ffmpeg_steps(monkeypatch, tmp_path, audio_sec=4.5):
-    """ffmpeg 의존 단계(길이측정·머지·스티칭·자막)를 대역으로 바꾼다."""
-    monkeypatch.setattr(VideoStudio, "_probe_duration_sec", lambda self, p: audio_sec)
+def _patch_ffmpeg_steps(monkeypatch, tmp_path, audio_sec=4.5, rendered_sec=None):
+    """ffmpeg 의존 단계(길이측정·머지·스티칭·자막)를 대역으로 바꾼다.
+
+    길이 측정은 **파일 종류마다 다른 값**을 돌려준다 — 과금 기준(머지 전 무음 클립)과
+    자막 타이밍(머지 후 클립)이 서로 다른 값을 쓰는 배선이라, 전부 같은 상수를 주면
+    둘을 뒤바꿔도 테스트가 통과해버린다(리뷰 지적).
+    """
+    rendered = audio_sec if rendered_sec is None else rendered_sec
+
+    def fake_probe(self, path):
+        name = Path(path).name
+        if name.startswith("silent_"):
+            return rendered  # fal이 렌더한 무음 클립 = 과금 기준
+        return audio_sec  # TTS mp3 · 머지된 클립 = 배송 길이
+
+    monkeypatch.setattr(VideoStudio, "_probe_duration_sec", fake_probe)
 
     def fake_mux(self, clip, audio_path):
         out = tmp_path / f"muxed_{len(list(tmp_path.glob('muxed_*.mp4')))}.mp4"
@@ -359,8 +374,10 @@ def test_generate_rejects_audio_over_duration_cap(tmp_path):
 
 
 def test_produce_seedance_wires_tts_per_beat(monkeypatch, tmp_path):
-    """비트마다 TTS→립싱크 클립을 만들고, 총길이는 TTS 실측 합이다."""
-    _patch_ffmpeg_steps(monkeypatch, tmp_path, audio_sec=4.5)
+    """비트마다 TTS→립싱크 클립을 만들고, 반환 총길이는 **렌더(과금) 길이** 합이다."""
+    # 렌더 길이(5.0)와 배송 길이(4.5)를 다르게 줘서 과금 기준 배선을 콕 집는다 —
+    # billed를 머지 후 길이로 되돌리면 4.5*3이 되어 이 테스트가 깨진다.
+    _patch_ffmpeg_steps(monkeypatch, tmp_path, audio_sec=4.5, rendered_sec=5.0)
     fake = FakeSeedanceClient(tmp_path)
     studio = VideoStudio(
         _seedance_settings(NUTTI_MEDIA_DIR=str(tmp_path), NUTTI_CAPTION_BURN=False),
@@ -371,7 +388,7 @@ def test_produce_seedance_wires_tts_per_beat(monkeypatch, tmp_path):
     beats = ["첫 비트야.", "둘째 비트야.", "셋째 비트야."]
     _path, total = studio._produce_clips_seedance(frame_path=str(frame), beats=beats, style=_style())
     assert fake.tts_calls == beats
-    assert total == pytest.approx(4.5 * 3)
+    assert total == pytest.approx(5.0 * 3)
     # 오디오 실측 길이가 그대로 영상 duration 요청으로 전달된다.
     assert fake.durations == [4.5, 4.5, 4.5]
     # 주입 클라이언트는 VideoStudio가 닫지 않는다(소유하지 않으므로).

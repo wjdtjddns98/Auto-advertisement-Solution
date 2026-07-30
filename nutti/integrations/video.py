@@ -1097,7 +1097,7 @@ class VideoStudio:
         """
         import math
 
-        from nutti.integrations.video_seedance import FalSeedanceClient
+        from nutti.integrations.video_seedance import _MIN_DURATION_SEC, FalSeedanceClient
 
         builder = VeoPromptBuilder()
         client = self._seedance_client
@@ -1143,8 +1143,12 @@ class VideoStudio:
                 clip_sec = self._probe_duration_sec(muxed) or audio_sec
                 clips.append(muxed)
                 durations.append(clip_sec)
-                # 렌더 길이 측정 실패 시엔 제출한 요청값(올림)으로 폴백 — 과소 계상보다 안전.
-                billed_secs.append(rendered_sec or float(math.ceil(audio_sec)))
+                # 렌더 길이 측정 실패 시엔 제출한 요청값으로 폴백 — 과소 계상보다 안전.
+                # generate가 하한(_MIN_DURATION_SEC)까지 올려 제출하므로 폴백도 같은 하한을
+                # 적용한다(안 하면 짧은 오디오에서 요청값보다 작은 값이 원장에 남는다).
+                billed_secs.append(
+                    rendered_sec or float(max(_MIN_DURATION_SEC, math.ceil(audio_sec)))
+                )
                 log.info(
                     "video.seedance.clip.done",
                     beat=i,
