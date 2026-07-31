@@ -369,15 +369,12 @@ class EpisodeStyle(NamedTuple):
 # 2026-07-16 소품·포맷 추가 — 매번 다른 옷·소품·연출). 항목을 추가/삭제하면 조합 수가
 # 바뀐다(현재 의상5×장소6×소품6×포맷3 = 540 조합). 영어 묘사에 ASCII 작은따옴표(')는 금지 — 비트 프롬프트의
 # 대사 인용 구분자와 충돌해 주입 방어 검증이 깨진다(U+2019는 허용).
-# 2026-07-23 PO "개밤티": 의상을 일부러 촌스럽고 과하고 안 어울리게 — 밤티(못생김·촌스러움·
-# 어설픔을 유머로 소비하는 밈, 라인플레이 아바타 유래). 클래싱 색·요란한 무늬·과잉 장식·
-# 안 맞는 핏의 우스꽝스러운 조합으로 "귀여운 비숑 × 개촌스러운 옷"의 갭 유머를 노린다.
 _EPISODE_OUTFITS = [
-    "a garish clashing neon tracksuit with mismatched lime-green and hot-pink stripes",
-    "an oversized loud leopard-print coat paired with a clashing red tartan scarf",
-    "a gaudy gold sequined jacket that is comically too big and sags off its shoulders",
-    "a tacky mustard-yellow knit vest layered over a clashing purple floral shirt",
-    "a shiny turquoise tracksuit jacket studded with garish rhinestones and a clashing orange collar",
+    "a tiny yellow raincoat",
+    "a cozy cream knitted sweater",
+    "a sporty grey hoodie",
+    "a light blue denim jacket",
+    "a fluffy red scarf with a matching beanie",
 ]
 # 소품 로테이션(2026-07-16 PO — 옷만 바뀌어 단조로움, 모자·머리 위 선글라스 같은 소품
 # 추가). 빈 문자열=소품 없음(2/6 확률 — "조금씩" 추가라 매편 소품은 과함). 규칙:
@@ -407,20 +404,17 @@ _VET_OUTFIT = (
     "silver chest piece draped around its neck"
 )
 _VET_SETTING = "sitting at the examination desk of a bright, tidy veterinary clinic room"
-# 2026-07-23 PO "의인화 — 사람 아기처럼": 전 항목 standing(직립)으로 통일 —
-# _MASCOT_APPEARANCE(anthropomorphic 직립)·_MOTION_*(standing)과 일치시켜 드리프트를
-# 막는다. 직립이 "인형탈 느낌"으로 새는 건 실사·해부학 문구 + 직립 레퍼런스 이미지
-# (NUTTI_MASCOT_IMAGE) 앵커가 담당한다. 새 장소도 standing으로 쓸 것.
-# (2026-07-21 PR #117에서 같은 전환을 했다가 철회한 이력 있음 — 레시피는 PR #117 diff.)
-# 2026-07-23 PO "의인화 — 사람 아기처럼" 전환: 앉은 자세 → 직립(standing) 상황으로 통일
-# (외형·모션도 직립으로 일치). 사람 아기처럼 서서 말하는 상황들. ASCII 작은따옴표 금지.
+# 전 항목 sitting 계열로 통일(2026-07-06 PO) — standing 시작 프레임이 뽑히면 클립 전체가
+# 이족보행 인형탈 느낌이 되고, 모션 지시(_MOTION_HOLD/_MOTION_LIVELY의 "stays seated")와
+# 모순돼 드리프트를 유발한다. 새 장소를 추가할 때도 sitting 자세로 쓸 것.
+# (2026-07-21 2족보행 전환을 시도했다가 PO 지시로 당일 철회 — 복원 시 PR #117 diff 참조.)
 _EPISODE_SETTINGS = [
-    "standing on a busy city sidewalk like a street interview",
-    "standing in a cozy living room under warm lamps",
-    "standing in a sunny park on a nice afternoon",
-    "standing in a bright modern kitchen",
-    "standing in front of a cute pet shop entrance",
-    "standing at a tidy home office like a news anchor",
+    "sitting on a busy city sidewalk like a street interview",
+    "sitting on a cozy living room sofa under warm lamps",
+    "sitting on a park bench on a sunny afternoon",
+    "sitting on a bright modern kitchen floor",
+    "sitting in front of a cute pet shop entrance",
+    "sitting at a tidy home office desk like a news anchor",
 ]
 # 시작 프레임 구도·표정 로테이션(2026-07-20 PO — "썸네일이 전부 같은 자세"): Shorts
 # 썸네일은 영상 프레임에서 자동 추출되므로 시작 프레임 구도가 곧 썸네일이다. 종전엔
@@ -500,20 +494,14 @@ def pick_episode_style(
 # 텍스트로 외형을 고정하는 것이 일관성의 핵심 수단 — 비워 두면 생성기가 매 편 다른
 # 강아지를 지어낸다(실제 증상). 반드시 레퍼런스 이미지(assets/mascot.png,
 # NUTTI_MASCOT_IMAGE)의 실제 모습과 일치시킬 것 — 텍스트와 이미지가 어긋나면 둘을
-# 섞어 오히려 더 들쭉날쭉해진다. 2026-07-23 PO "의인화 — 사람 아기처럼" 전환: 외형을
-# anthropomorphic 직립(사람 아기 같은 이족보행)으로 바꾼다. Kontext는 포즈 프롬프트를
-# 무시하고 레퍼런스 이미지에 앵커하므로(2026-07-20 실측) 레퍼런스도 직립 변형이 있어야
-# 한다 — mascot.png(4족)로 첫 프레임을 뽑아 직립 후보를 만들고(anthropomorphic 명시+
-# 해부학 가드 제거가 직립을 뚫는 레시피, PR #117 실측), PO 승인 후 그 이미지를
-# NUTTI_MASCOT_IMAGE로 앵커한다. ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
+# 섞어 오히려 더 들쭉날쭉해진다. 현재 값은 assets/mascot.png(흰 비숑프리제, PO 제공
+# 마스코트.png 1254x1254) 기준의 "얌전하고 귀여운 puppy". ASCII 작은따옴표(') 금지(대사 인용 구분자와 충돌).
 _MASCOT_APPEARANCE = (
     "a real, photorealistic, live small white Bichon Frise puppy with a soft, fluffy, "
     "rounded pure-white powder-puff coat groomed into a round teddy-bear face, round dark "
-    "eyes, and a small black nose, anthropomorphic and humanlike — it stands and moves "
-    "upright on its two hind legs like a chubby little human baby, with its front paws "
-    "used freely like little arms and hands; still a real live animal with real fur and a "
-    "real dog face, never a person in an animal costume, never a mascot suit or fursuit, "
-    "never a plush toy, stuffed animal, or cartoon"
+    "eyes, a small black nose, and a normal four-legged small dog body — a real live "
+    "animal, never a person in an animal costume, never a mascot suit or fursuit, never a "
+    "plush toy or stuffed animal"
 )
 # ==================== PO 수정 구역 끝 (마스코트 외형) ====================
 
@@ -575,31 +563,25 @@ class VeoPromptBuilder:
         "viewer, with subtle, natural, deadpan facial expressions and no "
         "exaggerated or distorted faces"
     )
-    # 2026-07-23 PO: 대사만 싸가지 있고 목소리 딜리버리가 안 싸가지라는 실측 피드백 →
-    # 톤을 건방·심드렁·냉소(cocky/smug/deadpan/bratty)로 바꾼다. 단 '같은 목소리 일관성'은
-    # 유지가 최우선(비트별 독립 생성이라 이 묘사가 유일한 통제 수단) — 아래 EXACTLY 문구·
-    # 발음 교정 블록·CTA 앵커는 그대로 두고 태도 어휘만 교체한다.
     _VOICE = (
         "Voice (must be EXACTLY the same single voice in every clip of this series, like "
-        "one specific recognizable person with a fixed vocal fingerprint): a little-girl "
-        "Korean voice, sounding about 6 years old, slightly high-pitched, but delivered "
-        "with a blunt, curt, cocky and smug attitude — dry, flat and deadpan, clearly "
-        "unbothered and a little annoyed, talking down to the listener like a bratty kid "
-        "who is sure she knows better and cannot be bothered to be nice, never sweet, "
-        "eager, gentle, cheerful, or sing-songy, at a consistent speaking rhythm. "
+        "one specific recognizable person with a fixed vocal fingerprint): a bright, "
+        "cute Little girl Korean voice, sounding about 6 years old, slightly high-pitched, "
+        "cheeky and energetic, with a warm soft timbre and a consistent speaking rhythm at "
+        "a lively natural pace. "
         # 발음 교정(2026-07-06 PO 실측: 쉬운 단어도 발음이 뭉개짐 — 아이 페르소나의
         # 혀 짧은 딕션 재현이 유력 원인). 톤은 아이답게 유지하되 발음만 성인급 정확도로.
         "Her Korean PRONUNCIATION however is flawlessly clear and precise: perfect "
         "standard Korean diction, every syllable fully and accurately articulated, "
         "never slurred, never mumbled, never babyish or lisping — like a professional "
         "child voice actor whose enunciation is adult-level crisp and correct. "
-        "Keep the identical timbre, pitch, accent, speaking speed, and this same dry "
-        "sassy attitude in every clip. Keep this exact same voice even on excited, "
-        "exclamatory, or call-to-action lines: do not raise the pitch, do not get louder, "
-        "do not turn into an excited announcer or a promotional voice-over, and never "
-        "switch to a different speaker or a different age — every line, including the "
-        "final call-to-action, must sound like the exact same sassy little girl in the "
-        "same dry, unbothered tone as the earlier lines. "
+        "Keep the identical timbre, pitch, accent, and speaking speed "
+        "in every clip. Keep this exact same voice even on excited, exclamatory, or "
+        "call-to-action lines: do not raise the pitch, do not get louder, do not turn into "
+        "an excited announcer or a promotional voice-over, and never switch to a different "
+        "speaker or a different age — every line, including the final call-to-action, must "
+        "sound like the exact same little girl speaking in the same calm, even tone as the "
+        "earlier lines. "
         # 발화 후 잉여 구간 BGM 채움 억제 — Veo가 대사가 끝난 뒤 남는 시간을 배경음악으로
         # 채우면 무음 트림이 발화 끝을 못 잡아 끝부분 헛짓이 남는다(2026-06-29 PO 실측).
         "This single spoken voice is the only audio: there is no background music, "
@@ -613,16 +595,9 @@ class VeoPromptBuilder:
     )
     _SPEAKING_OFF = "speaking in Korean to an off-screen interviewer"
     _SPEAKING_DIRECT = "speaking in Korean directly to the camera"
-    # 2026-07-23 PO: 화면 고정 불필요 — 클로즈업·무빙 다 OK, 캐릭터 일관성·무일그러짐만
-    # 지키면 된다. 그래서 정적 고정 대신 자유로운 카메라를 허용하되, 일그러짐 방지 요건을
-    # 카메라 지시 안에 함께 못박는다(_NEGATIVE·_CONTINUITY와 삼중 방어).
-    # "tripod" 단어는 Veo가 화면에 삼각대로 렌더하므로(2026-06-29 실측) 절대 넣지 않는다.
-    _CAMERA = (
-        "Camera work can be dynamic and lively — free to push in, pull back, change angle, "
-        "or hold a close-up on the puppy; it does not need to be a locked-off static shot. "
-        "Whatever the camera does, the puppy stays the exact same character and its face and "
-        "body never warp, morph, stretch, or deform."
-    )
+    # "tripod" 단어를 넣으면 Veo가 화면에 삼각대를 렌더한다(2026-06-29 실측) — 단어를
+    # 빼고 "고정 카메라"는 fixed/static/no movement로만 지시한다.
+    _CAMERA = "Camera: locked-off static shot, fixed framing, no camera movement."
     # 비트 클립이 독립 생성돼 끝 자세가 제각각이면 다음 클립과 점프가 생긴다(PO 피드백
     # 2026-06-29). 자세를 처음부터 끝까지 고정하고, 끝을 페이드 없이 또렷한 프레임으로
     # 마무리하게 해 프레임 체이닝(끝 프레임→다음 시작 프레임)이 안정적으로 물리도록 한다.
@@ -636,11 +611,11 @@ class VeoPromptBuilder:
         "fur color, markings, and overall appearance from the first frame to the last."
     )
     _MOTION_HOLD = (
-        "The puppy stays standing upright on its two hind legs, centered in frame, holding "
-        "the same steady upright stance from the first frame to the last; it does not sit "
-        "down, drop onto all fours, walk, or leave the frame. The clip ends on a clean, "
-        "fully-lit, sharp frame with the puppy standing and centered — no fade-out, no "
-        "dimming, no blur at the end."
+        "The puppy stays in the exact same upright seated position for the entire shot, "
+        "sitting still and centered, holding the same pose from the first frame to the "
+        "last frame; it does not lie down, stand up, walk, or leave the frame. The clip "
+        "ends on a clean, fully-lit, sharp frame with the puppy seated and centered — no "
+        "fade-out, no dimming, no blur at the end."
     )
     # 끝프레임 고정(lock) 모드 전용 모션 지시(2026-06-29 PO: "모션홀드 풀어 생동감").
     # first-last-frame 모델이 시작·끝 프레임을 동일 마스코트 프레임으로 강제하므로, 중간에
@@ -658,31 +633,30 @@ class VeoPromptBuilder:
     # "클립당 최대 1회, 반복 금지"로 제한하고 고개·귀·꼬리·무게 이동·표정 중심으로 전환
     # (_MOTION_FINAL_FREE 동일). 어휘 목록 앞쪽의 paw waves를 Veo가 과도 샘플링한 부작용.
     _MOTION_LIVELY = (
-        "The puppy stays standing upright on its two hind legs, centered in frame, and "
-        "moves naturally and expressively like a lively human baby as it talks — gentle "
-        "head tilts, small ear twitches, a happy little bounce, subtle shifts of weight, "
-        "leaning slightly toward the camera, and lively facial expressions that bring real "
-        "energy and charm to the shot. It uses its front paws freely like little hands but "
-        "keeps gestures small — at most one brief hand gesture in the whole clip, never "
-        "repeated or constant waving. It is already "
+        "The puppy stays seated and centered in frame the whole time but moves naturally "
+        "and expressively as it talks — gentle head tilts, small ear twitches, a joyful "
+        "tail wag, subtle shifts of body weight, leaning slightly toward the camera, and "
+        "lively facial expressions that bring real energy and charm to the shot. Its "
+        "front paws stay relaxed on the ground almost the entire time — at most one "
+        "brief, small paw gesture in the whole clip, never repeated or constant paw "
+        "waving. It is already "
         "in lively motion from the very first moments of the clip — it starts talking and "
         "moving right away, with no still, frozen, or slow warm-up intro. It never "
-        "sits down, drops onto all fours, walks, hunches over, ducks its head down, curls "
-        "forward, or leaves the frame. Keep this natural lively energy all the way to the "
-        "end of the clip — do not wind down, slow down, go still, or freeze near the end. "
-        "The clip ends on a clean, fully-lit, razor-sharp frame — no fade-out, no dimming, "
-        "no blur, no warping, no morphing, no freeze, and no glitch at the end."
+        "stands up, walks, lies down, hunches over, ducks its head down, curls forward, or "
+        "leaves the frame. Keep this natural lively energy all the way to the end of the "
+        "clip — do not wind down, slow down, go still, or freeze near the end. The clip "
+        "ends on a clean, fully-lit, razor-sharp frame — no fade-out, no dimming, no blur, "
+        "no warping, no morphing, no freeze, and no glitch at the end."
     )
     # 마지막 비트(CTA) 전용 모션 — 진정(wind-down) 강제 없이 귀여운 행동을 자유롭게
     # 허용한다(2026-07-06 PO: "마지막 비트는 제한 걸지 말고 귀여운 행동 하게 냅둬").
     # 마지막 비트는 뒤에 이어붙일 클립이 없어 끝 포즈 수렴이 불필요 — 화면 이탈·끝
     # 페이드/글리치 같은 깨짐 방지 최소 가드만 남긴다.
     _MOTION_FINAL_FREE = (
-        "The puppy stays standing upright on its two hind legs, centered in frame, but is "
-        "free to be playful and adorable like a lively human baby as it talks — happy head "
-        "tilts, excited little bounces, cute expressive reactions; it uses its front paws "
-        "freely like little hands, at most one brief hand gesture, never repeated or "
-        "constant waving. Let its natural charm show; no "
+        "The puppy stays seated and centered in frame but is free to be playful and "
+        "adorable as it talks — happy head tilts, excited ear wiggles, a joyful tail "
+        "wag, cute expressive reactions; at most one brief, small paw gesture, never "
+        "repeated or constant paw waving. Let its natural charm show; no "
         "forced calm-down at the end. It never leaves the frame. The clip ends on a "
         "clean, fully-lit, sharp frame — no fade-out, no dimming, no blur, no warping, "
         "and no glitch at the end."
@@ -699,39 +673,30 @@ class VeoPromptBuilder:
         "The subject is a real live photorealistic puppy — never a mascot suit, fursuit, "
         "costume, person in a costume, or plush toy. Strictly no additional animals, no "
         "people. Absolutely no text, subtitles, captions, letters, numbers, words, logos, "
-        "brand names, watermarks, or UI overlays anywhere in the frame — in particular no "
-        "Hangul or Korean characters, no subtitle bar, and no caption text along the bottom "
-        "of the screen."
+        "brand names, watermarks, or UI overlays anywhere in the frame."
     )
-    # 먹방 연출(2026-07-23 PO): 간식 그릇을 앞에 두고, 클립 "시작"에 앞발로 간식을 집어
-    # 입에 넣어 먹은 뒤 말한다. 시작에 두는 이유 — 끝 잉여 트림(_generate_and_trim_clip)이
-    # 발화 이후 구간을 잘라내 발화 뒤 먹는 액션은 잘려나가기 때문. 발화 중 씹기는 립싱크
+    # 먹방 연출(2026-07-23 PO): 간식 그릇을 앞에 두고, 클립 "시작"에 한 입만 먹고
+    # 말한다. 시작에 두는 이유 — 끝 잉여 트림(_generate_and_trim_clip)이 발화 이후
+    # 구간을 잘라내므로 발화 뒤 베어무는 액션은 잘려나간다. 발화 중 씹기는 립싱크
     # 붕괴라 금지, 클립당 한 입 제한(팔흔들기 1회 제한과 같은 과도 샘플링 방어).
-    # 이 "집어 먹는" 실제 동작은 endframe lock과 공존할 수 없다 — lock은 시작·끝을 같은
-    # '안 먹는' 앵커 프레임으로 묶어, 그 사이에 먹기를 넣으면 Veo가 간식이 공중에서 생겼다
-    # 사라지는 식으로 환각한다(2026-07-23 PO 실측: 삼계탕 편 "공중에서 닭이 생김"). 그래서
-    # food가 있으면 _produce_clips_veo_fal이 lock을 끄고 체이닝으로 돌린다(끝 안정 프레임을
-    # 다음 비트 시작 프레임으로). 아래 "food never appears out of thin air" 문구는 이 환각의
-    # 이중 방어다.
     # ponytail: 씹는 소리(ASMR)는 _VOICE의 무음 정책·발화 끝 트림 로직과 충돌해 비주얼만
     # — 소리까지 원하면 트림 로직 개편이 선행돼야 한다.
     _EATING_TEMPLATE = (
-        "A small snack bowl with {food} sits right in front of the puppy. At the very "
-        "start of the clip, the puppy uses one front paw to pick up a single piece of "
-        "the snack from the bowl and bring it up to its mouth, calmly eats that one "
-        "piece, and then starts speaking. The snack it eats is always the food already "
-        "in the bowl — food never appears out of thin air or drops in from off-screen. "
-        "Only this one piece is eaten in the whole clip; once it is speaking it is no "
-        "longer chewing or holding food, and the food never blocks or covers its face."
+        "A small snack bowl with {food} sits right in front of the puppy. The very "
+        "first action of the clip is the puppy taking one quick, nonchalant bite of the "
+        "snack, chewing it briefly with an unimpressed face — this opening bite counts "
+        "as the immediate lively start of the clip — and then it immediately starts "
+        "speaking. At most this one bite in the whole clip, never chewing or holding "
+        "food while speaking words, and the food never blocks or covers its face."
     )
     # 마지막 비트(CTA) 전용 음성 앵커 — CTA 대사가 권유·느낌표 톤이라 Veo가 음성을 더
     # 들뜨거나 아나운서처럼 바꾸는 경향이 강하다(2026-06-29 PO 실측). 마지막 비트
     # 프롬프트에만 추가로 박아 앞 비트와 동일 화자·톤으로 못박는다(_VOICE와 이중 방어).
     _CTA_VOICE_ANCHOR = (
         "This is the final line of the series. Speak it in the exact same voice, pitch, "
-        "age, and same dry, unbothered sassy tone as the previous clips — the same little "
-        "girl, not louder, not more excited, not an announcer or promo voice. Do not "
-        "change the speaker for this call to action."
+        "age, and calm even tone as the previous clips — the same little girl, not louder, "
+        "not more excited, not an announcer or promo voice. Do not change the speaker for "
+        "this call to action."
     )
     # ========================= PO 수정 구역 끝 (영상 연출) =========================
 
@@ -784,13 +749,6 @@ class VeoPromptBuilder:
         prompt = (
             f"A photorealistic shot of {self._PERSONA}, {speaking}, "
             f"saying (as spoken audio only, no on-screen text): '{dialogue}'. "
-            # 자막 환각 억제의 핵심 방어(2026-07-23 PO): 위 대사가 한글로 프롬프트에 들어가면
-            # Veo가 그 글자를 화면 하단 자막으로 그리는 경향이 있다(깨진 한글 = 외계어 자막).
-            # 대사 '바로 뒤'에 Hangul을 콕 집은 강한 부정을 붙인다 — 프롬프트 끝 _NEGATIVE보다
-            # 트리거(대사)에 인접해 가중치가 높다. 재생성을 줄여 시드·보이스 일관성도 지킨다.
-            "These spoken words must never be shown as written text on screen — no captions, "
-            "no subtitles, no Hangul or Korean letters, no subtitle bar, and no text along "
-            "the bottom of the frame; the line exists only as the spoken voice. "
             f"{scene}{mic}"
             f"{self._VOICE} {cta}"
             f"{self._LIPSYNC} "
@@ -961,16 +919,6 @@ class VideoStudio:
         # 이후 비트는 직전 클립의 끝 안정 프레임으로 이어 붙인다(체이닝). lock 모드는 항상
         # frame_path 고정.
         current_frame = frame_path
-        # 먹방(food 있음): 앞발로 간식을 집어 입에 넣는 실제 동작이 필요한데, 이 동작은
-        # endframe lock과 충돌한다(시작·끝을 같은 '안 먹는' 앵커로 묶으면 Veo가 간식을
-        # 공중에서 만들었다 지운다 — _EATING_TEMPLATE 주석 참조). 그래서 먹방은 lock을 끄고
-        # 체이닝(끝 안정 프레임 → 다음 시작 프레임)으로 경계를 잇고, 정적(_MOTION_HOLD)
-        # 대신 생동 모션(motion_release=True: '한 번의 앞발 제스처'가 곧 집어 먹기)을 준다.
-        # food 없는 편(휴면 포맷 폴백)은 기존 lock 동작 그대로(하위호환).
-        # ponytail: 체이닝 경계는 lock보다 매끄러움이 덜할 수 있다 — 유사도 스티칭
-        # (_find_similarity_cuts)이 완화하고, 안 맞는 경계만 디졸브 2배로 가린다.
-        eating = bool(food)
-        use_lock = lock and not eating
         try:
             for i, beat in enumerate(beats, start=1):
                 # 포맷 로테이션(2026-07-16 PO): "interview" 편은 화면 밖 인터뷰어+마이크
@@ -978,23 +926,18 @@ class VideoStudio:
                 # KR "AI 강아지 인터뷰" 유행에 맞춰 로테이션으로 부활.)
                 # lock 모드는 끝 프레임이 모델로 고정되므로 모션 제약을 풀어(_MOTION_LIVELY)
                 # 생동감을 준다(2026-06-29 PO). 기본 image-to-video 경로는 _MOTION_HOLD 유지.
-                # 먹방은 첫 비트에서만 집어 먹는다(2026-07-23 PO: 한 번이면 충분·여러 번은
-                # 충돌). 2번 비트부터는 food 텍스트를 아예 빼 그릇을 다시 그리지 않는다 —
-                # 안 그러면 매 비트가 "당근 가득한 그릇"을 다시 렌더해 먹은 간식이 도로
-                # 차오른다(PO 실측). 그릇의 시각적 연속성은 체이닝된 끝 프레임이 잇는다.
-                beat_food = food if i == 1 else ""
                 prompt = builder.build_beat(
                     beat,
                     off_screen_interviewer=(style.fmt == "interview"),
                     style=style,
-                    motion_release=(use_lock or eating),
+                    motion_release=lock,
                     final_cta=(i == len(beats)),
-                    food=beat_food,
+                    food=food,
                 )
                 # 생성 + 끝 잉여 고정 트림(글리치 온상 제거, 8초→약7초, 2026-06-29 PO).
                 # QC 재생성이 같은 단계를 다시 밟도록 헬퍼로 묶었다.
                 clip_path = self._generate_and_trim_clip(
-                    client, prompt, current_frame, frame_path, use_lock, video_seed
+                    client, prompt, current_frame, frame_path, lock, video_seed
                 )
                 # 클립 QC 레이어(2026-07-07 PO): 중간 프리즈·블랙·무발화·꼬리 미수렴을
                 # 잡아 그 비트만 재생성한다. 상한(qc_max_retries) 초과 시 현행 트림·마스킹
@@ -1003,9 +946,7 @@ class VideoStudio:
                 # 없고 모션도 자유(_MOTION_FINAL_FREE)라 수렴 실패가 결함이 아니다.
                 # 6차 런 실측: 마지막 비트가 tail_not_converged로 2회 재생성($0.8 낭비).
                 final_beat = i == len(beats)
-                reasons = self._qc_check_beat(
-                    clip_path, frame_path, use_lock, final_beat=final_beat
-                )
+                reasons = self._qc_check_beat(clip_path, frame_path, lock, final_beat=final_beat)
                 attempt = 0
                 while reasons and attempt < self.settings.qc_max_retries:
                     attempt += 1
@@ -1018,10 +959,10 @@ class VideoStudio:
                     # 음색 seed 일관성보다 결함 제거가 우선(2026-07-10, 텍스트 QC와 함께).
                     retry_seed = (video_seed + attempt) % (2**31)
                     clip_path = self._generate_and_trim_clip(
-                        client, prompt, current_frame, frame_path, use_lock, retry_seed
+                        client, prompt, current_frame, frame_path, lock, retry_seed
                     )
                     reasons = self._qc_check_beat(
-                        clip_path, frame_path, use_lock, final_beat=final_beat
+                        clip_path, frame_path, lock, final_beat=final_beat
                     )
                 if reasons:
                     log.info("video.veo_fal.qc.fallback", beat=i, reasons=reasons)
@@ -1031,8 +972,7 @@ class VideoStudio:
                 # 다음 시작 프레임으로 쓴다. 추출·품질 가드(검정/빈/가로) 실패 시 None → 원본
                 # 마스코트 프레임으로 안전 폴백(망가진 프레임이 다음 클립에 누적되지 않게 하는
                 # 핵심 가드). lock 모드는 끝프레임을 frame_path로 고정하므로 체이닝하지 않는다.
-                # 먹방(use_lock=False)은 이 체이닝으로 비트 경계를 잇는다(PO 지시).
-                if not use_lock and i < len(beats):
+                if not lock and i < len(beats):
                     chained = self._chain_frame(clip_path)
                     if chained is not None:
                         chain_frames.append(chained)
