@@ -1780,6 +1780,34 @@ def test_pick_episode_style_outfit_setting_independent():
     assert mismatched
 
 
+def test_hangul_subtitle_suppression_is_three_layered():
+    """자막 환각 억제 3중 방어 리버트 가드 — 보이스 일관성 대책이기도 하다.
+
+    자막 환각은 화면 품질만의 문제가 아니다: 환각 → QC text_overlay 재생성 → 재시도
+    seed 오프셋 → **그 비트 목소리가 튄다**. PO가 반복 지적한 "목소리가 다 다르다"의
+    주 경로다(2026-07-31 run30 실측: 비트3이 text_overlay로 2회 재생성되다 fal 타임아웃
+    으로 런 자체가 사망).
+
+    ① 대사 바로 뒤(트리거 인접·가중치 최상) ② _NEGATIVE(프롬프트 끝) ③ 제출
+    negative_prompt(설정). 한 겹이라도 빠지면 재생성이 늘어난다.
+    """
+    from nutti.config import Settings
+    from nutti.integrations.video import VeoPromptBuilder
+
+    style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
+    prompt = VeoPromptBuilder().build_beat("간식 아무거나 주지 마", style=style)
+
+    # ① 대사 인접 부정 — 대사보다 뒤, _NEGATIVE보다 앞에 있어야 한다.
+    assert "no Hangul or Korean letters" in prompt
+    assert prompt.index("no Hangul or Korean letters") > prompt.index("간식 아무거나 주지 마")
+    # ② 프롬프트 끝 _NEGATIVE.
+    assert "no Hangul or Korean characters" in VeoPromptBuilder._NEGATIVE
+    # ③ 제출 negative_prompt(설정 기본값).
+    neg = Settings(NUTTI_ENV="test").veo_fal_negative_prompt
+    for word in ("hangul", "korean subtitles", "bottom subtitle"):
+        assert word in neg, f"negative_prompt 억제 어휘 누락: {word}"
+
+
 def test_build_beat_always_includes_persona_and_fixed_voice():
     """페르소나·고정 목소리 묘사는 style 유무와 무관하게 모든 비트에 포함된다.
 

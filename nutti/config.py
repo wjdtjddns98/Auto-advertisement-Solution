@@ -107,6 +107,10 @@ class Settings(BaseSettings):
         default=(
             "text, subtitles, captions, words, letters, writing, watermark, "
             "on-screen text, caption bar, hardcoded subtitles, korean text overlay, "
+            # 한글 콕 집은 억제(2026-07-31 재이식) — 자막 환각은 QC 재생성을 부르고,
+            # 재생성마다 seed가 바뀌어 그 비트 목소리가 튄다(보이스 드리프트의 주 경로).
+            "hangul, hangul characters, korean characters, korean subtitles, "
+            "subtitle bar at bottom, bottom subtitle, lower third text, "
             # 클립 끝 페이드아웃 억제 — 끝 프레임이 어두워지면 프레임 체이닝이 망가진다.
             "fade out, fade to black, fade in, dimming, darkening, vignette, "
             # 클립 끝 자세 변화(누움·이탈) 억제 — 비트 경계 점프의 주원인.
