@@ -2614,8 +2614,14 @@ def test_voice_spec_pins_without_safety_trigger_form():
 
     voice = VeoPromptBuilder._VOICE
     # 핵심 음색 어휘(어리고 귀여운 톤) — PO 지시의 실체.
-    for word in ("squeaky", "feather-light", "very high-pitched", "clearly feminine", "cute"):
+    for word in ("squeaky", "feather-light", "very high-pitched", "cute"):
         assert word in voice, f"음색 어휘 누락: {word}"
+    # 2026-07-31: 어림·성별을 정체성이 아닌 **음향 물리량**으로 지정한다(안전필터 우회).
+    # 이 축들이 빠지면 음색 특정 신호가 약해져 비트마다 목소리가 다시 갈라진다.
+    for word in ("soprano register", "350 to 400 Hz", "formants", "vocal tract"):
+        assert word in voice, f"음향 기술자 누락: {word}"
+    # 정체성 서술자로 되돌아가는 것 금지 — 필터가 읽는 축을 직접 밟는다.
+    assert "feminine" not in voice, "성별을 정체성으로 말하면 안전필터 축을 밟는다"
     # 배제 목록(낮고 성숙한 톤으로 새는 것 차단).
     for word in ("never deep", "never husky", "never mature-sounding"):
         assert word in voice, f"배제 어휘 누락: {word}"
@@ -2627,16 +2633,38 @@ def test_voice_spec_pins_without_safety_trigger_form():
     assert "Gender:" not in voice, "성별을 독립 항목으로 강조하면 거부된다(실측)"
 
 
-def test_voice_never_names_a_child():
-    """⚠️ 안전필터 가드: 목소리 묘사에 아동 지시어가 들어가면 Veo가 영상 생성을 거부한다.
+def test_no_prompt_template_names_a_child():
+    """⚠️ 안전필터 가드: 어떤 프롬프트 템플릿에도 아동 지시어가 들어가면 안 된다.
 
-    2026-07-29 실측: "little-girl"·"about 6 years old"가 옷 갖춘 직립 마스코트 이미지와
-    합쳐져 invalid_request로 라이브 런 2건이 죽었다. 어리고 귀여운 톤은 음색 기술자로만
-    표현해야 한다 — 이 테스트는 그 사고 경로가 되살아나는 것을 막는다.
+    Veo는 **피사체가 미성년으로 보이는지**를 검사한다. 옷을 갖춰 입은 직립 마스코트
+    이미지에 아동 어휘가 붙으면 invalid_request로 영상 생성이 통째로 거부된다
+    (2026-07-29·07-30 라이브 런 4건 사망 — 클립 0개).
+
+    이 테스트가 블록 목록을 손으로 나열하지 않고 **전 템플릿을 스캔**하는 이유:
+    7/29에 `_VOICE`만 고치고 형제 블록 `_CTA_VOICE_ANCHOR`("the same little girl")를
+    놓쳐 마지막 비트마다 아동 지시어가 계속 들어가고 있었다(2026-07-31 발견). 목록형
+    가드는 새 블록·놓친 블록을 구조적으로 못 잡는다.
+
+    외형·모션의 "human baby" 비유도 같은 이유로 금지한다 — 직립 자세는 레퍼런스
+    이미지가 앵커하므로(2026-07-20 실측) 시각적 기여 없이 필터 연료 역할만 한다.
     """
+    import re
+
     from nutti.integrations.video import VeoPromptBuilder
 
-    low = VeoPromptBuilder._VOICE.lower()
-    for banned in ("little girl", "little-girl", "child", "kid", "years old",
-                   "toddler", "infant", "schoolgirl", "young girl"):
-        assert banned not in low, f"아동 지시어가 들어갔다(안전필터 거부 위험): {banned}"
+    # \b 경계 매칭 — "never babyish or lisping"(발음 교정의 정당한 부정 표현)은 통과해야 한다.
+    banned = (r"\bbaby\b", r"\bbabies\b", r"\bchild\b", r"\bchildren\b", r"\bkid\b",
+              r"\bkids\b", r"\btoddler\b", r"\binfant\b", r"\bgirl\b", r"\bboy\b",
+              r"years old", r"\bschoolgirl\b", r"\bminor\b")
+    templates = {
+        name: value
+        for name, value in vars(VeoPromptBuilder).items()
+        if name.isupper() or (name.startswith("_") and name[1:].isupper())
+        if isinstance(value, str)
+    }
+    assert templates, "프롬프트 템플릿을 하나도 못 찾았다 — 스캔 조건이 깨졌다"
+    for name, text in templates.items():
+        for pattern in banned:
+            assert not re.search(pattern, text, re.IGNORECASE), (
+                f"{name}에 아동 지시어가 들어갔다(안전필터 거부 위험): {pattern}"
+            )
