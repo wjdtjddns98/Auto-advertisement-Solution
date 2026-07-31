@@ -2,8 +2,17 @@
 .omc/
 
 # 환경 변수
+# ⚠️ public 저장소다 — .env 파생 파일은 전부 무시하고 예시 파일만 예외로 둔다.
+# 2026-07-31: .env.bak-before-* 백업 2개(실키 10개 포함)가 패턴에 안 걸려 작업 트리에
+# 노출돼 있었다. `git add -A` 한 번이면 그대로 커밋된다.
 .env
-.env.local
+.env.*
+!.env.example
+
+# 에이전트 도구 로컬 상태(커밋 대상 아님)
+.agents/
+.codex/
+.fablize/
 
 # 의존성
 node_modules/
