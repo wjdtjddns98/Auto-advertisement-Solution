@@ -156,8 +156,12 @@ class Settings(BaseSettings):
     # 타이밍이 영향받지 않는다. 컷 수가 비트 수(3)에서 3배로 늘어 시각 리듬이 생긴다.
     # 이미지는 마스코트 레퍼런스를 쓰는 기존 Kontext 경로를 재사용한다(화풍·색감 자동 정합).
     # 생성·합성 실패는 best-effort로 무시하고 원본을 그대로 쓴다(런이 죽지 않는다).
-    # 끄려면 NUTTI_VEO_FAL_BROLL=false 한 줄.
-    veo_fal_broll: bool = Field(default=True, alias="NUTTI_VEO_FAL_BROLL")
+    # ⚠️ 2026-07-31 run27 PO 반려로 **기본 비활성**: "중간중간 이상한 포즈로 멈춰 서있는건
+    # 왜그런건데". 원인은 인서트가 **정지 이미지**라는 점이다 — Kontext가 레퍼런스(마스코트)를
+    # 앵커해 간식 클로즈업 대신 강아지가 있는 스틸을 만들었고, 움직이던 화면이 1.5초씩 3번
+    # 얼어붙어 "멈춰 선" 것으로 읽혔다. 컷 수를 늘린다는 목표는 맞았지만 정지 컷으로는
+    # 역효과다. 다시 켜려면 인서트가 **움직이는 소스**여야 한다(A롤 다른 구간의 크롭 등).
+    veo_fal_broll: bool = Field(default=False, alias="NUTTI_VEO_FAL_BROLL")
     # 비트별 대사를 하단 한글 자막으로 굽기(스티칭 후 ffmpeg drawtext, best-effort).
     # 기본 True — 2줄/26px 렌더 결과를 PO가 승인(2026-07-07, 최초 "이상함" 판정 시의
     # 렌더 결함은 26px 수정으로 이미 해소됨). Veo가 임의로 박는 깨진 자막은
