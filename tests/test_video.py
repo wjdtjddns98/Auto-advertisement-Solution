@@ -1584,13 +1584,22 @@ def test_produce_clips_direct_format_keeps_mic_out_of_beat_prompts(tmp_path, mon
 
 
 def test_build_beat_food_adds_bowl_and_single_bite():
-    """food가 오면 간식 그릇+한 입 먹방 연출이 붙고, 비면 붙지 않는다(하위호환)."""
+    """food가 오면 간식 그릇+집어 먹기 연출이 붙고, 비면 붙지 않는다(하위호환).
+
+    2026-07-31 PO 실측("주워서 먹는게 아니라 입에서 그릇으로 내려간다"): 먹는 **방향**이
+    프롬프트에 명시돼야 한다 — 앞발로 그릇에서 집어 입으로 가져가는 순서. 방향 문구가
+    빠지면 endframe lock 해제만으로는 역방향 동작이 다시 나올 수 있다.
+    """
     b = VeoPromptBuilder()
     style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
     p = b.build_beat("대사", style=style, food="golden baked sweet potato sticks")
     assert "snack bowl with golden baked sweet potato sticks" in p
-    assert "one quick, nonchalant bite" in p
-    assert "never chewing or holding food while speaking" in p  # 립싱크 보호
+    # 방향: 그릇 → 앞발 → 입.
+    assert "pick up a single piece" in p
+    assert "bring it up to its mouth" in p
+    # 공중 생성 환각 방어(같은 뿌리의 이중 방어).
+    assert "never appears out of thin air" in p
+    assert "no longer chewing or holding food" in p  # 립싱크 보호
     p2 = b.build_beat("대사", style=style)
     assert "snack bowl" not in p2
 
@@ -1605,7 +1614,11 @@ def test_frame_prompt_includes_food_bowl_matching_beats():
 
 
 def test_produce_clips_passes_food_into_beat_prompts(tmp_path, monkeypatch):
-    """produce 경로가 Script.food_visual을 전 비트 프롬프트에 배선한다(리버트 가드)."""
+    """produce 경로가 Script.food_visual을 **첫 비트** 프롬프트에만 배선한다(리버트 가드).
+
+    2026-07-31: 전 비트에 넣으면 매 비트가 "간식 가득한 그릇"을 다시 렌더해 먹은 간식이
+    도로 차오른다(PO 실측). 그릇의 시각적 연속성은 체이닝된 끝 프레임이 잇는다.
+    """
     prompts: list[str] = []
     studio = _wiring_capture_studio(tmp_path, monkeypatch, prompts)
     style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
@@ -1613,7 +1626,64 @@ def test_produce_clips_passes_food_into_beat_prompts(tmp_path, monkeypatch):
         "frame.png", ["비트1", "비트2"], style, food="fresh carrot sticks"
     )
     assert len(prompts) == 2
-    assert all("snack bowl with fresh carrot sticks" in p for p in prompts)
+    assert "snack bowl with fresh carrot sticks" in prompts[0]
+    assert "snack bowl" not in prompts[1], "2번 비트부터는 그릇을 다시 그리지 않는다"
+
+
+def test_produce_clips_food_unlocks_and_chains(tmp_path, monkeypatch):
+    """먹방(food 있음)은 endframe lock을 끄고 체이닝으로 돌린다.
+
+    lock은 시작·끝을 같은 '안 먹는' 앵커로 묶으므로, 켜진 채로 먹으면 Veo가 먹은 상태로
+    끝낼 수 없어 **입에서 그릇으로 도로 내려놓는 역방향 동작**을 만든다(2026-07-31 PO
+    실측: "주워서 먹는게 아니라 입에서 그릇으로 내려간다"). food 없는 편은 기존 lock
+    동작 그대로(하위호환).
+    """
+    clip = tmp_path / "c.mp4"
+    clip.write_bytes(b"c")
+    stitched = tmp_path / "s.mp4"
+    stitched.write_bytes(b"s")
+    locks: list[bool] = []
+    chained = {"n": 0}
+
+    monkeypatch.setattr(
+        VideoStudio,
+        "_generate_and_trim_clip",
+        lambda self, client, prompt, cf, fp, lock, seed: (locks.append(lock), str(clip))[1],
+        raising=True,
+    )
+    monkeypatch.setattr(
+        VideoStudio, "_qc_check_beat", lambda self, c, f, lock, final_beat=False: [], raising=True
+    )
+    monkeypatch.setattr(
+        VideoStudio,
+        "_chain_frame",
+        lambda self, c: (chained.__setitem__("n", chained["n"] + 1), None)[1],
+        raising=True,
+    )
+    monkeypatch.setattr(VideoStudio, "_trim_to_speech", lambda self, c: (c, 7.0), raising=True)
+    monkeypatch.setattr(
+        VideoStudio, "_find_similarity_cuts", lambda self, *a, **kw: None, raising=True
+    )
+    monkeypatch.setattr(
+        VideoStudio, "_stitch", lambda self, clips, durs=None, **kw: str(stitched), raising=True
+    )
+    # endframe_lock 기본 True 확인(하위호환 대조군의 전제).
+    settings = _live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path))
+    assert settings.veo_fal_endframe_lock is True
+    studio = VideoStudio(settings, veo_fal_client=object())
+    style = EpisodeStyle("a sporty grey hoodie", "sitting on a sofa", "", "mukbang")
+
+    # food 있음 → 전 비트 lock=False + 비트 경계마다 체이닝 1회(2비트 → 1경계).
+    studio._produce_clips_veo_fal("frame.png", ["비트1", "비트2"], style, food="fresh carrot sticks")
+    assert locks == [False, False]
+    assert chained["n"] == 1
+
+    # food 없음 → 기존 lock=True 유지, 체이닝 없음.
+    locks.clear()
+    chained["n"] = 0
+    studio._produce_clips_veo_fal("frame.png", ["비트1", "비트2"], style)
+    assert locks == [True, True]
+    assert chained["n"] == 0
 
 
 def test_frame_shots_are_sassy_and_ascii_safe():

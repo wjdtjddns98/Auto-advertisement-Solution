@@ -681,13 +681,20 @@ class VeoPromptBuilder:
     # 붕괴라 금지, 클립당 한 입 제한(팔흔들기 1회 제한과 같은 과도 샘플링 방어).
     # ponytail: 씹는 소리(ASMR)는 _VOICE의 무음 정책·발화 끝 트림 로직과 충돌해 비주얼만
     # — 소리까지 원하면 트림 로직 개편이 선행돼야 한다.
+    # ⚠️ 이 "집어 먹는" 실제 동작은 endframe lock과 공존할 수 없다 — lock은 시작·끝을 같은
+    # '안 먹는' 앵커 프레임으로 묶으므로, 중간에 먹으면 끝에서 원상복구를 해야 한다. 그래서
+    # Veo가 **입에서 그릇으로 도로 내려놓는 역방향 동작**을 만든다(2026-07-31 PO 실측:
+    # "주워서 먹는게 아니라 입에서 그릇으로 내려간다"). food가 있으면
+    # _produce_clips_veo_fal이 lock을 끄고 체이닝으로 돌린다(끝 안정 프레임을 다음 비트
+    # 시작 프레임으로). 아래 "food never appears out of thin air"는 같은 환각의 이중 방어다.
     _EATING_TEMPLATE = (
-        "A small snack bowl with {food} sits right in front of the puppy. The very "
-        "first action of the clip is the puppy taking one quick, nonchalant bite of the "
-        "snack, chewing it briefly with an unimpressed face — this opening bite counts "
-        "as the immediate lively start of the clip — and then it immediately starts "
-        "speaking. At most this one bite in the whole clip, never chewing or holding "
-        "food while speaking words, and the food never blocks or covers its face."
+        "A small snack bowl with {food} sits right in front of the puppy. At the very "
+        "start of the clip, the puppy uses one front paw to pick up a single piece of "
+        "the snack from the bowl and bring it up to its mouth, calmly eats that one "
+        "piece, and then starts speaking. The snack it eats is always the food already "
+        "in the bowl — food never appears out of thin air or drops in from off-screen. "
+        "Only this one piece is eaten in the whole clip; once it is speaking it is no "
+        "longer chewing or holding food, and the food never blocks or covers its face."
     )
     # 마지막 비트(CTA) 전용 음성 앵커 — CTA 대사가 권유·느낌표 톤이라 Veo가 음성을 더
     # 들뜨거나 아나운서처럼 바꾸는 경향이 강하다(2026-06-29 PO 실측). 마지막 비트
@@ -906,6 +913,17 @@ class VideoStudio:
         # 하도록 first/last 프레임을 frame_path로 고정한다 — 클립이 같은 포즈로 시작·끝나
         # 비트 경계가 항상 동일 프레임에서 만나 끊김이 없다. 체이닝(끝 프레임 추출)은 불요.
         lock = bool(self.settings.veo_fal_endframe_lock)
+        # 먹방(food 있음): 앞발로 간식을 집어 입에 넣는 실제 동작이 필요한데, 이 동작은
+        # endframe lock과 충돌한다 — lock이 시작·끝을 같은 '안 먹는' 앵커로 묶으면 Veo가
+        # 먹은 상태로 끝낼 수 없어 **입에서 그릇으로 도로 내려놓는 역방향 동작**을 만든다
+        # (2026-07-31 PO 실측). 그래서 먹방은 lock을 끄고 체이닝(끝 안정 프레임 → 다음 시작
+        # 프레임)으로 경계를 잇고, 정적(_MOTION_HOLD) 대신 생동 모션을 준다
+        # (motion_release=True: '한 번의 앞발 제스처'가 곧 집어 먹기).
+        # food 없는 편(휴면 포맷 폴백)은 기존 lock 동작 그대로(하위호환).
+        # ponytail: 체이닝 경계는 lock보다 매끄러움이 덜할 수 있다 — 유사도 스티칭
+        # (_find_similarity_cuts)이 완화하고, 안 맞는 경계만 디졸브 2배로 가린다.
+        eating = bool(food)
+        use_lock = lock and not eating
         # 영상 내 모든 비트(n1~n4)에 같은 seed를 줘 음색/비주얼 편차를 줄인다(2026-06-29 PO:
         # 음색 일관성 보강). 설정값(veo_fal_seed)이 없으면 이 영상용 seed 1개를 뽑아 모든 비트에
         # 재사용한다 — 영상 내 일관, 영상 간 다양성 유지. Veo가 seed로 오디오를 완전 통제하진
@@ -926,18 +944,22 @@ class VideoStudio:
                 # KR "AI 강아지 인터뷰" 유행에 맞춰 로테이션으로 부활.)
                 # lock 모드는 끝 프레임이 모델로 고정되므로 모션 제약을 풀어(_MOTION_LIVELY)
                 # 생동감을 준다(2026-06-29 PO). 기본 image-to-video 경로는 _MOTION_HOLD 유지.
+                # 먹방은 첫 비트에서만 집어 먹는다. 2번 비트부터 food 텍스트를 빼지 않으면
+                # 매 비트가 "간식 가득한 그릇"을 다시 렌더해 먹은 간식이 도로 차오른다
+                # (PO 실측). 그릇의 시각적 연속성은 체이닝된 끝 프레임이 잇는다.
+                beat_food = food if i == 1 else ""
                 prompt = builder.build_beat(
                     beat,
                     off_screen_interviewer=(style.fmt == "interview"),
                     style=style,
-                    motion_release=lock,
+                    motion_release=use_lock or eating,
                     final_cta=(i == len(beats)),
-                    food=food,
+                    food=beat_food,
                 )
                 # 생성 + 끝 잉여 고정 트림(글리치 온상 제거, 8초→약7초, 2026-06-29 PO).
                 # QC 재생성이 같은 단계를 다시 밟도록 헬퍼로 묶었다.
                 clip_path = self._generate_and_trim_clip(
-                    client, prompt, current_frame, frame_path, lock, video_seed
+                    client, prompt, current_frame, frame_path, use_lock, video_seed
                 )
                 # 클립 QC 레이어(2026-07-07 PO): 중간 프리즈·블랙·무발화·꼬리 미수렴을
                 # 잡아 그 비트만 재생성한다. 상한(qc_max_retries) 초과 시 현행 트림·마스킹
@@ -946,7 +968,9 @@ class VideoStudio:
                 # 없고 모션도 자유(_MOTION_FINAL_FREE)라 수렴 실패가 결함이 아니다.
                 # 6차 런 실측: 마지막 비트가 tail_not_converged로 2회 재생성($0.8 낭비).
                 final_beat = i == len(beats)
-                reasons = self._qc_check_beat(clip_path, frame_path, lock, final_beat=final_beat)
+                reasons = self._qc_check_beat(
+                    clip_path, frame_path, use_lock, final_beat=final_beat
+                )
                 attempt = 0
                 while reasons and attempt < self.settings.qc_max_retries:
                     attempt += 1
@@ -959,10 +983,10 @@ class VideoStudio:
                     # 음색 seed 일관성보다 결함 제거가 우선(2026-07-10, 텍스트 QC와 함께).
                     retry_seed = (video_seed + attempt) % (2**31)
                     clip_path = self._generate_and_trim_clip(
-                        client, prompt, current_frame, frame_path, lock, retry_seed
+                        client, prompt, current_frame, frame_path, use_lock, retry_seed
                     )
                     reasons = self._qc_check_beat(
-                        clip_path, frame_path, lock, final_beat=final_beat
+                        clip_path, frame_path, use_lock, final_beat=final_beat
                     )
                 if reasons:
                     log.info("video.veo_fal.qc.fallback", beat=i, reasons=reasons)
@@ -972,7 +996,7 @@ class VideoStudio:
                 # 다음 시작 프레임으로 쓴다. 추출·품질 가드(검정/빈/가로) 실패 시 None → 원본
                 # 마스코트 프레임으로 안전 폴백(망가진 프레임이 다음 클립에 누적되지 않게 하는
                 # 핵심 가드). lock 모드는 끝프레임을 frame_path로 고정하므로 체이닝하지 않는다.
-                if not lock and i < len(beats):
+                if not use_lock and i < len(beats):
                     chained = self._chain_frame(clip_path)
                     if chained is not None:
                         chain_frames.append(chained)
