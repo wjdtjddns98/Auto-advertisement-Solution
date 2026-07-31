@@ -43,6 +43,13 @@ _MAX_TOPIC_CHARS = 200
 # 비트 1개(독립 클립)의 길이(초). veo_fal 경로는 비트마다 8초 클립을 만들어 스티칭한다.
 _CLIP_SEC = 8.0
 
+# B롤 인서트(2026-07-31) — 비트당 1회 덮는 이미지 컷의 길이와 보호 구간(초).
+# 1초 미만은 컷이 아니라 깜빡임으로 읽히고, 2초를 넘으면 말하는 얼굴이 너무 오래 사라진다.
+# 앞 1.2초는 훅(이탈 방어 구간), 끝 1.0초는 CTA 마무리라 절대 덮지 않는다.
+_BROLL_SEC = 1.5
+_BROLL_GUARD_HEAD = 1.2
+_BROLL_GUARD_TAIL = 1.0
+
 # 발화 끝 적응 트림(_trim_to_speech) 파라미터(2026-06-30 PO 실측 보정). Veo 8초 클립은
 # 발화가 ~6초에 끝나도 뒤를 음악/앰비언스로 채워 무음이 안 생긴다 — 종전 silencedetect(EOF
 # 무음) 방식이 발동 못 했다. 대신 RMS 엔벨로프를 떠 발화 본체 직후 "깊은 딥"(발화 끝)을 찾는다.
@@ -1343,6 +1350,27 @@ class VideoStudio:
                 )
             else:
                 final = self._stitch(final_trimmed, final_durations)
+            # B롤 인서트(2026-07-31 PO "장면전환·지루하지 않게"): 비트마다 짧은 이미지
+            # 컷으로 비디오 트랙만 덮어 컷 수를 3배로 늘린다. 자막보다 **먼저** 넣는다 —
+            # 순서가 뒤바뀌면 인서트가 자막을 가린다. 오디오를 안 건드리므로 아래 자막
+            # 타이밍(_beat_spans 공유)에는 영향이 없다. best-effort — 실패 시 원본 유지.
+            broll_img = (
+                self._generate_broll_image(food, style) if self.settings.veo_fal_broll else None
+            )
+            if broll_img:
+                spans = self._beat_spans(
+                    beats, final_durations,
+                    dissolve=getattr(self, "_last_stitch_dissolve", 0.0),
+                    boundary_dissolves=getattr(self, "_last_boundary_dissolves", None),
+                )
+                brolled = self._insert_broll(final, spans, broll_img)
+                if brolled is not None:
+                    if final not in final_trimmed and final not in clips:
+                        try:
+                            Path(final).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    final = brolled
             # 자막 굽기(2026-07-06 PO): 비트별 대사를 하단 한글 자막으로. best-effort —
             # 실패/폰트 없음이면 무자막 원본 유지. 성공 시 자막 전 스티칭 산출물(중간물)은
             # 삭제하되, 단일 비트처럼 _stitch가 입력을 그대로 돌려준 경우는 남긴다.
@@ -2301,6 +2329,174 @@ class VideoStudio:
                 return _asciify_font_path(cand)
         return None
 
+    def _beat_spans(
+        self,
+        beats: list[str],
+        durations: list[float | None],
+        dissolve: float = 0.0,
+        boundary_dissolves: list[float] | None = None,
+    ) -> list[tuple[float, float]]:
+        """스티칭된 영상에서 각 비트가 차지하는 [시작, 끝) 구간(초)을 계산한다.
+
+        디졸브가 걸린 경계에서는 두 클립이 겹치므로 누적 오프셋이 클립 길이의 단순
+        합이 아니다 — 경계 k마다 그 경계의 실적용 디졸브만큼 당겨진다. 전환 시점은
+        디졸브의 중앙으로 잡는다.
+
+        자막(_burn_captions)과 B롤 인서트(_insert_broll)가 **같은 타임라인**을 봐야
+        하므로 계산을 여기 한 곳에 둔다 — 두 벌로 두면 한쪽만 고쳤을 때 인서트가
+        엉뚱한 지점에 박힌다.
+
+        마지막 비트의 끝은 영상 끝까지(여유 1초) — 자막이 조기에 사라지지 않게 하려는
+        기존 동작이다. B롤은 이 여유를 쓰지 않는다(_insert_broll이 자체 마진을 둔다).
+        """
+        dur = [
+            (d if d is not None else _CLIP_SEC)
+            for d in (durations if len(durations or []) == len(beats) else [None] * len(beats))
+        ]
+        bd = (
+            list(boundary_dissolves)
+            if boundary_dissolves is not None and len(boundary_dissolves) == len(beats) - 1
+            else [dissolve] * (len(beats) - 1)
+        )
+        starts = [0.0]
+        cum = dur[0]
+        for k in range(1, len(beats)):
+            d_k = bd[k - 1]
+            starts.append(max(0.0, cum - d_k / 2))
+            cum += dur[k] - d_k
+        ends = starts[1:] + [cum + 1.0]
+        return list(zip(starts, ends, strict=True))
+
+    @staticmethod
+    def _broll_prompt(food: str, style: EpisodeStyle) -> str:
+        """B롤 인서트 컷용 이미지 프롬프트 — 말하는 샷과 **다른 화면**을 만드는 게 목적이다.
+
+        Kontext는 레퍼런스(마스코트)를 강하게 앵커하므로(2026-07-20 실측) 강아지가
+        프레임에 남을 수 있다. 그래도 목적은 달성된다 — 필요한 건 "간식만 나온 컷"이
+        아니라 말하는 정면 샷과 대비되는 구도이기 때문이다. 레퍼런스를 쓰는 덕에 화풍·
+        색감이 본편과 자동으로 맞는다(별도 t2i 모델을 붙이지 않는 이유).
+
+        화면 글자는 금지한다 — 프레임에 글자가 들어가면 기존 QC(_judge_frames_text)가
+        잡는 것과 같은 종류의 오탐 경로를 스스로 만드는 셈이다(2026-07-16 실측: 옷
+        프린트·배경 간판까지 잡혔다). 치수·브랜드명 리터럴도 넣지 않는다(생성기가 그
+        글자를 화면에 렌더한 실측이 있다).
+        """
+        food = food or "a small dog treat"
+        return (
+            f"An extreme close-up shot of {food} resting on a clean surface in "
+            f"{style.setting}, seen from a low three-quarter angle, filling most of a "
+            "tall vertical frame with a softly blurred background. No text, letters, "
+            "words, captions, watermarks, or logos anywhere in the image. "
+            f"{_CINEMATIC_LOOK}"
+        )
+
+    def _generate_broll_image(self, food: str, style: EpisodeStyle) -> str | None:
+        """B롤 인서트용 이미지를 생성한다(best-effort — 실패하면 None으로 인서트를 건너뛴다).
+
+        마스코트 시작 프레임과 **같은 Kontext 경로·같은 레퍼런스**를 쓴다 — 새 t2i
+        클라이언트를 붙이지 않는 이유이자, 인서트 컷의 화풍이 본편과 어긋나지 않는 이유다.
+
+        여기서 실패해도 영상은 이미 완성된 상태다(스티칭 후 호출) — 그래서 예외를 삼키고
+        인서트 없는 원본으로 계속 간다. 이 단계 때문에 편 하나가 죽으면 손해가 더 크다.
+        """
+        ref = self.settings.nutti_mascot_image or None
+        if not ref:
+            return None
+        from nutti.integrations.image_kontext import FalKontextClient
+
+        client = self._nano_client
+        owned = None
+        if client is None:
+            client = owned = FalKontextClient(self.settings, sleep=self._sleep)
+        try:
+            return client.generate_frame(
+                self._broll_prompt(food, style), reference_image_path=ref
+            )
+        except Exception as exc:
+            # 이미지 생성 실패 사유는 다양하고(안전필터 오탐·퇴화 프레임·네트워크) 전부
+            # "인서트 포기"로 같게 처리하면 충분하다 — 좁게 잡을 이유가 없다.
+            log.warning("video.broll.image_failed", error=type(exc).__name__)
+            return None
+        finally:
+            if owned is not None:
+                _close_owned(owned)
+
+    def _insert_broll(
+        self, video: str, spans: list[tuple[float, float]], image: str
+    ) -> str | None:
+        """비트마다 짧은 이미지 컷으로 **비디오 트랙만** 덮는다(best-effort).
+
+        오디오는 `-map 0:a?`로 원본을 그대로 통과시킨다 — 발화·립싱크·자막 타이밍이
+        전혀 바뀌지 않는 것이 이 설계의 핵심이다. 컷 수가 비트 수의 3배로 늘어(A-B-A)
+        8초짜리 원컷이 이어지던 시각 리듬 공백을 메운다.
+
+        보호 구간은 앞 `_BROLL_GUARD_HEAD`초(훅)와 끝 `_BROLL_GUARD_TAIL`초(CTA 마무리).
+        인서트가 비트 경계를 넘거나 보호 구간에 걸리는 비트는 조용히 건너뛴다 — 억지로
+        끼우면 훅이나 마무리를 덮는다.
+
+        실패(ffmpeg 비정상 종료·미설치·길이 미상)는 None을 돌려 호출부가 원본을 그대로
+        쓰게 한다(_burn_captions와 같은 best-effort 계약).
+        """
+        total = self._probe_duration_sec(video)
+        if not total or total <= _BROLL_GUARD_HEAD + _BROLL_GUARD_TAIL + _BROLL_SEC:
+            return None
+        cuts: list[tuple[float, float]] = []
+        for start, end in spans:
+            # 마지막 비트의 end는 자막용 여유(+1초)가 붙어 있어 영상 끝을 넘는다 — 클램프.
+            end = min(end, total)
+            mid = (start + end) / 2
+            a = max(_BROLL_GUARD_HEAD, mid - _BROLL_SEC / 2)
+            b = a + _BROLL_SEC
+            if b > end or b > total - _BROLL_GUARD_TAIL:
+                continue
+            cuts.append((a, b))
+        if not cuts:
+            return None
+
+        import subprocess
+
+        import imageio_ffmpeg
+
+        out_path = Path(self.settings.nutti_media_dir) / f"video_{uuid4().hex[:12]}.mp4"
+        cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", video]
+        for _ in cuts:
+            # 인서트마다 이미지를 독립 입력으로 둔다 — zoompan이 인서트 **자기 구간**에서
+            # 0부터 도므로 켄번스 시작점이 컷 시작과 맞는다(입력 하나를 공유하면 후반
+            # 인서트일수록 줌이 이미 최대라 정지컷이 된다).
+            cmd += ["-loop", "1", "-framerate", "30", "-t", f"{_BROLL_SEC}", "-i", image]
+        parts: list[str] = []
+        prev = "0:v"
+        for i, (a, b) in enumerate(cuts):
+            parts.append(
+                f"[{i + 1}:v]scale={_STITCH_W}:{_STITCH_H}:force_original_aspect_ratio=increase,"
+                f"crop={_STITCH_W}:{_STITCH_H},"
+                f"zoompan=z='1+0.0016*on':d=1:fps=30:s={_STITCH_W}x{_STITCH_H}"
+                ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)',setsar=1,"
+                f"setpts=PTS-STARTPTS+{a:.3f}/TB[b{i}]"
+            )
+            parts.append(
+                f"[{prev}][b{i}]overlay=enable='between(t,{a:.3f},{b:.3f})'"
+                f":eof_action=pass[v{i}]"
+            )
+            prev = f"v{i}"
+        cmd += [
+            "-filter_complex", ";".join(parts),
+            "-map", f"[{prev}]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-c:a", "copy", str(out_path),
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            # 입력 경로가 박힐 수 있는 stderr 원문은 노출하지 않는다(_stitch와 동일 정책).
+            log.warning("video.broll.failed", error=type(exc).__name__)
+            return None
+        if proc.returncode != 0 or not out_path.exists():
+            log.warning("video.broll.failed", returncode=proc.returncode)
+            return None
+        log.info("video.broll.inserted", cuts=len(cuts), path=str(out_path))
+        return str(out_path)
+
     def _burn_captions(
         self,
         video: str,
@@ -2337,22 +2533,7 @@ class VideoStudio:
         # 옵션 파서가 ':'로 다시 쪼갠다 — 드라이브 콜론(C:)은 따옴표만으로 못 지키고
         # 반드시 \: 로 이스케이프해야 한다(실측 2026-07-06: 미이스케이프 시 파스 실패).
         font_ff = str(font).replace("\\", "/").replace(":", r"\:")
-        dur = [
-            (d if d is not None else _CLIP_SEC)
-            for d in (durations if len(durations or []) == len(beats) else [None] * len(beats))
-        ]
-        bd = (
-            list(boundary_dissolves)
-            if boundary_dissolves is not None and len(boundary_dissolves) == len(beats) - 1
-            else [dissolve] * (len(beats) - 1)
-        )
-        starts = [0.0]
-        cum = dur[0]
-        for k in range(1, len(beats)):
-            d_k = bd[k - 1]
-            starts.append(max(0.0, cum - d_k / 2))
-            cum += dur[k] - d_k
-        ends = starts[1:] + [cum + 1.0]  # 마지막 자막은 영상 끝까지(여유 1초)
+        spans = self._beat_spans(beats, durations, dissolve, boundary_dissolves)
         import subprocess
 
         import imageio_ffmpeg
@@ -2368,7 +2549,7 @@ class VideoStudio:
         try:
             filters: list[str] = []
             for k, beat in enumerate(beats):
-                beat_start, beat_end = starts[k], ends[k]
+                beat_start, beat_end = spans[k]
                 beat_width = max(0.0, beat_end - beat_start)
                 segments = [
                     chunk

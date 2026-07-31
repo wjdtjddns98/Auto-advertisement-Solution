@@ -2678,3 +2678,99 @@ def test_no_prompt_template_names_a_child():
             assert not re.search(pattern, text, re.IGNORECASE), (
                 f"{name}에 아동 지시어가 들어갔다(안전필터 거부 위험): {pattern}"
             )
+
+
+def _broll_studio(tmp_path, monkeypatch, *, total: float):
+    """B롤 테스트용 studio + ffmpeg 호출 캡처. 반환한 dict["cmd"]에 인자 목록이 담긴다."""
+    import subprocess as _sp
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        # 호출부가 산출물 존재를 확인하므로 마지막 인자(출력 경로)를 만들어 준다.
+        Path(cmd[-1]).write_bytes(b"x")
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fake_run)
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    monkeypatch.setattr(type(studio), "_probe_duration_sec", lambda self, p: total)
+    return studio, captured
+
+
+def test_insert_broll_protects_hook_and_tail_and_keeps_audio(tmp_path, monkeypatch):
+    """B롤 인서트는 훅·마무리를 덮지 않고, 오디오를 원본 그대로 통과시킨다.
+
+    이 둘이 이 기능의 안전 계약이다:
+    · 앞 1.2초(훅)를 덮으면 이탈 방어 구간을 스스로 가린다.
+    · 끝 1초(CTA 마무리)를 덮으면 마지막 메시지가 그림에 묻힌다.
+    · 오디오를 재인코딩하거나 필터를 걸면 발화·립싱크·자막 타이밍이 어긋난다 —
+      비디오 트랙만 덮는 것이 설계의 핵심이라 `-map 0:a?` + `-c:a copy`를 핀한다.
+    """
+    import re
+
+    studio, captured = _broll_studio(tmp_path, monkeypatch, total=21.0)
+    spans = [(0.0, 7.0), (7.0, 14.0), (14.0, 22.0)]  # 마지막 end는 자막 여유로 총길이 초과
+
+    out = studio._insert_broll("in.mp4", spans, "img.png")
+
+    assert out is not None
+    joined = " ".join(captured["cmd"])
+    assert "-map 0:a?" in joined and "-c:a copy" in joined, "오디오는 원본 그대로여야 한다"
+    starts = [float(m) for m in re.findall(r"between\(t,([0-9.]+),", joined)]
+    ends = [float(m) for m in re.findall(r"between\(t,[0-9.]+,([0-9.]+)\)", joined)]
+    assert starts, "인서트가 하나도 안 잡혔다"
+    assert min(starts) >= 1.2, f"훅 구간을 덮었다: {starts}"
+    assert max(ends) <= 21.0 - 1.0, f"마무리 구간을 덮었다: {ends}"
+
+
+def test_insert_broll_skips_when_video_too_short(tmp_path, monkeypatch):
+    """보호 구간을 빼면 인서트가 들어갈 자리가 없는 짧은 영상에서는 조용히 건너뛴다.
+
+    억지로 끼우면 훅이나 마무리를 덮게 된다 — 그럴 바엔 인서트를 포기하는 게 맞다.
+    """
+    studio, _ = _broll_studio(tmp_path, monkeypatch, total=3.0)
+
+    assert studio._insert_broll("in.mp4", [(0.0, 3.0)], "img.png") is None
+
+
+def test_insert_broll_returns_none_when_ffmpeg_fails(tmp_path, monkeypatch):
+    """ffmpeg 실패는 None — 호출부가 인서트 없는 원본을 그대로 쓴다(best-effort 계약).
+
+    B롤은 영상이 이미 완성된 뒤 얹는 장식이라, 여기서 런을 죽이면 손해가 더 크다.
+    """
+    import subprocess as _sp
+
+    def fail_run(cmd, **kw):
+        class _R:
+            returncode = 1
+
+        return _R()
+
+    monkeypatch.setattr(_sp, "run", fail_run)
+    studio = VideoStudio(_live_settings_with_key(NUTTI_MEDIA_DIR=str(tmp_path)))
+    monkeypatch.setattr(type(studio), "_probe_duration_sec", lambda self, p: 21.0)
+
+    assert studio._insert_broll("in.mp4", [(0.0, 7.0), (7.0, 14.0)], "img.png") is None
+
+
+def test_broll_prompt_bans_on_screen_text():
+    """B롤 이미지 프롬프트는 화면 글자를 금지한다.
+
+    프레임에 글자가 있으면 기존 화면텍스트 QC가 잡는 것과 같은 오탐 경로를 스스로
+    만든다(2026-07-16 실측: 옷 프린트·배경 간판까지 잡혔다).
+    """
+    from nutti.integrations.video import EpisodeStyle, VideoStudio
+
+    style = EpisodeStyle(
+        outfit="a red scarf", setting="a tidy home office", shot="a three-quarter angle"
+    )
+    prompt = VideoStudio._broll_prompt("a small chicken jerky treat", style)
+    assert "No text" in prompt
+    assert "a small chicken jerky treat" in prompt
+    # 치수 리터럴은 생성기가 화면에 렌더한 실측이 있어 넣지 않는다.
+    assert "9:16" not in prompt

@@ -151,6 +151,13 @@ class Settings(BaseSettings):
     veo_fal_punch_in_period_sec: float = Field(
         default=4.0, alias="NUTTI_VEO_FAL_PUNCH_IN_PERIOD_SEC"
     )
+    # B롤 인서트(2026-07-31 PO "장면전환·지루하지 않게"). 비트당 1회, 스티칭된 영상의
+    # **비디오 트랙만** 짧게 이미지 컷으로 덮는다 — 오디오는 원본 그대로라 립싱크·자막
+    # 타이밍이 영향받지 않는다. 컷 수가 비트 수(3)에서 3배로 늘어 시각 리듬이 생긴다.
+    # 이미지는 마스코트 레퍼런스를 쓰는 기존 Kontext 경로를 재사용한다(화풍·색감 자동 정합).
+    # 생성·합성 실패는 best-effort로 무시하고 원본을 그대로 쓴다(런이 죽지 않는다).
+    # 끄려면 NUTTI_VEO_FAL_BROLL=false 한 줄.
+    veo_fal_broll: bool = Field(default=True, alias="NUTTI_VEO_FAL_BROLL")
     # 비트별 대사를 하단 한글 자막으로 굽기(스티칭 후 ffmpeg drawtext, best-effort).
     # 기본 True — 2줄/26px 렌더 결과를 PO가 승인(2026-07-07, 최초 "이상함" 판정 시의
     # 렌더 결함은 26px 수정으로 이미 해소됨). Veo가 임의로 박는 깨진 자막은
