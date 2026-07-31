@@ -141,11 +141,15 @@ class Settings(BaseSettings):
     # 2026-07-29 PO 실물 판정: 2초 주기 줌은 "화면전환이 너무 잦아 눈이 아프다" → 기본
     # 비활성(1.0)으로 되돌림. 잔존 벤치마크(1.5~2초 주기)보다 PO 육안 판정이 우선이다.
     # 다시 켤 때는 진폭·주기를 함께 낮춰서(예: SCALE=1.06, PERIOD=4) 시작할 것.
-    veo_fal_punch_in_scale: float = Field(default=1.0, alias="NUTTI_VEO_FAL_PUNCH_IN_SCALE")
+    # 2026-07-31 PO "지루하지 않게": 위 주석이 남긴 권고값 그대로 재활성(1.06/4초).
+    # 종전 반려는 진폭 1.10~1.15 × 2초 주기의 과한 조합이었다 — 이번엔 진폭을 절반 가까이,
+    # 주기를 2배로 늘려 "눈이 아픈" 축을 둘 다 낮췄다. 다시 반려되면 .env의
+    # NUTTI_VEO_FAL_PUNCH_IN_SCALE=1.0 한 줄로 즉시 되돌릴 수 있다.
+    veo_fal_punch_in_scale: float = Field(default=1.06, alias="NUTTI_VEO_FAL_PUNCH_IN_SCALE")
     # 펀치인 줌 단계가 바뀌는 주기(초). 0 이하면 시간 스텝 없이 클립 전체 고정 줌
     # (= 종전 비트 단위 동작). 1.2초 미만은 노이즈로 읽히므로 1.5~2.5초 권장.
     veo_fal_punch_in_period_sec: float = Field(
-        default=2.0, alias="NUTTI_VEO_FAL_PUNCH_IN_PERIOD_SEC"
+        default=4.0, alias="NUTTI_VEO_FAL_PUNCH_IN_PERIOD_SEC"
     )
     # 비트별 대사를 하단 한글 자막으로 굽기(스티칭 후 ffmpeg drawtext, best-effort).
     # 기본 True — 2줄/26px 렌더 결과를 PO가 승인(2026-07-07, 최초 "이상함" 판정 시의

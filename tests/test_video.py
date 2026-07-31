@@ -476,6 +476,9 @@ def test_stitch_punch_in_time_stepped_when_opted_in(tmp_path, monkeypatch):
             NUTTI_MEDIA_DIR=str(tmp_path),
             NUTTI_VEO_FAL_CROSSFADE_SEC="0.25",
             NUTTI_VEO_FAL_PUNCH_IN_SCALE="1.12",
+            # 주기를 명시 고정한다 — 기본값에 암묵 의존하면 기본 주기를 조정할 때마다
+            # 이 계약 테스트가 깨진다(2026-07-31 실제로 깨졌다: 기본 2→4초).
+            NUTTI_VEO_FAL_PUNCH_IN_PERIOD_SEC="2",
         )
     )
     studio._stitch(["a.mp4", "b.mp4", "c.mp4"], [3.0, 3.0, 3.0])
@@ -585,12 +588,19 @@ def test_retry_render_failure_keeps_previous_clip(tmp_path, monkeypatch):
     assert first.exists(), "폴백 대상이 될 클립을 미리 지우면 안 된다"
 
 
-def test_punch_in_default_disabled():
-    """펀치인 기본값은 비활성(1.0) — 2026-07-29 PO 실물 판정 "화면전환이 너무 잦아
-    눈이 아프다"로 되돌렸다. 켤 때는 env 옵트인(주기·진폭을 함께 낮춰서)."""
+def test_punch_in_default_is_gentle():
+    """펀치인 기본값이 "눈이 아픈" 조합으로 되돌아가지 않게 진폭·주기를 함께 핀한다.
+
+    2026-07-29 PO 실물 판정: 진폭 1.10~1.15 × 2초 주기는 "화면전환이 너무 잦아 눈이
+    아프다" → 비활성(1.0). 2026-07-31 PO "지루하지 않게"로 재활성하되, 그때 주석이 남긴
+    권고값(진폭 1.06 / 주기 4초)을 쓴다 — 반려를 부른 두 축을 모두 낮춘 조합이다.
+    한쪽만 조여도 종전 지적이 재발하므로 둘을 같이 검사한다.
+    """
     from nutti.config import Settings
 
-    assert Settings(NUTTI_ENV="test").veo_fal_punch_in_scale == 1.0
+    s = Settings(NUTTI_ENV="test")
+    assert 1.0 < s.veo_fal_punch_in_scale <= 1.08, "진폭이 커지면 종전 반려가 재발한다"
+    assert s.veo_fal_punch_in_period_sec >= 3.0, "주기가 짧으면 화면전환이 잦다는 지적이 재발한다"
 
 
 def test_concat_fallback_keeps_punch_in(tmp_path, monkeypatch):
